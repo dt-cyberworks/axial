@@ -1,0 +1,30 @@
+# Optional raw-scan egress for nmap-style tools (M3/M4).
+#
+# The HTTP egress-proxy remains the enforcement path for proxy-aware tools.
+# nmap cannot be safely forced through that HTTP proxy, so the control-plane
+# renders a per-engagement NetworkPolicy from active IP/CIDR scope assets via:
+#
+#   GET /internal/engagements/{engagement_id}/raw-egress-policy
+#
+# This sample shows the intended shape. The concrete ipBlock list must be
+# generated from signed scope state, not hand-written from an LLM suggestion.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: runner-raw-egress-{engagement_short_id}
+  labels:
+    app: tool-runner
+    engagement: "{engagement_id}"
+    asm.hettig.online/purpose: nmap-raw-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: tool-runner
+      engagement: "{engagement_id}"
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: "{allowed_target_cidr}"
+            # except:
+            #   - "{explicit_deny_cidr}"

@@ -1,0 +1,9 @@
+celery==5.4.0
+redis==5.2.1
+httpx==0.28.1
+# Passive DNS-Intelligenz (CNAME-Kette, Dangling-Erkennung) in der Discovery-
+# Phase - siehe app/dns_intel.py / REQ-DNS-001..003.
+dnspython==2.6.1
+# Agent spricht ein OpenAI-KOMPATIBLES Interface (base_url + api_key +
+# model): OpenAI, Eden AI, lokaler Gateway. Provider zur Laufzeit via GUI/Env.
+openai==1.59.6

@@ -1,0 +1,3 @@
+ALTER TABLE discovered_asset
+  ADD COLUMN IF NOT EXISTS http_checked_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS http_live BOOLEAN;

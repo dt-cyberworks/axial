@@ -1,0 +1,31 @@
+# Documented, compensated exceptions for the supply-chain scan (REQ-SUPPLY-002).
+# Every entry is a deliberate design decision with a compensating control, not a
+# defect to fix. Keep this list minimal and justified.
+misconfigurations:
+  - id: DS-0002
+    paths:
+      - "raw-egress-gateway/Dockerfile"
+      - "edge/Dockerfile"
+      - "frontend/Dockerfile"
+    statement: >-
+      Intentional root, compensated. raw-egress-gateway runs as root only to
+      install and maintain the nftables deny-all OUTPUT policy; it owns just
+      CAP_NET_ADMIN (cap_drop ALL) with a read_only rootfs and
+      no-new-privileges (see docker-compose.yml). edge is the Caddy image,
+      which binds privileged ports 80/443 as root and drops privileges to its
+      own worker internally. frontend/Dockerfile (nginx) is legacy and not part
+      of the deployed path - production serves the SPA via edge/Dockerfile
+      (Caddy); it is a candidate for removal. Every application service and the
+      offensive tool-runner run as non-root fixed UIDs.
+
+  # The Kubernetes manifests are the FUTURE multi-tenant path (M4+), not part of
+  # the single-VPS Compose deployment. They are hardened as part of the k8s
+  # stage (see docs/deployment-ionos.md ss.10); tracked, not shipped.
+  - id: KSV-0118
+    paths:
+      - "deployment/k8s/*.yaml"
+    statement: "Future k8s path (M4+), not deployed on the single VPS; hardened when the k8s stage is built."
+  - id: KSV-0119
+    paths:
+      - "deployment/k8s/*.yaml"
+    statement: "Future k8s path (M4+), not deployed on the single VPS; hardened when the k8s stage is built."

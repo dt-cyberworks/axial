@@ -1,0 +1,64 @@
+# REQ-IAM-010: single public entrypoint. Automatic HTTPS (Let's Encrypt) for
+# {$ASM_DOMAIN} - Caddy handles ACME/renewal with zero extra config as long
+# as the domain's DNS points at this host and 80/443 are reachable.
+#
+# /internal/* is never routed anywhere here (defense-in-depth on top of
+# control-plane's own require_internal_token check) - it is reachable only
+# from the cluster-internal network, exactly as before this change.
+
+{$ASM_DOMAIN} {
+	# Caddy's GLOBAL directive order runs file_server/try_files before
+	# reverse_proxy regardless of the order written below - confirmed by a
+	# local reproduction (a matcher-scoped reverse_proxy with no route block
+	# silently lost to the SPA fallback, serving index.html for every API path
+	# instead of 502/proxying). An explicit route{} block forces the written
+	# top-to-bottom order instead of the global one - required here.
+	route {
+		# GitHub issue #13: gzip on every response (including authenticated
+		# JSON API responses) is what testssl's BREACH check flags. Scoped to
+		# skip the API paths below - the static SPA shell keeps the
+		# bandwidth benefit, since it has no per-request secrets to leak
+		# this way.
+		@not_api {
+			not path /auth* /engagements* /approvals* /settings* /tools* /admin* /callback*
+		}
+		encode @not_api gzip
+
+		@internal path /internal*
+		respond @internal 404
+
+		# /engagements*, /settings*, and /admin* also match real frontend SPA
+		# routes at the exact same path shape (/engagements/:id and its
+		# sub-routes, bare /settings, /admin/users, /admin/audit) - a hard
+		# navigation/refresh there must still get the SPA shell, not the
+		# backend's JSON. Only the app's own fetch()/XHR calls (which never
+		# send an HTML-preferring Accept header, unlike a real browser
+		# navigation) should reach the backend. Confirmed live: /admin* was
+		# missing here entirely, silently serving index.html for every admin
+		# API call in production; /settings and /engagements/:id were
+		# over-matched, serving the backend's 404 instead of the SPA on a
+		# hard refresh.
+		@api {
+			path /auth* /engagements* /approvals* /settings* /tools* /admin*
+			not header Accept *text/html*
+		}
+		reverse_proxy @api control-plane:8000
+
+		# GitHub issue #21: /callback/openwire/{token} is fetched by a PROBED
+		# TARGET confirming CVE-2023-46604 (REQ-AGENT-027), never by a browser
+		# navigating the SPA - there is no frontend route at this path, so
+		# unlike @api above this carries NO `not header Accept *text/html*`
+		# carve-out. That carve-out exists only to let a hard browser refresh
+		# fall through to the SPA on paths that are ALSO real frontend routes;
+		# applying it here would let a target's HTTP client (some send a
+		# generic Accept: text/html) silently fall through to index.html
+		# instead of reaching the callback handler - the same failure mode
+		# this issue exists to fix, via a different path.
+		@callback path /callback*
+		reverse_proxy @callback control-plane:8000
+
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

@@ -1,0 +1,4 @@
+ALTER TABLE scan_run
+  ADD COLUMN IF NOT EXISTS current_tool TEXT,
+  ADD COLUMN IF NOT EXISTS current_target TEXT,
+  ADD COLUMN IF NOT EXISTS current_started_at TIMESTAMPTZ;

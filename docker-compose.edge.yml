@@ -1,0 +1,40 @@
+# Shared public edge for multiple named ASM environments on ONE host
+# (REQ-MULTIENV-001). Standalone compose project, independent of every named
+# environment's own compose project (docker-compose.yml +
+# docker-compose.prod-noedge.yml) - starting/stopping/redeploying one
+# environment never touches this.
+#
+# network_mode: host is deliberate: it lets Caddy reach each environment's
+# control-plane at 127.0.0.1:<that environment's CONTROL_PLANE_PUBLISH_PORT>,
+# which is exactly where docker-compose.yml binds it on this same host. Nothing
+# else on the host may bind 80/443 while this runs.
+#
+# Bring up once per host (not per environment):
+#   docker compose -p asm_edge -f docker-compose.edge.yml up -d
+#
+# Requires (see docs/deployment-ionos.md for the full runbook):
+#   ASM_DOMAIN_PROD, ASM_DOMAIN_INT   - DNS already pointing at this host
+#   PROD_API_PORT, INT_API_PORT       - each environment's CONTROL_PLANE_PUBLISH_PORT
+#   PROD_FRONTEND_DIR, INT_FRONTEND_DIR - each environment's built frontend/dist,
+#                                          refreshed whenever that environment deploys
+
+services:
+  edge:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    network_mode: "host"
+    environment:
+      ASM_DOMAIN_PROD: ${ASM_DOMAIN_PROD:?set ASM_DOMAIN_PROD to the prod hostname}
+      ASM_DOMAIN_INT: ${ASM_DOMAIN_INT:?set ASM_DOMAIN_INT to the int hostname}
+      PROD_API_PORT: ${PROD_API_PORT:-8000}
+      INT_API_PORT: ${INT_API_PORT:-8001}
+    volumes:
+      - ./edge-shared/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${PROD_FRONTEND_DIR:-./edge-shared/frontend-prod}:/srv/frontend-prod:ro
+      - ${INT_FRONTEND_DIR:-./edge-shared/frontend-int}:/srv/frontend-int:ro
+      - edge_data:/data
+      - edge_config:/config
+    restart: unless-stopped
+
+volumes:
+  edge_data: {}
+  edge_config: {}

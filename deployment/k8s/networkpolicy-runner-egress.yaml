@@ -1,0 +1,16 @@
+# Scope-Grenze auf Netzwerkebene (Deployment-Architektur Kap. 5.2, Listing 4).
+# Der Runner darf standardmaessig ausschliesslich den Egress-Proxy erreichen.
+# Selbst wenn das Scope Gateway umgangen wuerde, blockt diese Policy jeden
+# anderen Traffic. Fuer nmap/raw scans kommt eine zweite, pro Engagement
+# generierte ipBlock-Policy hinzu (networkpolicy-runner-raw-egress.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: runner-egress-only}
+spec:
+  podSelector: {matchLabels: {app: tool-runner}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app: egress-proxy}}
+      ports: [{protocol: TCP, port: 3128}]
+  # Ohne zusaetzliche raw-egress-policy: kein weiterer Egress erlaubt.

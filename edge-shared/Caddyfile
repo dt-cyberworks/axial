@@ -1,0 +1,119 @@
+# REQ-MULTIENV-001: shared public edge for multiple named ASM environments on
+# one host. This is the ONLY public 80/443 listener on the host; every named
+# environment's own control-plane binds to 127.0.0.1 on its own port
+# (docker-compose.yml + docker-compose.prod-noedge.yml) and is otherwise
+# unreachable from outside. Independent of any one environment's lifecycle -
+# stopping/redeploying one environment does not affect the other's site (it
+# just 502s while that environment is down, which is expected).
+#
+# /internal/* is never routed anywhere here (defense-in-depth on top of each
+# control-plane's own require_internal_token check) - it is reachable only
+# from that environment's own internal Docker network.
+
+{$ASM_DOMAIN_PROD} {
+	# Caddy's GLOBAL directive order runs file_server/try_files before
+	# reverse_proxy regardless of the order written below - confirmed by a
+	# local reproduction (a matcher-scoped reverse_proxy with no route block
+	# silently lost to the SPA fallback, serving index.html for every API path
+	# instead of 502/proxying). An explicit route{} block forces the written
+	# top-to-bottom order instead of the global one - required here.
+	route {
+		# GitHub issue #13: gzip on every response (including authenticated
+		# JSON API responses) is what testssl's BREACH check flags - a
+		# compression-oracle side channel that needs a response reflecting
+		# attacker-controlled input next to a secret in the same compressed
+		# body. Scoped to skip the API paths below (encode wraps the response
+		# writer only for requests THIS matcher accepts, so a request that
+		# matches @api never gets a compressed response at all) - the static
+		# SPA shell keeps the bandwidth benefit, since it has no per-request
+		# secrets to leak this way.
+		@not_api {
+			not path /auth* /engagements* /approvals* /settings* /tools* /admin* /callback*
+		}
+		encode @not_api gzip
+
+		@internal path /internal*
+		respond @internal 404
+
+		# /engagements*, /settings*, and /admin* also match real frontend SPA
+		# routes at the exact same path shape (/engagements/:id and its
+		# sub-routes, bare /settings, /admin/users, /admin/audit) - a hard
+		# navigation/refresh there must still get the SPA shell, not the
+		# backend's JSON. Only the app's own fetch()/XHR calls (which never
+		# send an HTML-preferring Accept header, unlike a real browser
+		# navigation) should reach the backend. Confirmed live: /admin* was
+		# missing here entirely, silently serving index.html for every admin
+		# API call in production; /settings and /engagements/:id were
+		# over-matched, serving the backend's 404 instead of the SPA on a
+		# hard refresh.
+		@api {
+			path /auth* /engagements* /approvals* /settings* /tools* /admin*
+			not header Accept *text/html*
+		}
+		reverse_proxy @api 127.0.0.1:{$PROD_API_PORT}
+
+		# GitHub issue #21: see edge/Caddyfile's matching comment - /callback*
+		# is fetched by a probed target (REQ-AGENT-027), never a browser, so
+		# it deliberately carries no `not header Accept *text/html*` carve-out.
+		@callback path /callback*
+		reverse_proxy @callback 127.0.0.1:{$PROD_API_PORT}
+
+		root * /srv/frontend-prod
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# {$ASM_DOMAIN_INT} was removed on 2026-08-07 (int's backend was stopped but
+# this edge kept serving its static SPA shell publicly with a dead API behind
+# it - flagged by the platform's own scan as internal tooling needlessly
+# exposed) and restored on 2026-08-09 alongside a real fresh install with the
+# multi-user/MFA backend actually live behind it - the same auth posture the
+# prod block already runs with, not a repeat of the original gap.
+#
+# NOTE for whoever edits this file on the host: it is bind-mounted read-only
+# as a SINGLE FILE. A `cp` that swaps the inode leaves the running container
+# pinned to the old one - a bare `caddy reload` after replacing it is NOT
+# enough. Recreate the container so it re-mounts:
+# `docker compose -p asm_edge -f docker-compose.edge.yml up -d
+# --force-recreate edge` (confirmed live 2026-08-07).
+
+{$ASM_DOMAIN_INT} {
+	route {
+		# GitHub issue #13: see the matching comment in the prod block above -
+		# gzip is scoped away from the API paths, kept for the static SPA
+		# shell.
+		@not_api {
+			not path /auth* /engagements* /approvals* /settings* /tools* /admin* /callback*
+		}
+		encode @not_api gzip
+
+		@internal path /internal*
+		respond @internal 404
+
+		# /engagements*, /settings*, and /admin* also match real frontend SPA
+		# routes at the exact same path shape (/engagements/:id and its
+		# sub-routes, bare /settings, /admin/users, /admin/audit) - a hard
+		# navigation/refresh there must still get the SPA shell, not the
+		# backend's JSON. Only the app's own fetch()/XHR calls (which never
+		# send an HTML-preferring Accept header, unlike a real browser
+		# navigation) should reach the backend. Confirmed live: /admin* was
+		# missing here entirely, silently serving index.html for every admin
+		# API call in production; /settings and /engagements/:id were
+		# over-matched, serving the backend's 404 instead of the SPA on a
+		# hard refresh.
+		@api {
+			path /auth* /engagements* /approvals* /settings* /tools* /admin*
+			not header Accept *text/html*
+		}
+		reverse_proxy @api 127.0.0.1:{$INT_API_PORT}
+
+		# GitHub issue #21: see edge/Caddyfile's matching comment.
+		@callback path /callback*
+		reverse_proxy @callback 127.0.0.1:{$INT_API_PORT}
+
+		root * /srv/frontend-int
+		try_files {path} /index.html
+		file_server
+	}
+}

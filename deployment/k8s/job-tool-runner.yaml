@@ -1,0 +1,32 @@
+# Ephemerer Job pro Auftrag (Deployment-Architektur Kap. 5.1, Listing 3).
+# {engagement_id} wird von der control-plane beim Start eines aktiven Scans
+# (M4+, source=bug_bounty/customer) templatiert.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scan-{engagement_id}
+  labels: {app: tool-runner, engagement: "{engagement_id}"}
+spec:
+  activeDeadlineSeconds: 3600     # harte Laufzeit-/Kostengrenze (Budget-Konzept, Architektur Kap. 4.2)
+  backoffLimit: 0                 # kein Auto-Retry offensiver Jobs
+  ttlSecondsAfterFinished: 300    # Pod danach automatisch loeschen - kein Zustand bleibt haengen
+  template:
+    metadata:
+      labels: {app: tool-runner, engagement: "{engagement_id}"}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: hexstrike
+          image: registry.internal/asm/tool-runner:pinned-sha
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"], add: ["NET_RAW"]}
+          env:
+            - {name: HTTPS_PROXY, value: "http://egress-proxy:3128"}
+            - {name: ASM_ENGAGEMENT_ID, value: "{engagement_id}"}
+          resources:
+            limits: {cpu: "2", memory: 2Gi}

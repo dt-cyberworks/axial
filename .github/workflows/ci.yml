@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: control-plane (unit + integration)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: asm
+          POSTGRES_PASSWORD: asm
+          POSTGRES_DB: asm_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U asm"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://asm:asm@localhost:5432/asm_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: control-plane
+        run: pip install -r requirements.txt
+      - name: Unit tests (no infra)
+        working-directory: control-plane
+        run: python -m pytest tests -q --ignore=tests/integration
+      - name: Integration tests (gateway vs. Postgres, incl. negative test + KEV-rescore regression)
+        working-directory: control-plane
+        run: python -m pytest tests/integration -q
+      - name: worker unit tests (nmap-Parser)
+        working-directory: worker
+        run: |
+          pip install -r requirements.txt
+          python -m pytest tests -q
+
+  frontend:
+    name: operator-console (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install and build
+        working-directory: frontend
+        run: |
+          npm install
+          npm run build
+
+  images:
+    name: docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # GitHub issue #20: a floating `git clone` with no --branch/--tag pin
+      # and no follow-up `git checkout <sha>` resolves to whatever upstream
+      # happens to be at build time. A grep-level lint is cheap and catches
+      # this class of mistake from recurring, rather than relying on every
+      # future Dockerfile author remembering to pin by hand.
+      - name: Lint - no floating git refs in any Dockerfile
+        run: |
+          set -e
+          # RUN instructions commonly span multiple lines via trailing `\` -
+          # join those first so e.g. `git clone <url> \` on one line and
+          # `&& git checkout --detach "$SHA"` on the next is correctly seen
+          # as ONE pinned instruction, not a floating clone.
+          fail=0
+          for f in $(grep -rlE 'git clone' --include='*Dockerfile' --include='*.Dockerfile' .); do
+            while IFS= read -r joined; do
+              case "$joined" in \#*) continue ;; esac
+              case "$joined" in
+                *"git clone"*)
+                  if ! printf '%s' "$joined" | grep -qE '(--branch|--tag|git checkout|git fetch)'; then
+                    echo "::error file=$f::floating git clone with no pinned ref: $joined"
+                    fail=1
+                  fi
+                  ;;
+              esac
+            done < <(sed -E ':a;/\\$/{N;s/\\\n[[:space:]]*/ /;ba}' "$f")
+          done
+          exit $fail
+      - name: Build control-plane image
+        run: docker build -t asm/control-plane:ci control-plane
+      - name: Build worker image
+        run: docker build -t asm/worker:ci worker
+      - name: Build egress-proxy image
+        run: docker build -t asm/egress-proxy:ci egress-proxy
+      # GitHub issue #20: previously only the three images above were built
+      # in CI - tool-runner (the offensive execution plane), raw-egress-
+      # gateway, and edge could break or silently pull in changed upstream
+      # code with nothing catching it until an actual deploy.
+      - name: Build tool-runner image
+        run: docker build -f tool-runner/runner.Dockerfile -t asm/tool-runner:ci tool-runner
+      - name: Build raw-egress-gateway image
+        run: docker build -t asm/raw-egress-gateway:ci raw-egress-gateway
+      - name: Build edge image
+        run: docker build -f edge/Dockerfile -t asm/edge:ci .

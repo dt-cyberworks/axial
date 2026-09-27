@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const repo = resolve(import.meta.dirname, "../..");
+const read = (path) => readFileSync(resolve(repo, path), "utf8");
+const wizard = read("frontend/src/pages/EngagementWizard.tsx");
+const client = read("frontend/src/api/client.ts");
+const requirement = read("docs/requirements/backlog-engagement-port-range.md");
+const udpRequirement = read("docs/requirements/backlog-udp-discovery.md");
+const activity = read("frontend/src/lib/runActivity.ts");
+const edit = read("frontend/src/pages/EngagementEdit.tsx");
+
+assert.match(requirement, /## REQ-SCAN-013:/);
+assert.match(edit, /TCP port from/, "edit page must expose the TCP port range, not only the creation wizard");
+assert.match(edit, /disabled=\{!isDraft\}/, "edit page must gate the scan-envelope fields on draft status");
+assert.match(edit, /isDraft \? \{/, "edit mutation must only submit envelope fields while draft");
+assert.match(udpRequirement, /## REQ-SCAN-011:/);
+assert.match(client, /tcp_port_from: number/);
+assert.match(client, /udp_discovery_enabled: boolean/);
+assert.match(wizard, /Maximum authorized port range/, "wizard step 1 must frame the range as the engagement ceiling (REQ-PORTSCOPE-001)");
+assert.match(wizard, /firstPort > lastPort/);
+assert.match(wizard, /Use the same start and end value to authorize one port only/);
+assert.match(wizard, /Enable bounded UDP discovery/);
+assert.match(wizard, /53, 123, 161, 443, 500, 1900, 4500, 5060, 5353/);
+assert.match(wizard, /udp_discovery_enabled: udpDiscoveryEnabled/);
+assert.match(activity, /UDP states/);
+assert.match(activity, /udp_results_ambiguous/);
+assert.match(activity, /inconclusive, not a clean target/);
+assert.match(activity, /Nmap completed.*discovery/);
+console.log("ok - REQ-SCAN-011/013 scan envelope is created, validated, and reviewed");

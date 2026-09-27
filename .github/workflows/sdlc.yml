@@ -1,0 +1,63 @@
+name: SDLC and traceability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  requirements:
+    name: requirements-as-code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate requirements and traceability
+        run: python3 scripts/requirements_pipeline.py check
+      - name: Test pipeline implementation
+        run: |
+          python3 -m pip install pytest
+          python3 -m pytest scripts/tests -q
+
+  frontend-requirements:
+    name: executable frontend requirements
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Run requirement tests
+        working-directory: frontend
+        run: npm run test:requirements
+
+  supply-chain:
+    name: supply-chain scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # REQ-SUPPLY-002: fail on any fixable HIGH/CRITICAL dependency vuln,
+      # committed secret, or Dockerfile/compose misconfiguration.
+      - name: Trivy filesystem scan (deps + secrets)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Trivy config scan (Dockerfiles + compose)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+

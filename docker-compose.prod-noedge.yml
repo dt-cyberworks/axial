@@ -1,0 +1,22 @@
+# Production credentials/behavior WITHOUT a built-in edge/Caddy (REQ-MULTIENV-001).
+# Use this instead of docker-compose.prod.yml when this host runs MULTIPLE
+# named environments (e.g. int + prod) behind one shared edge proxy
+# (docker-compose.edge.yml, which is the host's only public 80/443 listener).
+#
+# For a single-environment host, keep using docker-compose.prod.yml (its own
+# built-in Caddy) exactly as documented in docs/deployment-ionos.md — this file
+# is strictly additive and does not change that path.
+#
+# Example (see docs/deployment-ionos.md for the full multi-environment runbook):
+#   docker compose -p asm_prod --env-file .env.prod \
+#     -f docker-compose.yml -f docker-compose.prod-noedge.yml \
+#     --profile runner up -d --build
+#
+# Same credential gate as docker-compose.prod.yml: ENVIRONMENT=production makes
+# app/config.py's own validator fail closed on any secret still at its dev
+# default, so a misconfigured deploy refuses to start rather than run insecurely.
+
+services:
+  control-plane:
+    environment:
+      ENVIRONMENT: production

@@ -1,0 +1,374 @@
+# Docker Compose fuer M1-M3 (lab / own_domain), ein Host - Deployment-
+# Architektur Kap. 4/7.3. Netz-Segmentierung wie Listing 2 dort: 'ctrl' und
+# 'runner' sind internal (keine Route ins Internet), der einzige Weg nach
+# draussen fuehrt ueber egress-proxy.
+#
+# WICHTIG (Abweichung von Listing 2): Ein Docker-Netz mit internal:true
+# blockiert nicht nur Egress, sondern verhindert AUCH das Veroeffentlichen von
+# Host-Ports. control-plane (API/Operator-Konsole) muss aber vom Host
+# erreichbar sein. Deshalb gibt es ein zusaetzliches, nicht-internes 'edge'-
+# Netz nur fuer Ingress. Docker kann "Ingress ja, Egress nein" nicht als
+# Netz-Flag ausdruecken - in Produktion wird der control-plane-Egress daher
+# auf Infrastruktur-/Firewall-Ebene beschraenkt (nicht via internal:true) und
+# die API hinter einen Reverse-Proxy gelegt. Siehe docs/deployment.md.
+#
+# 'worker' haengt zusaetzlich am 'egress'-Netz, weil die passive Discovery-
+# Phase (Spezifikation Kap. 3.1) oeffentliche OSINT-Quellen wie crt.sh direkt
+# abfragt - das sind keine Kundensysteme. Jeder aktive Call gegen ein Ziel
+# geht weiterhin ausschliesslich ueber den egress-proxy (runner-Netz).
+#
+# tool-runner ist Profil-gebunden (M1/lab braucht ihn noch nicht aktiv, s.
+# Architektur Kap. 7 Roadmap): docker compose --profile runner up
+
+services:
+  postgres:
+    image: postgres:16@sha256:be01cf82fc7dbba824acf0a82e150b4b360f3ff93c6631d7844af431e841a95c
+    environment:
+      # REQ-PRODDEPLOY-001: credentials come from env so production runs a real
+      # password (the control-plane gate rejects the asm:asm default DATABASE_URL).
+      # Dev keeps asm/asm via the defaults, so the running stack is unchanged.
+      POSTGRES_USER: ${POSTGRES_USER:-asm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-asm}
+      POSTGRES_DB: ${POSTGRES_DB:-asm}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [ctrl]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-asm}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: postgres:16@sha256:be01cf82fc7dbba824acf0a82e150b4b360f3ff93c6631d7844af431e841a95c
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [ctrl]
+    volumes:
+      - ./control-plane/migrations:/migrations:ro
+    # Idempotent: Schema nur anlegen, wenn die engagement-Tabelle noch fehlt.
+    # So ist ein wiederholtes `docker compose up` gefahrlos (kein Fehler bei
+    # bereits migrierter DB). Weitere Migrationen kaemen hier als Kette dazu.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        DB="postgresql://${POSTGRES_USER:-asm}:${POSTGRES_PASSWORD:-asm}@postgres:5432/${POSTGRES_DB:-asm}"
+        # A brand-new data volume makes postgres run initdb, then internally
+        # restart once more before it is truly ready. `depends_on: condition:
+        # service_healthy` (pg_isready) can report healthy during that short
+        # transient window - pg_isready only checks that SOME server accepts
+        # connections, not that OUR role/password already exist on it. Observed
+        # in practice on a genuinely fresh volume's very first boot (password
+        # authentication failures partway through migrations). Wait for a real
+        # authenticated query to succeed before running anything else.
+        for i in $$(seq 1 60); do
+          psql "$$DB" -tAc "SELECT 1" >/dev/null 2>&1 && break
+          echo "waiting for postgres to accept the real application credentials (attempt $$i/60)..."
+          sleep 1
+        done
+        psql "$$DB" -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null
+        psql "$$DB" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS schema_migration (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
+        if psql "$$DB" -tAc "SELECT to_regclass('public.engagement')" | grep -q engagement; then
+          psql "$$DB" -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migration(version) VALUES ('0001_init_schema.sql') ON CONFLICT DO NOTHING"
+        fi
+        for f in /migrations/*.sql; do
+          version="$$(basename "$$f")"
+          if psql "$$DB" -tAc "SELECT 1 FROM schema_migration WHERE version='$$version'" | grep -q 1; then
+            echo "migration $$version already applied - skipping"
+          else
+            echo "applying $$version"
+            psql "$$DB" -v ON_ERROR_STOP=1 -f "$$f"
+            psql "$$DB" -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migration(version) VALUES ('$$version')"
+          fi
+        done
+        # REQ-PRODDEPLOY-001: migration 0007 creates the read-only egress-proxy
+        # role with its dev-default password. In production, rotate it to the
+        # injected secret so the proxy's PROXY_DATABASE_URL uses a real password.
+        # Dev leaves PROXY_DB_PASSWORD unset, so this is a no-op there.
+        PROXY_PW="${PROXY_DB_PASSWORD:-}"
+        if [ -n "$$PROXY_PW" ]; then
+          echo "rotating asm_proxy_ro password"
+          psql "$$DB" -v ON_ERROR_STOP=1 -c "ALTER ROLE asm_proxy_ro PASSWORD '$$PROXY_PW'"
+        fi
+
+  redis:
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    networks: [ctrl]
+
+  minio:
+    # REQ-SUPPLY-001: pinned by digest. Bump with scripts/pin_images.sh.
+    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data --console-address ":9001"
+    environment:
+      # REQ-PRODDEPLOY-001: MinIO's root credentials come from the same values
+      # the control-plane uses for S3, so production runs a real secret (the
+      # production gate rejects the minioadmin default) and both sides agree.
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - miniodata:/data
+    networks: [ctrl, edge]        # edge nur, damit die Dev-Konsole (9001) erreichbar ist
+    ports:
+      # REQ-PRODDEPLOY-001: the console publish host is templated (like
+      # control-plane) so production binds it to 127.0.0.1 - reachable only via
+      # an SSH tunnel, never the public internet. Dev keeps 0.0.0.0. A compose
+      # overlay cannot REMOVE a base ports entry (lists merge), so it must be
+      # templated here rather than dropped in docker-compose.prod.yml.
+      # REQ-MULTIENV-002: the host-side PORT is also templated (default
+      # unchanged: 9001) so two named environments on one host never collide.
+      - "${MINIO_CONSOLE_PUBLISH_HOST:-0.0.0.0}:${MINIO_CONSOLE_PUBLISH_PORT:-9001}:9001"
+
+  control-plane:
+    build: ./control-plane
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    env_file:
+      - path: .env
+        required: false   # inline environment deckt M1 ab; .env ist optional
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://asm:asm@postgres:5432/asm}
+      REDIS_URL: redis://redis:6379/0
+      # LLM-Provider Env-DEFAULTS (Agent). Zur Laufzeit ueberschreibbar via
+      # GUI (PUT /settings/llm -> app_setting). Der Worker holt die aktive
+      # Konfig ueber /internal/llm-config von hier.
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-in-dev}
+      OPERATOR_API_TOKEN: ${OPERATOR_API_TOKEN:-change-me-in-dev}
+      # GitHub issue #17: control-plane does not call the runner itself - read
+      # here purely so its own production validator can catch this token
+      # being left at its dev default too, not only tool-runner's separate
+      # startup guard.
+      RUNNER_API_TOKEN: ${RUNNER_API_TOKEN:-runner-change-me-in-dev}
+      # GitHub issue #22: same reasoning as RUNNER_API_TOKEN just above.
+      RAW_EGRESS_API_TOKEN: ${RAW_EGRESS_API_TOKEN:-raw-egress-api-change-me-in-dev}
+      # REQ-AGENT-027: base URL embedded in the OpenWire callback link sent
+      # to a probed target - must be this environment's real public domain
+      # on int/prod (see the REQ-MULTIENV-002 note below on why this needs
+      # to be explicit here, not just set in .env.int/.env.prod).
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      # REQ-MULTIENV-002: was previously delivered ONLY via the fixed-path
+      # `env_file: .env` below, which silently does not fire for a named
+      # multi-environment deployment (.env.prod/.env.int, selected via
+      # --env-file) - only for a file literally named .env. Explicit
+      # interpolation here makes it work regardless of which env file was used.
+      SCOPE_SIGNING_SECRET: ${SCOPE_SIGNING_SECRET:-change-me-in-dev}
+      RAW_EGRESS_SIGNING_SECRET: ${RAW_EGRESS_SIGNING_SECRET:-raw-egress-change-me-in-dev}
+      RAW_EGRESS_LEASE_TTL_SECONDS: ${RAW_EGRESS_LEASE_TTL_SECONDS:-900}
+      RAW_EGRESS_MATERIALIZATION_MAX_AGE_SECONDS: ${RAW_EGRESS_MATERIALIZATION_MAX_AGE_SECONDS:-900}
+      # REQ-IAM-004: encrypts TOTP secrets at rest. No key ships in source -
+      # set MFA_ENCRYPTION_KEY in .env (see .env.example to generate one). Empty
+      # here is rejected in production and unusable in dev (Fernet needs a real key).
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
+      # GitHub issue #25: encrypts LLM/NVD provider API keys at rest (same
+      # pattern as MFA_ENCRYPTION_KEY, deliberately a DISTINCT key/variable).
+      # See .env.example to generate one. Empty is rejected in production.
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
+      SETTINGS_ENCRYPTION_KEY_PREVIOUS: ${SETTINGS_ENCRYPTION_KEY_PREVIOUS:-}
+      # 300 war zu niedrig: ein Full-Range-Scan (1-65535) eines ueberwiegend
+      # gefilterten Hosts erreicht bei 300 pps das --host-timeout (280s), nmap
+      # bricht den Host ab und meldet 0 offene Ports. Bei 1000 pps laeuft der
+      # Full-Scan im Zeitfenster durch. Fuer Bug-Bounty-Programme mit
+      # Rate-Limit-Vorgaben ggf. wieder senken.
+      NMAP_MAX_RATE: ${NMAP_MAX_RATE:-1000}
+      # GitHub issue #35: maximum address count a cidr scope asset may cover
+      # (65536 = a /16 for IPv4). Conservative, order-of-magnitude default -
+      # see docs/requirements/scope-asset-validation.md.
+      MAX_HOST_DISCOVERY_ADDRESSES: ${MAX_HOST_DISCOVERY_ADDRESSES:-65536}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-asm-evidence}
+    networks: [ctrl, edge]        # ctrl: DB/Queue (intern). edge: API vom Host erreichbar.
+    ports:
+      # Dev: erreichbar auf allen Interfaces (npm run dev spricht lokal dagegen).
+      # Produktion (REQ-IAM-010): CONTROL_PLANE_PUBLISH_HOST=127.0.0.1 setzen -
+      # dann ist die API nur vom Host selbst erreichbar, nie oeffentlich direkt;
+      # Caddy (docker-compose.prod.yml) erreicht control-plane ohnehin ueber das
+      # interne Docker-Netz, nicht ueber diesen Host-Port.
+      # REQ-MULTIENV-002: der Host-PORT ist ebenfalls templated (Default
+      # unveraendert: 8000), damit zwei benannte Umgebungen auf einem Host nie
+      # kollidieren (z. B. prod=8000, int=8001) - der shared edge (docker-
+      # compose.edge.yml) erreicht jede Umgebung ueber ihren eigenen Port.
+      - "${CONTROL_PLANE_PUBLISH_HOST:-0.0.0.0}:${CONTROL_PLANE_PUBLISH_PORT:-8000}:8000"
+
+  worker:
+    build: ./worker
+    depends_on: [control-plane, redis]
+    env_file:
+      - path: .env
+        required: false   # inline environment deckt M1 ab; .env ist optional
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CONTROL_PLANE_URL: http://control-plane:8000
+      # M1-Lab-Testloop nutzt tool-runner-lab (lab/lab-compose.yml). Fuer
+      # own_domain/customer (M3+) auf den echten tool-runner-Dienst zeigen
+      # (profiles: ["runner"], docker compose --profile runner up).
+      # HexStrike teilt den Netzwerk-Namespace des Raw-Egress-Gateways.
+      TOOL_RUNNER_URL: http://raw-egress-gateway:8888
+      RAW_EGRESS_GATEWAY_URL: http://raw-egress-gateway:8765
+      # GitHub issue #22: shared secret authenticating the worker to the
+      # raw-egress gateway's reservation/lease API - must equal the
+      # gateway's own value below.
+      RAW_EGRESS_API_TOKEN: ${RAW_EGRESS_API_TOKEN:-raw-egress-api-change-me-in-dev}
+      RAW_EGRESS_QUEUE_WAIT_SECONDS: ${RAW_EGRESS_QUEUE_WAIT_SECONDS:-1800}
+      RAW_EGRESS_QUEUE_POLL_SECONDS: ${RAW_EGRESS_QUEUE_POLL_SECONDS:-1}
+      # HTTP-Tools (nikto/nuclei) nutzen den Egress-Proxy explizit (-useproxy).
+      # Adresse aus Sicht des tool-runner. Leer lassen -> Tools verbinden direkt
+      # (nur im Lab sinnvoll, wo die Ziele im selben Netz liegen).
+      EGRESS_PROXY_URL: http://egress-proxy:3128
+      # Agent (Phase 4): OpenAI-kompatibler Provider als Env-FALLBACK.
+      # Primaer holt der Worker die Konfig von der control-plane (via GUI/DB
+      # gesetzt). Ohne Provider laeuft die Phase als No-Op.
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-in-dev}
+      # REQ-HARDEN-001: shared secret the worker presents to the tool-runner's
+      # execution boundary. The runner rejects any request without it, so a
+      # compromised peer on the runner/egress network cannot drive /api/command.
+      RUNNER_API_TOKEN: ${RUNNER_API_TOKEN:-runner-change-me-in-dev}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      # Verfuegbar nur wenn das Lease-Gateway erreichbar ist und seine
+      # deny-all nftables-Policy bestaetigt. Ohne runner-Profil bleibt es aus.
+      ASM_RAW_NETWORK_MODE: lease-gateway
+      # REQ-AGENT-026 already moved the code-level default to 8192; this
+      # compose default had drifted and stayed at the pre-026 value of 4096
+      # (found live 2026-08-11 while debugging REQ-AGENT-026's retry-ceiling
+      # fix - the env var here silently overrides the module default).
+      ASM_AGENT_MAX_TOKENS: ${ASM_AGENT_MAX_TOKENS:-8192}
+      ASM_AGENT_LENGTH_RETRIES: ${ASM_AGENT_LENGTH_RETRIES:-2}
+      ASM_AGENT_RETRY_MAX_TOKENS: ${ASM_AGENT_RETRY_MAX_TOKENS:-8192}
+      # GitHub issue #29: converts "hangs forever" into "fails visibly" - see
+      # the long comment in worker/app/celery_app.py for why these defaults
+      # are deliberately generous (a manual-approval wait can legitimately
+      # block the SAME task for up to 24h). Defaults here must match the
+      # Python-side ones (same drift risk noted above for ASM_AGENT_MAX_TOKENS).
+      SCAN_TASK_SOFT_TIME_LIMIT_SECONDS: ${SCAN_TASK_SOFT_TIME_LIMIT_SECONDS:-172800}
+      SCAN_TASK_TIME_LIMIT_SECONDS: ${SCAN_TASK_TIME_LIMIT_SECONDS:-176400}
+      REAP_STALE_RUNS_INTERVAL_SECONDS: ${REAP_STALE_RUNS_INTERVAL_SECONDS:-60}
+    # ctrl: DB/control-plane. egress: passive OSINT-Queries (crt.sh). control:
+    # Kontrollkanal zum tool-runner (getrennt vom Datenkanal der Scan-Ziele).
+    networks: [ctrl, egress, control]
+
+  egress-proxy:
+    build: ./egress-proxy
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${PROXY_DATABASE_URL:-postgresql+psycopg://asm_proxy_ro:asm-proxy-dev@postgres:5432/asm}
+      # Per-Engagement-Modus: gesetzt -> Proxy ist an EINEN Auftrag gebunden
+      # und braucht keinen X-ASM-Engagement-Id-Header (ermoeglicht rohe Tools
+      # wie nikto -useproxy). Leer -> Multiplex-Modus (Header pflicht). Fuer
+      # own_domain-Scans: `ASM_ENGAGEMENT_ID=<uuid> docker compose up -d egress-proxy`.
+      ASM_ENGAGEMENT_ID: ${ASM_ENGAGEMENT_ID:-}
+      CONTROL_PLANE_URL: http://control-plane:8000
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-in-dev}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      EGRESS_MAX_CONCURRENT_CLIENTS: ${EGRESS_MAX_CONCURRENT_CLIENTS:-64}
+    # ctrl: liest scope_asset/engagement direkt (Kap. 6). egress: Bruecke
+    # nach draussen. runner: muss vom tool-runner erreichbar sein - im
+    # Original-Listing 2 der Deployment-Architektur fehlt diese Bruecke,
+    # ohne sie koennte der Runner den Proxy nicht ansprechen.
+    networks: [ctrl, runner, egress]
+
+  raw-egress-gateway:
+    build: ./raw-egress-gateway
+    profiles: ["runner"]
+    depends_on:
+      egress-proxy:
+        condition: service_started
+    environment:
+      RAW_EGRESS_SIGNING_SECRET: ${RAW_EGRESS_SIGNING_SECRET:-raw-egress-change-me-in-dev}
+      # GitHub issue #22: must equal the worker's own value above.
+      RAW_EGRESS_API_TOKEN: ${RAW_EGRESS_API_TOKEN:-raw-egress-api-change-me-in-dev}
+      RAW_EGRESS_GATEWAY_PORT: 8765
+      RAW_EGRESS_MAX_CONCURRENT_LEASES: ${RAW_EGRESS_MAX_CONCURRENT_LEASES:-2}
+      EGRESS_PROXY_HOST: egress-proxy
+      EGRESS_PROXY_PORT: 3128
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      PYTHONDONTWRITEBYTECODE: 1
+    networks:
+      control: {}
+      runner: {}
+      egress:
+        gw_priority: 1
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  tool-runner:
+    build:
+      context: ./tool-runner
+      dockerfile: runner.Dockerfile
+    profiles: ["runner"]  # erst ab M3 aktiv geschaltet (own_domain, aktiv)
+    depends_on:
+      raw-egress-gateway:
+        condition: service_healthy
+    # Die offensive Ausfuehrungsebene haengt bewusst NICHT im ctrl-Netz
+    # (Zonen-Trennung, Deployment Kap. 1) - sonst koennte ein kompromittierter
+    # Runner control-plane/DB erreichen. Stattdessen:
+    #   runner  : erreicht NUR den egress-proxy (Datenkanal zu den Zielen)
+    #   control : schmaler Kontrollkanal, ueber den der worker Befehle schickt
+    # Beide sind internal (keine eigene Internet-Route). In K8s uebernimmt das
+    # die NetworkPolicy (deployment/k8s/networkpolicy-runner-egress.yaml);
+    # Docker-Netze sind groeber, aber die Trennung ctrl-vs-runner bleibt.
+    # Teilt den Namespace mit dem Gateway: dessen OUTPUT-Deny-All gilt auch
+    # fuer jeden Nmap-Prozess. Capabilities bleiben pro Prozess/Container.
+    network_mode: "service:raw-egress-gateway"
+    environment:
+      # REQ-HARDEN-001: the execution boundary rejects any request whose
+      # X-ASM-Runner-Token does not match this. Must equal the worker's value.
+      RUNNER_API_TOKEN: ${RUNNER_API_TOKEN:-runner-change-me-in-dev}
+    read_only: true
+    tmpfs: [/tmp]           # HexStrike schreibt Tool-Skripte/Cache/Log nach /tmp
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]      # nur fuer nmap/raw scans; kein CAP_ALL/NET_ADMIN/privileged
+    # ACHTUNG: no-new-privileges NICHT setzen. Es wuerde den Kernel dazu bringen,
+    # die cap_net_raw-Dateicapability von nmap (setcap in runner.Dockerfile) beim
+    # execve zu ignorieren -> "-sS requires root privileges. QUITTING!". Die
+    # Haertung bleibt trotzdem stark: non-root (uid 10001), cap_drop ALL (Bounding-
+    # Set = nur NET_RAW, kein DAC_OVERRIDE), read_only-fs, Netz-Isolation
+    # (nftables deny-all, kein control-plane/DB/Internet ausser per Lease).
+    # Max-Haertung fuer spaeter: ambient caps via Entrypoint (behaelt no-new-privs),
+    # gehoert ins Runner-Image / k8s securityContext.
+
+networks:
+  # REQ-MULTIENV-004: names are templated on ASM_NETWORK_PREFIX (unset ->
+  # 'asm', matching the historical literal names) instead of being fully
+  # hardcoded. Deliberately NOT COMPOSE_PROJECT_NAME: `docker compose config`
+  # auto-populates that variable from the checkout directory name whenever
+  # it isn't already set, so a `${COMPOSE_PROJECT_NAME:-asm}` default here
+  # would never actually fall back to 'asm' in practice. Two named
+  # environments sharing this same file (int, prod - each setting a distinct
+  # ASM_NETWORK_PREFIX via .env.int/.env.prod, see scripts/gen_production_env.py)
+  # previously landed on the IDENTICAL literal Docker network names and were
+  # therefore NOT isolated: a container in one environment could resolve and
+  # reach the other's by the shared service DNS name (e.g. int's migrate step
+  # randomly resolving 'postgres' to prod's container). The unset/dev default
+  # is unchanged so lab-compose.yml's external-network reference to
+  # 'asm_ctrl' (see lab/lab-compose.yml) keeps working without modification.
+  edge:    { name: "${ASM_NETWORK_PREFIX:-asm}_edge" }                      # Ingress vom Host (published ports); nicht internal
+  ctrl:    { name: "${ASM_NETWORK_PREFIX:-asm}_ctrl", internal: true }      # DB/Queue/interne API - keine Internet-Route
+  runner:  { name: "${ASM_NETWORK_PREFIX:-asm}_runner", internal: true }    # tool-runner <-> egress-proxy (Datenkanal)
+  control: { name: "${ASM_NETWORK_PREFIX:-asm}_control", internal: true }   # worker <-> tool-runner (Kontrollkanal, kein ctrl-Zugriff)
+  egress:  { name: "${ASM_NETWORK_PREFIX:-asm}_egress" }                    # kontrollierter Weg nach draussen (nur Proxy + worker-OSINT)
+
+volumes:
+  pgdata: {}
+  miniodata: {}

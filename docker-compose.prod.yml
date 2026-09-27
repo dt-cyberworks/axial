@@ -1,0 +1,87 @@
+# Production overlay (REQ-IAM-010/011). Apply on top of the base file:
+#   CONTROL_PLANE_PUBLISH_HOST=127.0.0.1 ASM_DOMAIN=scan.example.com \
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile runner --profile production up -d --build
+#
+# Requires:
+#   - CONTROL_PLANE_PUBLISH_HOST=127.0.0.1 in the shell/.env used to run this
+#     command. Compose ports: lists MERGE across -f files rather than
+#     replace (an override file cannot remove a base port mapping) - the
+#     base file's control-plane port is therefore a
+#     "${CONTROL_PLANE_PUBLISH_HOST:-0.0.0.0}:8000:8000" template instead;
+#     binding it to loopback makes it unreachable from outside this host
+#     while Caddy still reaches it over the internal Docker network
+#     (control-plane:8000), unaffected by the host port binding.
+#   - ASM_DOMAIN (DNS already pointing at this host).
+#   - Real secrets for every *_change-me-in-dev value - see docs/deployment.md
+#     and docs/design/authentication-and-authorization-architecture.md §7/§9.
+#     ENVIRONMENT=production makes app/config.py's own validator fail closed
+#     on any secret still at its dev default, so a misconfigured deploy
+#     refuses to start rather than run insecurely.
+
+services:
+  control-plane:
+    environment:
+      ENVIRONMENT: production
+      # GitHub issue #17: these two vars gate real production safety (the
+      # runner execution-boundary secret, and whether the API/MinIO console
+      # bind to loopback) but only ever had *documented* defaults, never an
+      # enforced one - a forgotten export left them silently at their
+      # insecure/public default. Referencing them here with `:?` is enough to
+      # fail `docker compose config` for the WHOLE merged file if either is
+      # unset, even though control-plane itself only consumes
+      # RUNNER_API_TOKEN (for the app-level check below) and not
+      # CONTROL_PLANE_PUBLISH_HOST directly (that var only ever feeds the
+      # base file's ports: host-binding, which an overlay cannot edit -
+      # ports: lists MERGE, never replace).
+      RUNNER_API_TOKEN: ${RUNNER_API_TOKEN:?set RUNNER_API_TOKEN to a real secret - the dev default is public in this repo}
+      CONTROL_PLANE_PUBLISH_HOST: ${CONTROL_PLANE_PUBLISH_HOST:?set CONTROL_PLANE_PUBLISH_HOST=127.0.0.1 or the API publishes on every interface}
+      # GitHub issue #22: same reasoning as RUNNER_API_TOKEN just above.
+      RAW_EGRESS_API_TOKEN: ${RAW_EGRESS_API_TOKEN:?set RAW_EGRESS_API_TOKEN to a real secret - the dev default is public in this repo}
+
+  worker:
+    environment:
+      ENVIRONMENT: production
+
+  egress-proxy:
+    environment:
+      ENVIRONMENT: production
+
+  raw-egress-gateway:
+    environment:
+      ENVIRONMENT: production
+
+  # GitHub issue #17: tool-runner had NO environment: override at all in this
+  # overlay, so ENVIRONMENT was never set on it and `enforce_production_token()`
+  # (tool-runner/runner_auth.py) took its early-return no-op path in every
+  # production deployment - the runner accepted the hardcoded dev token
+  # ("runner-change-me-in-dev", public in this repo) as valid authentication
+  # to an arbitrary-command execution boundary.
+  tool-runner:
+    environment:
+      ENVIRONMENT: production
+
+  minio:
+    environment:
+      MINIO_CONSOLE_PUBLISH_HOST: ${MINIO_CONSOLE_PUBLISH_HOST:?set MINIO_CONSOLE_PUBLISH_HOST=127.0.0.1 or the console publishes on every interface}
+
+  caddy:
+    build:
+      context: .
+      dockerfile: edge/Dockerfile
+    profiles: ["production"]
+    depends_on:
+      control-plane:
+        condition: service_started
+    environment:
+      ASM_DOMAIN: ${ASM_DOMAIN:?set ASM_DOMAIN to the public hostname pointing at this host}
+    networks: [edge]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
