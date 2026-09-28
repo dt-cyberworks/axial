@@ -347,10 +347,38 @@ def _finding_block(index: int, finding, styles: dict[str, ParagraphStyle]) -> Ke
     return KeepTogether(parts)
 
 
+def _triage_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]) -> list:
+    """REQ-TRIAGE-004: accepted risks stay visible with their justification;
+    false positives are only counted."""
+    flowables: list = []
+    if model.accepted_risks:
+        flowables.append(Paragraph("Accepted risks", styles["H2"]))
+        flowables.append(_p(
+            "These findings were reviewed and deliberately accepted. They are not counted as open "
+            "findings above, but remain part of the assessed attack surface.", styles["Body"],
+        ))
+        header = [_p(h, styles["CellHead"]) for h in ("Severity", "Finding", "Asset", "Justification", "Accepted")]
+        rows = [header] + [[
+            _p(r.severity.upper(), styles["Cell"]), _p(r.title, styles["Cell"]), _p(r.location, styles["Cell"]),
+            _p(r.justification, styles["Cell"]), _p(r.accepted_on, styles["Cell"]),
+        ] for r in model.accepted_risks]
+        flowables.append(_table(rows, [CONTENT_WIDTH * w for w in (0.10, 0.26, 0.22, 0.30, 0.12)],
+                                TableStyle(_HEADER_ROW_STYLE)))
+        flowables.append(Spacer(1, 8))
+    if model.false_positive_count:
+        noun = "finding was" if model.false_positive_count == 1 else "findings were"
+        flowables.append(_p(
+            f"{model.false_positive_count} {noun} reviewed and marked as false positive; "
+            "they are not listed in this report.", styles["Muted"],
+        ))
+    return flowables
+
+
 def _detailed_findings_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]) -> list:
     flowables: list = [Paragraph("3. Detailed findings", styles["H1"])]
     if not model.findings:
         flowables.append(_p("No open findings.", styles["Body"]))
+        flowables.extend(_triage_flowables(model, styles))
         return flowables
 
     flowables.append(Paragraph("Findings summary", styles["H2"]))
@@ -360,6 +388,7 @@ def _detailed_findings_flowables(model: ReportModel, styles: dict[str, Paragraph
     for index, finding in enumerate(model.findings, start=1):
         flowables.append(_finding_block(index, finding, styles))
 
+    flowables.extend(_triage_flowables(model, styles))
     flowables.append(_p(
         "Raw requests and full tool output are deliberately not reproduced here. They remain "
         "in the platform's evidence store and audit trail, available on request.", styles["Muted"],

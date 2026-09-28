@@ -29,8 +29,9 @@ Implementation: [`control-plane/app/api/`](../control-plane/app/api/).
 | `POST` | `/engagements/{id}/scan-runs/{run_id}/cancel` | immediately sets the run terminal to `aborted`, closes approvals, and terminates the exact bound runner process; terminal runs return 409 |
 | `DELETE` | `/engagements/{id}` | atomically deletes the complete engagement data graph (204), keeps the audit trail; active runs return 409 |
 | `GET` | `/engagements/{id}/findings` | results list (filters: `severity`, `status`) |
+| `PATCH` | `/engagements/{id}/findings/{finding_id}` | triage: `{status, note}` with status `open`, `accepted_risk`, `false_positive`, or `resolved`; a note (≥3 characters) is required for `accepted_risk` and `false_positive`; records who/when/why and writes an audit entry; a later scan keeps the decision (REQ-TRIAGE-001/002) |
 | `POST` | `/engagements/{id}/findings/{finding_id}/lens-explanation` | the Lens Agent explains a finding, its impact, and remediation; cached in `finding.evidence.lens_agent` |
-| `GET` | `/engagements/{id}/summary` | risk light, counts, top actions |
+| `GET` | `/engagements/{id}/summary` | risk light, open-finding counts by severity, `counts_by_status` for all four statuses, top actions |
 | `POST` | `/engagements/{id}/report` | PDF export (async, returns `job_id`) |
 | `GET` | `/approvals?state=requested` | operator queue |
 | `POST` | `/approvals/{id}/approve` | authorizes exactly one tool call ⚖ |
@@ -39,6 +40,8 @@ Implementation: [`control-plane/app/api/`](../control-plane/app/api/).
 | `PUT` | `/settings/llm` | set the provider (`base_url`/`model`/`api_key`); an empty `api_key` keeps the stored one |
 | `GET` | `/settings/nvd` | optional NVD API key for live CVE correlation (REQ-CORR-008); `api_key` masked (`api_key_set`); unset is valid (public rate limit) |
 | `PUT` | `/settings/nvd` | set the key; left empty keeps the stored one |
+
+Every `/settings/*` endpoint — the two above and the scan policy, tool policy, agent prompt, agent budgets, and approval timeout — requires the `admin` role for reading and writing (REQ-IAM-013), because it affects every user's engagements. Per-engagement configuration (`/engagements/{id}/config`) stays with the engagement's owner.
 
 ## Internal endpoints (worker → control-plane)
 

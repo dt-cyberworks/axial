@@ -136,6 +136,10 @@ def reset_password(
     temp_password = passwords.generate_temp_password()
     target.password_hash = passwords.hash_secret(temp_password)
     target.must_change_password = True
+    # REQ-IAM-015: otherwise the user stays locked out (up to 15 min) and
+    # cannot use the new temporary password the admin just handed over.
+    target.failed_password_count = 0
+    target.locked_until = None
     db.commit()
     auth_service.revoke_all_sessions(db, target.id)
 

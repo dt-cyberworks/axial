@@ -18,7 +18,7 @@ assert.match(
   /disabled=\{isCreating \|\| !title \|\| !authorizedFrom \|\| !authorizedUntil\}/,
   "the Create button must be disabled while a create request is in flight",
 );
-assert.match(wizard, /isCreating \? "Creating…" : "Create engagement"/, "the button must show a distinct in-progress label");
+assert.match(wizard, /isCreating \? "Creating…" : "Save draft and continue"/, "the button must show a distinct in-progress label");
 
 // Defense in depth: the handler itself must refuse to fire a second request
 // even if something dispatches it a second way.

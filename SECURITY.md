@@ -33,5 +33,5 @@ Especially critical and handled with priority:
   `lab/verify-isolation.sh`, is not yet in the public release).
 - Only run active scans with documented authorization (see
   [docs/legal.md](docs/legal.md)).
-- Secrets (signing keys, the Claude API key) belong in Vault/SOPS, not in a
+- Secrets (signing keys, the LLM provider's API key) belong in Vault/SOPS, not in a
   production system's `.env`.

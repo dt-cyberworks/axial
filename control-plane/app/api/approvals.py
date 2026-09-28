@@ -42,10 +42,13 @@ def list_approvals(
     return db.scalars(stmt).all()
 
 
-def _get_pending_or_404(db: Session, approval_id: uuid.UUID) -> ApprovalRequest:
+def _get_pending_or_404(db: Session, approval_id: uuid.UUID, user: User) -> ApprovalRequest:
+    """REQ-IAM-014: a non-owner gets the same 404 as for a non-existent
+    approval, before its state is revealed (409) or written (expired)."""
     approval = db.get(ApprovalRequest, approval_id)
     if approval is None:
         raise HTTPException(404, "approval not found")
+    _require_engagement_owner(db, approval.engagement_id, user)
     if approval.state != "requested":
         raise HTTPException(409, f"approval already in state '{approval.state}'")
     if approval.expires_at < datetime.datetime.now(datetime.timezone.utc):
@@ -65,8 +68,7 @@ def approve(
     Die eigentliche Ausfuehrung (approved -> consumed) erfolgt durch den
     MCP-Runner im Worker, der genau diesen einen Tool-Call konsumiert.
     """
-    approval = _get_pending_or_404(db, approval_id)
-    _require_engagement_owner(db, approval.engagement_id, user)
+    approval = _get_pending_or_404(db, approval_id, user)
     approval.state = "approved"
     approval.approved_by = user.email
     approval.approved_at = datetime.datetime.now(datetime.timezone.utc)
@@ -91,8 +93,7 @@ def reject(
     approval_id: uuid.UUID, body: ApprovalDecision,
     db: Session = Depends(get_db), user: User = Depends(require_user),
 ):
-    approval = _get_pending_or_404(db, approval_id)
-    _require_engagement_owner(db, approval.engagement_id, user)
+    approval = _get_pending_or_404(db, approval_id, user)
     approval.state = "rejected"
     approval.approved_by = user.email
     approval.approved_at = datetime.datetime.now(datetime.timezone.utc)

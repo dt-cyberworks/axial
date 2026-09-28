@@ -532,3 +532,113 @@ def test_edge_shared_caddyfile_never_compresses_api_responses(tmp_path):
             assert resp_api.headers.get("Content-Encoding") != "gzip", f"[{label}] API response must never be compressed"
     finally:
         _rm(backend, caddy)
+
+
+# --- REQ-WEBSEC-001: browser hardening headers on every response ------------
+
+EXPECTED_SECURITY_HEADERS = {
+    "Strict-Transport-Security": "max-age=31536000",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+        "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; "
+        "frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+}
+
+
+def _assert_security_headers(url: str, label: str) -> None:
+    resp = _get_raw(url, headers=_XHR_HEADERS if "/auth/" in url else _HTML_NAVIGATION_HEADERS)
+    for name, value in EXPECTED_SECURITY_HEADERS.items():
+        assert resp.headers.get(name) == value, f"[{label}] {name}: got {resp.headers.get(name)!r}"
+    # The stub backend (python http.server) sends its own Server banner; the
+    # edge must strip it, not merely add headers next to it.
+    assert resp.headers.get("Server") is None, f"[{label}] Server banner leaked: {resp.headers.get('Server')!r}"
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker not available")
+def test_edge_caddyfile_sends_security_headers_on_spa_and_api(tmp_path):
+    net = "asm-edge-websec-net"
+    backend, caddy = "asm-edge-websec-backend", "asm-edge-websec-caddy"
+    _rm(backend, caddy)
+    subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=15)
+    assert _run(["docker", "network", "create", net]).returncode == 0
+    try:
+        assert _run(["docker", "run", "-d", "--rm", "--name", backend, "--network", net,
+                     "--network-alias", "control-plane", PYTHON_ALPINE, "python3", "-m", "http.server", "8000"]).returncode == 0
+        _wait_for_stub_backend(backend, "8000")
+        text = (ROOT / "edge" / "Caddyfile").read_text().replace("{$ASM_DOMAIN} {", ":18100 {", 1)
+        (tmp_path / "Caddyfile").write_text(text)
+        (tmp_path / "frontend").mkdir()
+        (tmp_path / "frontend" / "index.html").write_text("SPA")
+        assert _run(["docker", "run", "-d", "--rm", "--name", caddy, "--network", net, "-p", "18100:18100",
+                     "-v", f"{tmp_path / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
+                     "-v", f"{tmp_path / 'frontend'}:/srv/frontend:ro", CADDY_ALPINE]).returncode == 0
+        _assert_security_headers("http://127.0.0.1:18100/engagements/some-id", "edge SPA")
+        _assert_security_headers("http://127.0.0.1:18100/auth/me", "edge API (proxied)")
+    finally:
+        _rm(backend, caddy)
+        subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=15)
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker not available")
+def test_edge_shared_caddyfile_sends_security_headers_for_both_environments(tmp_path):
+    backend, caddy = "asm-edge-shared-websec-backend", "asm-edge-shared-websec-caddy"
+    _rm(backend, caddy)
+    try:
+        assert _run(["docker", "run", "-d", "--rm", "--name", backend, "--network", "host",
+                     PYTHON_ALPINE, "python3", "-m", "http.server", "18103"]).returncode == 0
+        _wait_for_stub_backend(backend, "18103")
+        text = (ROOT / "edge-shared" / "Caddyfile").read_text()
+        text = text.replace("{$ASM_DOMAIN_PROD} {", ":18101 {", 1).replace("{$ASM_DOMAIN_INT} {", ":18102 {", 1)
+        (tmp_path / "Caddyfile").write_text(text)
+        for env in ("prod", "int"):
+            (tmp_path / f"frontend-{env}").mkdir()
+            (tmp_path / f"frontend-{env}" / "index.html").write_text(f"SPA_{env}")
+        assert _run(["docker", "run", "-d", "--rm", "--name", caddy, "--network", "host",
+                     "-e", "PROD_API_PORT=18103", "-e", "INT_API_PORT=18103",
+                     "-v", f"{tmp_path / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
+                     "-v", f"{tmp_path / 'frontend-prod'}:/srv/frontend-prod:ro",
+                     "-v", f"{tmp_path / 'frontend-int'}:/srv/frontend-int:ro", CADDY_ALPINE]).returncode == 0
+        for port, env in ((18101, "prod"), (18102, "int")):
+            _assert_security_headers(f"http://127.0.0.1:{port}/settings", f"{env} SPA")
+            _assert_security_headers(f"http://127.0.0.1:{port}/auth/me", f"{env} API (proxied)")
+    finally:
+        _rm(backend, caddy)
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker not available")
+def test_edge_caddyfile_cache_policy_keeps_console_and_api_apart(tmp_path):
+    """REQ-WEBSEC-003: /engagements/<id> is both a console route (HTML) and an
+    API route (JSON); a browser must never answer one from the other's cache."""
+    net = "asm-edge-cache-net"
+    backend, caddy = "asm-edge-cache-backend", "asm-edge-cache-caddy"
+    _rm(backend, caddy)
+    subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=15)
+    assert _run(["docker", "network", "create", net]).returncode == 0
+    try:
+        assert _run(["docker", "run", "-d", "--rm", "--name", backend, "--network", net,
+                     "--network-alias", "control-plane", PYTHON_ALPINE, "python3", "-m", "http.server", "8000"]).returncode == 0
+        _wait_for_stub_backend(backend, "8000")
+        (tmp_path / "Caddyfile").write_text((ROOT / "edge" / "Caddyfile").read_text().replace("{$ASM_DOMAIN} {", ":18110 {", 1))
+        (tmp_path / "frontend" / "assets").mkdir(parents=True)
+        (tmp_path / "frontend" / "index.html").write_text("SPA")
+        (tmp_path / "frontend" / "assets" / "index-abc123.js").write_text("console.log(1)")
+        assert _run(["docker", "run", "-d", "--rm", "--name", caddy, "--network", net, "-p", "18110:18110",
+                     "-v", f"{tmp_path / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
+                     "-v", f"{tmp_path / 'frontend'}:/srv/frontend:ro", CADDY_ALPINE]).returncode == 0
+        base = "http://127.0.0.1:18110"
+        for headers, label in ((_HTML_NAVIGATION_HEADERS, "console page"), (_XHR_HEADERS, "API request")):
+            resp = _get_raw(f"{base}/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", headers=headers)
+            assert resp.headers.get("Cache-Control") == "no-store", label
+            assert "Accept" in [v.strip() for v in ",".join(resp.headers.get_all("Vary") or []).split(",")], label
+        assert _get_raw(f"{base}/new", headers=_HTML_NAVIGATION_HEADERS).headers.get("Cache-Control") == "no-cache"
+        assert _get_raw(f"{base}/assets/index-abc123.js").headers.get("Cache-Control") == \
+            "public, max-age=31536000, immutable"
+    finally:
+        _rm(backend, caddy)
+        subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=15)
+

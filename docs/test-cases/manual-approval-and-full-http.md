@@ -153,3 +153,23 @@ Expected results:
   claims a risk assessment exists when one is actually present
   (`hasRiskAssessment`), rather than rendering `"? →"` and "(no risk
   description)" for a tool class that has neither concept.
+
+## TC-HTTP-003: An agent HTTP request never fans out
+
+Requirements:
+
+- REQ-HTTP-003
+
+Automated tests:
+
+- `worker/tests/test_http_request_single_request.py`
+
+Objective:
+
+Prove a path containing curl glob syntax produces exactly one request, so
+one authorization or approval can never be multiplied.
+
+Expected results:
+
+- `test_http_request_command_disables_url_globbing` - `curl --globoff` first, URL unchanged.
+- `test_negative_a_globbing_path_sends_exactly_one_request` - with a real curl and a local counting server, `/item/[1-5]` and `/{a,b,c}` arrive once, as sent, for GET, POST, and DELETE. Against the code before the fix, `/item/[1-5]` arrived five times.

@@ -777,7 +777,7 @@ def add_bounty_program(engagement_id: uuid.UUID, body: BountyProgramCreate, db: 
     fuer Scope-Assets, hier als replace-in-place statt zweier Client-Calls."""
     eng = _get_engagement_or_404(db, engagement_id)
     if eng.source != "bug_bounty":
-        raise HTTPException(400, "bounty_program nur bei source=bug_bounty")
+        raise HTTPException(400, "A bug-bounty program can only be attached to an engagement of type bug bounty.")
     db.execute(delete(BountyProgram).where(BountyProgram.engagement_id == engagement_id))
     prog = BountyProgram(engagement_id=engagement_id, **body.model_dump())
     db.add(prog)
@@ -807,22 +807,22 @@ def activate_engagement(
     eng = _get_engagement_or_404(db, engagement_id)
 
     if eng.source == "customer" and not (eng.scope_signed_by and eng.scope_doc_sha256):
-        raise HTTPException(409, "customer: scope_signed_by/scope_doc_sha256 fehlen (Abschnitt 3)")
+        raise HTTPException(409, "Cannot activate: a customer engagement needs the signed scope document - record who signed it and the document's SHA-256.")
 
     if eng.source == "bug_bounty":
         prog = db.scalar(select(BountyProgram).where(BountyProgram.engagement_id == eng.id))
         if prog is None:
-            raise HTTPException(409, "bug_bounty: kein verknuepftes bounty_program (Abschnitt 6)")
+            raise HTTPException(409, "Cannot activate: a bug-bounty engagement needs its program details (platform and program reference).")
 
     allow_assets = db.scalars(
         select(ScopeAsset).where(ScopeAsset.engagement_id == eng.id, ScopeAsset.rule == "allow")
     ).all()
     if eng.source in ("own_domain", "customer"):
         if not allow_assets:
-            raise HTTPException(409, "keine allow-Assets definiert (Abschnitt 4)")
+            raise HTTPException(409, "Cannot activate: add at least one in-scope target (domain, host, or IP range) first.")
         active_assets = [a for a in allow_assets if a.active_allowed]
         if active_assets and not all(a.authorization_verified for a in active_assets):
-            raise HTTPException(409, "Authorization fuer aktiv freigegebene Assets nicht attestiert (Abschnitt 4.3)")
+            raise HTTPException(409, "Cannot activate: confirm your authorization for every target that allows active testing.")
 
     # REQ-CONCUR-003: catch scope overlap with another already-active
     # engagement (any owner) at activation time, before it can surface as a
@@ -831,7 +831,7 @@ def activate_engagement(
 
     now = datetime.datetime.now(datetime.timezone.utc)
     if not (eng.authorized_from and eng.authorized_until and eng.authorized_from < eng.authorized_until):
-        raise HTTPException(409, "Testfenster ungueltig (Abschnitt 2.1)")
+        raise HTTPException(409, "Cannot activate: the test window is missing or ends before it starts.")
 
     eng.status = "active"
     db.commit()

@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { api, type ReportJob, type ToolCapability } from "../api/client";
+import { api, isNotFound, type ReportJob, type ToolCapability } from "../api/client";
+import NotFound from "./NotFound";
 import DnsSection from "../components/DnsSection";
 import FindingsSection from "../components/FindingsSection";
 import SurfaceGraph from "../components/SurfaceGraph";
@@ -28,16 +29,28 @@ function emptyGrants(): GrantState {
  * engagement-wide findings. Per-run detail (progress, diff, agent, log) lives on
  * the Run detail page.
  */
+/** REQ-CONSOLE-012: the highest open severity in English, instead of the API's
+ * internal traffic-light value (German "rot"/"gelb"/"blau"), which also merged
+ * critical with high and low/info with "nothing open". */
+function worstOpenSeverity(counts: Record<string, number> | undefined): string {
+  if (!counts) return "…";
+  const worst = ["critical", "high", "medium", "low", "info"].find((sev) => (counts[sev] ?? 0) > 0);
+  return worst ? worst.charAt(0).toUpperCase() + worst.slice(1) : "None open";
+}
+
 export default function EngagementDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const { data: engagement } = useQuery({ queryKey: ["engagement", id], queryFn: () => api.getEngagement(id!), enabled: !!id });
-  const { data: readiness } = useQuery({ queryKey: ["scan-readiness", id], queryFn: () => api.scanReadiness(id!), enabled: !!id, refetchInterval: 10000 });
-  const { data: scanRuns = [] } = useQuery({ queryKey: ["scan-runs", id], queryFn: () => api.listScanRuns(id!), enabled: !!id, refetchInterval: 5000 });
-  const { data: summary } = useQuery({ queryKey: ["summary", id], queryFn: () => api.summary(id!), enabled: !!id, refetchInterval: 5000 });
-  const { data: scopeAssets = [] } = useQuery({ queryKey: ["scope-assets", id], queryFn: () => api.listScopeAssets(id!), enabled: !!id });
+  const engagementQuery = useQuery({ queryKey: ["engagement", id], queryFn: () => api.getEngagement(id!), enabled: !!id, retry: (count, error) => !isNotFound(error) && count < 2 });
+  const engagement = engagementQuery.data;
+  // REQ-CONSOLE-008: nothing else is fetched (or polled) for an engagement that does not exist.
+  const engagementLoaded = !!id && engagementQuery.isSuccess;
+  const { data: readiness, isError: readinessFailed, error: readinessError } = useQuery({ queryKey: ["scan-readiness", id], queryFn: () => api.scanReadiness(id!), enabled: engagementLoaded, refetchInterval: 10000 });
+  const { data: scanRuns = [] } = useQuery({ queryKey: ["scan-runs", id], queryFn: () => api.listScanRuns(id!), enabled: engagementLoaded, refetchInterval: 5000 });
+  const { data: summary } = useQuery({ queryKey: ["summary", id], queryFn: () => api.summary(id!), enabled: engagementLoaded, refetchInterval: 5000 });
+  const { data: scopeAssets = [] } = useQuery({ queryKey: ["scope-assets", id], queryFn: () => api.listScopeAssets(id!), enabled: engagementLoaded });
 
   const authorizationBlockers = scopeAssets.filter(
     (asset) => asset.rule === "allow" && asset.active_allowed && !asset.authorization_verified,
@@ -55,7 +68,7 @@ export default function EngagementDetail() {
   const downloadAuthorizationPdf = useMutation({ mutationFn: () => api.downloadAuthorizationPdf(id!) });
 
   // REQ-REPORT-004
-  const { data: reports = [] } = useQuery({ queryKey: ["reports", id], queryFn: () => api.listReports(id!), enabled: !!id });
+  const { data: reports = [] } = useQuery({ queryKey: ["reports", id], queryFn: () => api.listReports(id!), enabled: engagementLoaded });
   const generateReport = useMutation({
     mutationFn: () => api.requestReport(id!),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reports", id] }),
@@ -82,7 +95,7 @@ export default function EngagementDetail() {
     queryKey: ["tool-capabilities"], queryFn: api.listToolCapabilities, enabled: isDraft,
   });
   const { data: existingGrants } = useQuery({
-    queryKey: ["tool-grants", id], queryFn: () => api.listToolGrants(id!), enabled: !!id && isDraft,
+    queryKey: ["tool-grants", id], queryFn: () => api.listToolGrants(id!), enabled: engagementLoaded && isDraft,
   });
   const [grants, setGrants] = useState<GrantState>(emptyGrants());
   const [grantsInitialized, setGrantsInitialized] = useState(false);
@@ -168,6 +181,21 @@ export default function EngagementDetail() {
   });
 
   if (!id) return null;
+  // REQ-CONSOLE-008: never render a working-looking page for an engagement
+  // that does not exist (or is not the caller's) - that page used to claim
+  // "All pre-flight checks pass" for an id like "new".
+  if (engagementQuery.isError && isNotFound(engagementQuery.error)) {
+    return <NotFound title="Engagement not found" message="This engagement does not exist, or it belongs to another user." />;
+  }
+  if (engagementQuery.isError) {
+    return (
+      <section className="page-stack">
+        <div className="error-block">Could not load this engagement: {(engagementQuery.error as Error).message}</div>
+        <div className="form-actions"><button onClick={() => engagementQuery.refetch()}>Try again</button></div>
+      </section>
+    );
+  }
+  if (!engagement) return <section className="page-stack"><p className="muted-line">Loading engagement…</p></section>;
 
   return (
     <section className="page-stack">
@@ -199,7 +227,7 @@ export default function EngagementDetail() {
       )}
 
       <div className="status-band">
-        <div><span>Risk signal</span><strong>{summary?.risk_ampel?.toUpperCase() ?? "NONE"}</strong></div>
+        <div><span>Risk signal</span><strong>{worstOpenSeverity(summary?.counts_by_severity)}</strong></div>
         <div><span>Runs</span><strong>{scanRuns.length}</strong></div>
         <div><span>Open findings</span><strong>{Object.values(summary?.counts_by_severity ?? {}).reduce((a, b) => a + b, 0)}</strong></div>
         <div><span>Scan readiness</span><strong>{readiness ? (readiness.ready ? "Ready" : "Blocked") : "…"}</strong></div>
@@ -331,7 +359,12 @@ export default function EngagementDetail() {
 
       <section className="form-panel settings-panel">
         <h2>Start a scan run</h2>
-        {readiness && !readiness.ready ? (
+        {/* REQ-CONSOLE-008: green only when the server said ready - not while loading or after an error. */}
+        {readinessFailed ? (
+          <div className="error-block">Could not check whether this engagement can scan: {(readinessError as Error).message}</div>
+        ) : !readiness ? (
+          <p className="muted-line">Checking pre-flight requirements…</p>
+        ) : !readiness.ready ? (
           <div className="warning-block">
             This engagement cannot scan yet. Resolve these first:
             <ul>{readiness.blockers.map((b) => <li key={b.code}><strong>{b.code}</strong> — {b.message}</li>)}</ul>

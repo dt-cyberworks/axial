@@ -88,6 +88,23 @@ export default function Dashboard() {
 
       {deleteEngagement.isError && <div className="error-block">Delete failed: {(deleteEngagement.error as Error).message}</div>}
 
+      {/* REQ-CONSOLE-010: a first-time user learns what an engagement is and what to do first. */}
+      {engagements.length === 0 && (
+        <section className="form-panel onboarding-panel">
+          <h2>Start with your first engagement</h2>
+          <p>
+            An engagement is one authorized assessment: what you may test (the scope), when (the test window), and
+            with which tools. Nothing is scanned until you have authorized and activated it.
+          </p>
+          <ol>
+            <li><strong>Create a draft</strong> — a title and the test window.</li>
+            <li><strong>Define the scope</strong> — the domains, hosts, or IP ranges you are allowed to test.</li>
+            <li><strong>Authorize and activate</strong>, then start a scan run and work through the findings.</li>
+          </ol>
+          <div className="form-actions"><Link className="primary-action" to="/new">Create an engagement</Link></div>
+        </section>
+      )}
+
       <section className="table-panel">
         <div className="panel-heading">
           <div>
@@ -125,7 +142,7 @@ export default function Dashboard() {
                 </tr>
               ))}
               {engagements.length === 0 && (
-                <tr><td colSpan={5} className="empty-cell">No engagements yet.</td></tr>
+                <tr><td colSpan={5} className="empty-cell">No engagements yet — create one above.</td></tr>
               )}
             </tbody>
           </table>

@@ -1,7 +1,9 @@
 import datetime
 import uuid
 
-from pydantic import BaseModel, ConfigDict
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class FindingOut(BaseModel):
@@ -25,6 +27,9 @@ class FindingOut(BaseModel):
     epss: float | None
     confidence: str
     status: str
+    status_note: str | None = None
+    status_changed_at: datetime.datetime | None = None
+    status_changed_by: str | None = None
     severity: str | None
     risk_score: float | None
     evidence: dict | None = None
@@ -57,11 +62,32 @@ class DnsRecordOut(BaseModel):
     resolved_at: datetime.datetime
 
 
+FINDING_STATUSES = ("open", "accepted_risk", "false_positive", "resolved")
+# A decision that makes a finding disappear from the open list must say why.
+NOTE_REQUIRED_STATUSES = ("accepted_risk", "false_positive")
+
+
+class FindingTriageIn(BaseModel):
+    """REQ-TRIAGE-001: an operator's decision about one finding."""
+
+    status: Literal["open", "accepted_risk", "false_positive", "resolved"]
+    note: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def _note_where_required(self) -> "FindingTriageIn":
+        self.note = (self.note or "").strip() or None
+        if self.status in NOTE_REQUIRED_STATUSES and (self.note is None or len(self.note) < 3):
+            raise ValueError(f"a note of at least 3 characters is required for status {self.status!r}")
+        return self
+
+
 class EngagementSummary(BaseModel):
     """GET /engagements/{id}/summary (Architektur Kap. 6.3)."""
 
     risk_ampel: str  # rot|orange|gelb|blau|gruen
     counts_by_severity: dict[str, int]
+    # REQ-TRIAGE-003: every status, so the console can label its status tabs.
+    counts_by_status: dict[str, int] = {}
     top_actions: list[str]
 
 

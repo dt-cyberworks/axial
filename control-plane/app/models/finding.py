@@ -31,6 +31,11 @@ class Finding(Base):
     epss: Mapped[float | None] = mapped_column(Numeric(5, 4))
     confidence: Mapped[str] = mapped_column(FindingConfidence, nullable=False)
     status: Mapped[str] = mapped_column(FindingStatus, nullable=False, server_default="open")
+    # REQ-TRIAGE-001: the last status change - its justification, when, and by whom
+    # (an operator e-mail, or "scan" when a re-observation reopened a resolved finding).
+    status_note: Mapped[str | None] = mapped_column(String)
+    status_changed_at: Mapped[datetime.datetime | None]
+    status_changed_by: Mapped[str | None] = mapped_column(String)
     evidence: Mapped[dict | None] = mapped_column(JSONB)
     raw_ref: Mapped[str | None] = mapped_column(String)
     # Persistiert (nicht nur transient bei Erstellung), damit die score-Phase
