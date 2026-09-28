@@ -538,7 +538,10 @@ def _http_request_command(target: str, args: dict) -> str:
     base = target if "://" in target else f"https://{target}"
     url = base + path
 
-    parts = ["curl", "-sS", "-i", "-X", method, "--max-time", "20"]
+    # REQ-HTTP-003: --globoff, or curl expands [] and {} in the URL into many
+    # requests - one gateway decision (or one human approval of a
+    # state-changing request) must never become more than one request.
+    parts = ["curl", "--globoff", "-sS", "-i", "-X", method, "--max-time", "20"]
     proxy_url = _proxy_url()
     if proxy_url:
         parts += ["-x", proxy_url]

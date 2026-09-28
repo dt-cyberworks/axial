@@ -1063,6 +1063,23 @@ def rescore_open_findings(engagement_id: uuid.UUID, db: Session = Depends(get_db
     return {"rescored": updated}
 
 
+def _finding_to_update(db: Session, engagement_id: uuid.UUID, fingerprint: str) -> Finding | None:
+    """REQ-TRIAGE-002: which existing finding a new observation belongs to.
+    An open one first; otherwise a triaged one (false positive / accepted
+    risk), so an operator's decision is not undone by a duplicate; otherwise
+    a resolved one, which the caller reopens. Newest first within each."""
+    candidates = db.scalars(
+        select(Finding)
+        .where(Finding.engagement_id == engagement_id, Finding.fingerprint == fingerprint)
+        .order_by(Finding.first_seen.desc())
+    ).all()
+    for statuses in (("open",), ("false_positive", "accepted_risk"), ("resolved",)):
+        match = next((f for f in candidates if f.status in statuses), None)
+        if match is not None:
+            return match
+    return None
+
+
 @router.post("/engagements/{engagement_id}/findings", status_code=201)
 def add_finding(engagement_id: uuid.UUID, body: FindingIn, db: Session = Depends(get_db)):
     """Berechnet Fingerprint (Dedup, Kap. 4.4) und Risk-Score/Severity (Kap. 5.2/5.3)
@@ -1075,9 +1092,7 @@ def add_finding(engagement_id: uuid.UUID, body: FindingIn, db: Session = Depends
 
     fp = _fingerprint(asset.value if asset else "unknown", port, body.category, body.title, body.cve_ids)
 
-    existing = db.query(Finding).filter(
-        Finding.engagement_id == engagement_id, Finding.fingerprint == fp, Finding.status == "open"
-    ).first()
+    existing = _finding_to_update(db, engagement_id, fp)
 
     risk_score = compute_risk_score(
         epss=body.epss, cvss_base=body.cvss_base, exposure_factor=body.exposure_factor,
@@ -1116,9 +1131,25 @@ def add_finding(engagement_id: uuid.UUID, body: FindingIn, db: Session = Depends
         existing.confidence = body.confidence
         existing.evidence = body.evidence
         existing.is_kev = body.is_kev
+        # REQ-TRIAGE-002: a false positive or accepted risk keeps its status
+        # when seen again; a "resolved" finding seen again is a regression and
+        # reopens, recorded in the audit log like an operator's change.
+        reopened = existing.status == "resolved"
+        if reopened:
+            existing.status = "open"
+            existing.status_note = "Seen again by a later scan after it was marked resolved."
+            existing.status_changed_at = datetime.datetime.now(datetime.timezone.utc)
+            existing.status_changed_by = "scan"
         db.commit()
+        if reopened:
+            append_audit_log(
+                db, engagement_id=engagement_id, actor="scan", action="finding_triage", decision="open",
+                reason="reopened: observed again after being marked resolved",
+                payload={"finding_id": str(existing.id), "title": existing.title, "from": "resolved", "to": "open",
+                         "scan_run_id": str(run_id) if run_id else None},
+            )
         _record_observation(db, engagement_id, run_id, fp, existing.id)
-        return {"id": existing.id, "diff": "persist"}
+        return {"id": existing.id, "diff": "reopened" if reopened else "persist"}
 
     finding = Finding(
         engagement_id=engagement_id,

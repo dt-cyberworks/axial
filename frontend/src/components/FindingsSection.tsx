@@ -1,9 +1,70 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 
-import { api, type Finding } from "../api/client";
+import { api, type Finding, type FindingStatus } from "../api/client";
 
 const SEVERITIES = ["critical", "high", "medium", "low", "info"];
+
+// REQ-TRIAGE-003: one tab per status; "open" is what needs attention.
+const STATUS_TABS: { status: FindingStatus; label: string; empty: string }[] = [
+  { status: "open", label: "Open", empty: "No open findings for this filter." },
+  { status: "accepted_risk", label: "Accepted risk", empty: "No accepted risks. Accept a finding's risk from its detail view." },
+  { status: "false_positive", label: "False positive", empty: "No findings marked as false positive." },
+  { status: "resolved", label: "Resolved", empty: "No findings marked as resolved." },
+];
+const STATUS_LABEL: Record<FindingStatus, string> = {
+  open: "Open", accepted_risk: "Accepted risk", false_positive: "False positive", resolved: "Resolved",
+};
+const NOTE_REQUIRED: FindingStatus[] = ["accepted_risk", "false_positive"];
+
+/** REQ-TRIAGE-001: decide what a finding is. Dismissing it needs a reason. */
+function TriagePanel({ finding, pending, error, onDecide }: {
+  finding: Finding; pending: boolean; error: Error | null;
+  onDecide: (status: FindingStatus, note?: string) => void;
+}) {
+  const [choice, setChoice] = useState<FindingStatus | null>(null);
+  const [note, setNote] = useState("");
+  const actions: { status: FindingStatus; label: string }[] = finding.status === "open"
+    ? [{ status: "resolved", label: "Mark resolved" }, { status: "accepted_risk", label: "Accept risk…" },
+       { status: "false_positive", label: "Mark false positive…" }]
+    : [{ status: "open", label: "Reopen" }];
+  const changedBy = finding.status_changed_by === "scan" ? "a later scan" : finding.status_changed_by;
+  return (
+    <section className="triage-panel" onClick={(e) => e.stopPropagation()}>
+      <h3>Triage</h3>
+      <p>
+        Status: <strong>{STATUS_LABEL[finding.status]}</strong>
+        {finding.status_changed_at && <span className="muted-line">Changed by {changedBy} on {new Date(finding.status_changed_at).toLocaleString()}</span>}
+      </p>
+      {finding.status_note && <blockquote className="triage-note-text">{finding.status_note}</blockquote>}
+      <div className="triage-actions">
+        {actions.map((action) => (
+          <button key={action.status} disabled={pending}
+            onClick={() => (NOTE_REQUIRED.includes(action.status) ? setChoice(action.status) : onDecide(action.status))}>
+            {action.label}
+          </button>
+        ))}
+      </div>
+      {choice && (
+        <div className="triage-reason">
+          <label>
+            {choice === "accepted_risk"
+              ? "Why is this risk acceptable? (required - shown with the finding in the report)"
+              : "Why is this a false positive? (required - kept in the audit log)"}
+            <textarea value={note} maxLength={1000} rows={3} onChange={(e) => setNote(e.target.value)} />
+          </label>
+          <div className="form-actions">
+            <button onClick={() => { setChoice(null); setNote(""); }}>Cancel</button>
+            <button disabled={pending || note.trim().length < 3} onClick={() => onDecide(choice, note.trim())}>
+              {choice === "accepted_risk" ? "Accept risk" : "Mark false positive"}
+            </button>
+          </div>
+        </div>
+      )}
+      {error && <div className="error-block">Could not change the status: {error.message}</div>}
+    </section>
+  );
+}
 
 export function severityClass(severity: string | null | undefined) {
   return severity ? `sev-${severity}` : "sev-info";
@@ -121,19 +182,29 @@ function renderLensAnalysis(text: string) {
   });
 }
 
-/** Engagement-wide findings: severity distribution + open findings table with Lens drill-down. */
+/** Engagement-wide findings: severity distribution + findings table per status, with triage and Lens drill-down. */
 export default function FindingsSection({ engagementId }: { engagementId: string }) {
   const queryClient = useQueryClient();
   const [severityFilter, setSeverityFilter] = useState<string | undefined>(undefined);
+  const [statusFilter, setStatusFilter] = useState<FindingStatus>("open");
   const [expandedFindingId, setExpandedFindingId] = useState<string | null>(null);
   const [lensTextByFinding, setLensTextByFinding] = useState<Record<string, string>>({});
   const [lensTruncatedByFinding, setLensTruncatedByFinding] = useState<Record<string, boolean>>({});
 
   const { data: summary } = useQuery({ queryKey: ["summary", engagementId], queryFn: () => api.summary(engagementId), refetchInterval: 5000 });
   const { data: findings = [] } = useQuery({
-    queryKey: ["findings", engagementId, severityFilter],
-    queryFn: () => api.findings(engagementId, severityFilter ? { severity: severityFilter, status: "open" } : { status: "open" }),
+    queryKey: ["findings", engagementId, severityFilter, statusFilter],
+    queryFn: () => api.findings(engagementId, severityFilter ? { severity: severityFilter, status: statusFilter } : { status: statusFilter }),
     refetchInterval: 5000,
+  });
+  const triageMutation = useMutation({
+    mutationFn: ({ findingId, status, note }: { findingId: string; status: FindingStatus; note?: string }) =>
+      api.triageFinding(engagementId, findingId, { status, note }),
+    onSuccess: () => {
+      setExpandedFindingId(null);
+      queryClient.invalidateQueries({ queryKey: ["findings", engagementId] });
+      queryClient.invalidateQueries({ queryKey: ["summary", engagementId] });
+    },
   });
   const lensMutation = useMutation({
     mutationFn: (findingId: string) => api.explainFindingWithLens(engagementId, findingId),
@@ -148,7 +219,7 @@ export default function FindingsSection({ engagementId }: { engagementId: string
     <>
       <section className="table-panel">
         <div className="panel-heading">
-          <div><h2>Severity distribution</h2><p>Filter the evidence list without changing server-side state.</p></div>
+          <div><h2>Severity distribution</h2><p>Open findings by severity. Click a tile to filter the list below.</p></div>
           <button onClick={() => setSeverityFilter(undefined)}>All</button>
         </div>
         <div className="severity-grid">
@@ -162,7 +233,16 @@ export default function FindingsSection({ engagementId }: { engagementId: string
       </section>
 
       <section className="table-panel">
-        <div className="panel-heading"><div><h2>Open findings</h2><p>Engagement-wide evidence, de-duplicated across runs, prioritized by risk score.</p></div></div>
+        <div className="panel-heading"><div><h2>Findings</h2><p>Engagement-wide evidence, de-duplicated across runs, prioritized by risk score. Open a finding to triage it.</p></div></div>
+        <div className="tab-bar findings-status-tabs" role="tablist" aria-label="Finding status">
+          {STATUS_TABS.map((tab) => (
+            <button key={tab.status} role="tab" aria-selected={statusFilter === tab.status}
+              className={`tab ${statusFilter === tab.status ? "active" : ""}`}
+              onClick={() => { setStatusFilter(tab.status); setExpandedFindingId(null); }}>
+              {tab.label} <span className="tab-count">{summary?.counts_by_status?.[tab.status] ?? 0}</span>
+            </button>
+          ))}
+        </div>
         <div className="responsive-table">
           <table className="data-table findings-table">
             <thead><tr><th>Severity</th><th>Finding</th><th>Found on</th><th>Category</th><th>Confidence</th><th>Score</th><th>First seen</th><th>Last seen</th></tr></thead>
@@ -206,6 +286,9 @@ export default function FindingsSection({ engagementId }: { engagementId: string
                               {lensMutation.isError && <div className="error-block">Lens Agent failed: {(lensMutation.error as Error).message}</div>}
                             </div>
                           </section>
+                          <TriagePanel finding={finding} pending={triageMutation.isPending}
+                            error={triageMutation.isError ? (triageMutation.error as Error) : null}
+                            onDecide={(status, note) => triageMutation.mutate({ findingId: finding.id, status, note })} />
                           <dl className="finding-facts">
                             <dt>Target</dt><dd>{targetLabel(finding)}</dd>
                             <dt>Asset type</dt><dd>{finding.asset_type ?? "unknown"}</dd>
@@ -229,7 +312,7 @@ export default function FindingsSection({ engagementId }: { engagementId: string
                   </Fragment>
                 );
               })}
-              {findings.length === 0 && <tr><td colSpan={8} className="empty-cell">No open findings for this filter.</td></tr>}
+              {findings.length === 0 && <tr><td colSpan={8} className="empty-cell">{STATUS_TABS.find((tab) => tab.status === statusFilter)?.empty}</td></tr>}
             </tbody>
           </table>
         </div>

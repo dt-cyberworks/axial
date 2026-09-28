@@ -24,9 +24,12 @@ public_router.include_router(approvals_router)
 public_router.include_router(findings_router)
 public_router.include_router(stream_router)
 public_router.include_router(tools_router)
-public_router.include_router(settings_router)
 api_router.include_router(public_router)
 api_router.include_router(admin_router, dependencies=[Depends(require_admin)])
+# REQ-IAM-013: global settings (LLM endpoint and key, tool and scan policy,
+# agent prompt and budgets) affect every user's engagements, so they are
+# admin-only at the API - hiding the page in the console is not enough.
+api_router.include_router(settings_router, dependencies=[Depends(require_admin)])
 api_router.include_router(internal_router)
 # REQ-AGENT-027: deliberately unauthenticated - fetched by a PROBED TARGET,
 # never by an operator or the worker. No dependency on require_user or the

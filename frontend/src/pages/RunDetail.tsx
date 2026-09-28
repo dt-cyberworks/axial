@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { api, type AgentStep, type AssetReview } from "../api/client";
+import { api, isNotFound, type AgentStep, type AssetReview } from "../api/client";
+import NotFound from "./NotFound";
 import { severityClass } from "../components/FindingsSection";
 import RunActivity from "../components/RunActivity";
 import { activityKey, reasonExplanation, type RunLogEntry } from "../lib/runActivity";
@@ -31,8 +32,11 @@ export default function RunDetail() {
   const [log, setLog] = useState<RunLogEntry[]>([]);
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
 
-  const { data: engagement } = useQuery({ queryKey: ["engagement", id], queryFn: () => api.getEngagement(id!), enabled: !!id });
-  const { data: scanRuns = [] } = useQuery({ queryKey: ["scan-runs", id], queryFn: () => api.listScanRuns(id!), enabled: !!id, refetchInterval: 4000 });
+  const engagementQuery = useQuery({ queryKey: ["engagement", id], queryFn: () => api.getEngagement(id!), enabled: !!id, retry: (count, error) => !isNotFound(error) && count < 2 });
+  const engagement = engagementQuery.data;
+  const engagementLoaded = !!id && engagementQuery.isSuccess;
+  const scanRunsQuery = useQuery({ queryKey: ["scan-runs", id], queryFn: () => api.listScanRuns(id!), enabled: engagementLoaded, refetchInterval: 4000 });
+  const scanRuns = scanRunsQuery.data ?? [];
   const run = scanRuns.find((r) => r.id === runId);
   const isRunning = run?.state === "running" || run?.state === "waiting_approval";
   // REQ-RUNUI-001: drives the elapsed-time text below on its own 1s cadence.
@@ -40,10 +44,10 @@ export default function RunDetail() {
   // nothing under react-query's structural sharing.
   const now = useTicker(isRunning);
 
-  const { data: diff } = useQuery({ queryKey: ["scan-diff", id, runId], queryFn: () => api.scanRunDiff(id!, runId!), enabled: !!id && !!runId });
+  const { data: diff } = useQuery({ queryKey: ["scan-diff", id, runId], queryFn: () => api.scanRunDiff(id!, runId!), enabled: engagementLoaded && !!runId });
   const { data: agentSteps = [] } = useQuery({
     queryKey: ["agent-steps", id, runId], queryFn: () => api.agentSteps(id!, runId!),
-    enabled: !!id && !!runId, refetchInterval: isRunning ? 4000 : false,
+    enabled: engagementLoaded && !!runId, refetchInterval: isRunning ? 4000 : false,
   });
 
   const cancelRun = useMutation({
@@ -60,7 +64,7 @@ export default function RunDetail() {
   // per-engagement).
   const { data: assetReviews = [] } = useQuery({
     queryKey: ["asset-reviews", id], queryFn: () => api.listAssetReviews(id!),
-    enabled: !!id, refetchInterval: 2500,
+    enabled: engagementLoaded, refetchInterval: 2500,
   });
   const pendingReview = assetReviews.find((r) => r.scan_run_id === runId);
   const decideAssetReview = useMutation({
@@ -91,6 +95,11 @@ export default function RunDetail() {
 
   if (!id || !runId) return null;
   const num = runNumber(scanRuns, runId);
+
+  // REQ-CONSOLE-008: an unknown run (or an engagement that is not the caller's) gets a real not-found page.
+  if ((engagementQuery.isError && isNotFound(engagementQuery.error)) || (scanRunsQuery.isSuccess && !run)) {
+    return <NotFound title="Scan run not found" message="This run does not exist in this engagement, or the engagement belongs to another user." />;
+  }
 
   return (
     <section className="page-stack">

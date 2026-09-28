@@ -57,6 +57,23 @@ Acceptance criteria:
 - Header/path/body inputs remain size-bounded and shell-injection-safe
   (shlex-quoted); malformed input is denied, not approved.
 
+## REQ-HTTP-003: One http_request is exactly one HTTP request
+
+Found in the 2026-09-27 review: curl expands `[a-b]` ranges and `{x,y}`
+lists in a URL into one request per combination, and the path validator
+allows those characters (PHP array parameters such as `ids[]=1` are
+legitimate test input). A path like `/item/[1-500]` therefore turned one
+gateway decision - or one human approval of a DELETE - into 500 requests.
+
+Acceptance criteria:
+- The command built for `http_request` disables URL globbing
+  (`curl --globoff`), so brackets and braces in the path are sent
+  literally.
+- [Negative test] Running the built command against a local server with a
+  range or list pattern in the path, for `GET`, `POST`, and `DELETE`,
+  delivers exactly one request, with the path unchanged.
+- The in-app documentation's description of the command matches what runs.
+
 ## REQ-APPROVAL-001: State-changing requests require per-command human approval
 
 A state-changing agent request that is otherwise valid must not be hard-denied

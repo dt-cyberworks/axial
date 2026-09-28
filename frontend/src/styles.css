@@ -176,6 +176,8 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
   background: none;
   font: inherit;
   text-align: left;
+  /* REQ-CONSOLE-012: the global button rule centers flex content; align with the nav links. */
+  justify-content: flex-start;
   cursor: pointer;
   width: 100%;
 }
@@ -1083,3 +1085,25 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
   .surface-graph-body { flex-direction: column; }
   .surface-graph-detail { flex-basis: auto; border-left: 0; border-top: 1px solid var(--line); }
 }
+
+/* REQ-TRIAGE-001/003: finding triage */
+.findings-status-tabs { padding: 0 16px; }
+.tab-count { display: inline-block; min-width: 1.6em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 0.78rem; text-align: center; }
+.tab.active .tab-count { color: var(--text); }
+.triage-panel { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--surface-2); }
+.triage-panel h3 { margin: 0 0 6px; }
+.triage-panel p { margin: 0 0 8px; }
+.triage-panel .muted-line { margin-left: 8px; display: inline; }
+.triage-note-text { margin: 0 0 10px; padding: 8px 12px; border-left: 3px solid var(--teal); color: var(--ink-soft); white-space: pre-wrap; }
+.triage-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.triage-reason { margin-top: 12px; }
+.triage-reason label { display: grid; gap: 6px; }
+.triage-reason textarea { width: 100%; resize: vertical; background: var(--surface); color: var(--text); border: 1px solid var(--line-strong); border-radius: 6px; padding: 8px; }
+
+/* REQ-CONSOLE-010/011: onboarding and folded expert options */
+.onboarding-panel ol { margin: 8px 0 0; padding-left: 20px; line-height: 1.6; }
+.onboarding-panel p { max-width: 70ch; }
+.advanced-options { margin: 10px 0; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+.advanced-options summary { cursor: pointer; color: var(--ink-soft); font-weight: 700; }
+.advanced-options[open] summary { margin-bottom: 8px; }
+

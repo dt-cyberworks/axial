@@ -6,53 +6,53 @@
         requirements-test traceability verify fmt scan uat-venv seed-uat-account uat \
         reference-scan
 
-help:  ## Diese Hilfe anzeigen
+help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 # --- Scanner-Stack (M1: lab / M2–M3: own_domain) ---
-up:  ## Scanner-Stack starten (control-plane, worker, egress-proxy, DB)
+up:  ## Start the scanner stack (control-plane, worker, egress-proxy, database)
 	docker compose up -d --build
 
-down:  ## Scanner-Stack stoppen und Volumes entfernen
+down:  ## Stop the stack and DELETE its volumes - all engagements and findings are lost
 	docker compose down -v
 
-logs:  ## Logs des Scanner-Stacks folgen
+logs:  ## Follow the scanner stack's logs
 	docker compose logs -f
 
 bootstrap-admin:  ## First admin account (REQ-IAM-008/011; needs INITIAL_ADMIN_EMAIL set)
 	docker compose exec control-plane python scripts/bootstrap_admin.py
 
 # --- Requirements as code / SDLC ---
-requirements-check:  ## Requirements, test cases, and generated traceability validate
+requirements-check:  ## Validate requirements, test cases, and the generated traceability matrix
 	python3 scripts/requirements_pipeline.py check
 
 requirements-test:  ## Unit tests for the requirements pipeline
 	python3 -m pytest scripts/tests -q
 
-traceability:  ## Requirements-to-tests matrix regenerate
+traceability:  ## Regenerate the requirements-to-tests matrix
 	python3 scripts/requirements_pipeline.py generate
 
 # --- Tests ---
-test: test-unit test-integration  ## Alle Tests (Unit + Integration)
+test: test-unit test-integration  ## All control-plane tests (unit + integration)
 
-test-unit:  ## Reine Logik-Tests (ohne DB/Infra)
+test-unit:  ## Unit tests (no database or other infrastructure)
 	cd control-plane && python -m pytest tests -q --ignore=tests/integration
 
-test-integration:  ## Gateway-Integrationstests gegen Postgres (TEST_DATABASE_URL nötig)
+test-integration:  ## Integration tests against Postgres (needs TEST_DATABASE_URL)
 	cd control-plane && python -m pytest tests/integration -q
 
 # --- Lab-Testloop (ASM_Lab_Umgebung.docx) ---
-lab-up:  ## Verwundbare Lab-Ziele starten (isoliertes Netz)
+lab-up:  ## Start the deliberately vulnerable lab targets (isolated network)
 	docker compose -f lab/lab-compose.yml up -d
 
-lab-down:  ## Lab-Ziele stoppen
+lab-down:  ## Stop the lab targets
 	docker compose -f lab/lab-compose.yml down -v
 
-lab-verify:  ## Isolations-Checks (Pflicht vor jedem Lab-Einsatz)
+lab-verify:  ## Isolation checks - mandatory before every lab use
 	bash lab/verify-isolation.sh
 
-lab-test:  ## Vollständiger Lab-Testloop: Isolation + Scope-Durchsetzung + Orakel
+lab-test:  ## Full lab test loop (isolation, scope enforcement, oracle); tears the main stack down incl. volumes unless KEEP_UP=1
 	bash lab/run-lab-test.sh
 
 # --- Supply chain (REQ-SUPPLY-001/002) ---
@@ -62,7 +62,7 @@ scan:  ## Supply-chain scan: image-pin guard + Trivy (deps/secrets + Dockerfile/
 	trivy config --severity HIGH,CRITICAL --ignorefile .trivyignore.yaml --exit-code 1 .
 
 # --- Frontend ---
-frontend-build:  ## Operator-Konsole bauen (Typecheck + Vite)
+frontend-build:  ## Build the operator console (typecheck + Vite)
 	cd frontend && npm ci && npm run build
 
 frontend-requirements:  ## Executable requirement tests for the operator console

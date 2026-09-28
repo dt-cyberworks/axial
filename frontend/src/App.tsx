@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { NavLink, Navigate, Route, Routes, useParams } from "react-router-dom";
 
 import { api } from "./api/client";
+import NotFound from "./pages/NotFound";
 import Dashboard from "./pages/Dashboard";
 import EngagementWizard from "./pages/EngagementWizard";
 import EngagementEdit from "./pages/EngagementEdit";
@@ -99,6 +100,8 @@ function AuthenticatedShell() {
           <Route path="/engagements/:id/results" element={<RedirectToEngagement />} />
           {/* Legacy direct links to the old separate pages fold into the Admin hub. */}
           <Route path="/settings" element={<Navigate to="/admin" replace />} />
+          {/* REQ-CONSOLE-009: unknown paths get a real 404 page, not an empty frame. */}
+          <Route path="*" element={<NotFound />} />
           <Route path="/admin/users" element={<Navigate to="/admin" replace />} />
           <Route path="/admin/audit" element={<Navigate to="/admin" replace />} />
         </Routes>

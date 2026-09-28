@@ -106,7 +106,7 @@ any finding on it is a failure.
 
 ## Live scan against the lab
 
-Since the M3 pull-forward ([roadmap.md](roadmap.md#live-test-milestone-m1-complete)),
+Since the M3 pull-forward ([roadmap.md](roadmap.md#where-the-project-stands)),
 `run-lab-test.sh` triggers a **real** scan, not just gateway decisions:
 
 ```mermaid
@@ -129,7 +129,7 @@ with three surgical fixes: `pwntools`/`angr` removed from `requirements.txt`
 - source-code review confirms the main server never imports either at module
 level -, the log path redirected to `/tmp` because of
 `readOnlyRootFilesystem`, `--host`/env-var mismatches corrected). Details
-and the current verification status: [roadmap.md](roadmap.md#hexstrike-integration-status).
+and the current capability status: the tool registry (`control-plane/app/tools/registry.py`) and [roadmap.md](roadmap.md#where-the-project-stands).
 `worker/app/tool_runner_client.py` talks to the real HexStrike endpoints,
 reverse-engineered from its source (`/api/tools/nmap|nuclei|nikto|subfinder|
 amass|wafw00f|httpx`).

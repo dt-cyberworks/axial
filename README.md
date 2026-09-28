@@ -1,6 +1,6 @@
 <div align="center">
 
-# ASM Scanner with Agent Capability
+# Axial — attack surface management with a gated AI agent
 
 **An AI plans the security assessment. It never runs anything the deterministic Scope Gateway hasn't independently authorized.**
 
@@ -8,7 +8,6 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](control-plane/)
 [![React + TS](https://img.shields.io/badge/frontend-React_+_TS-61DAFB?logo=react&logoColor=black)](frontend/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
-[![Maturity](https://img.shields.io/badge/maturity-M1_(lab)-blue)](docs/roadmap.md)
 
 </div>
 
@@ -34,6 +33,28 @@ client engagements) who wants AI's speed without handing it the keys.
 > **Guiding principle:** the language model **plans and proposes** — a
 > deterministic control layer (the **Scope Gateway**) **decides and
 > executes**. Control is enforced technically, not through prompt wording.
+
+## What it does
+
+- **Finds what you expose.** Starting from the domains and IP ranges you
+  are authorized to test, it discovers subdomains and hosts from public
+  records and checks which are live.
+- **Identifies what runs there.** Open ports, services and versions, web
+  technologies, web application firewalls, and the TLS setup.
+- **Checks for known problems.** Thousands of curated vulnerability and
+  misconfiguration checks, plus live correlation of detected versions with
+  known vulnerabilities (NVD, EPSS, and CISA's known-exploited list).
+- **Lets an AI agent dig deeper — within limits.** The agent proposes
+  targeted follow-up requests; read-only requests run on their own,
+  anything that could change data waits for your approval.
+- **Keeps you in control of the results.** Findings are de-duplicated
+  across scans; you mark them resolved, accepted risk, or false positive,
+  and later scans respect that. A PDF report and a tamper-evident audit
+  trail document what was authorized and what was done.
+
+What it deliberately does **not** do: exploit systems, test credentials
+at scale, scan anything outside the authorized scope and time window, or
+let the AI act without the gateway's decision.
 
 The binding functional/legal specification lives in
 [`docs/spec/`](docs/spec/) (seven documents). The developer-facing writeup
@@ -96,7 +117,7 @@ npm run dev
 ```
 
 Then open <http://localhost:5173>. An LLM provider is optional; without one,
-the agent phase is skipped. Configure one later in **Settings** or in `.env`.
+the agent phase is skipped. An administrator can configure one later under **Admin** in the console, or in `.env`.
 The runner used for authorized active scans is intentionally not started by
 the basic evaluation command.
 
@@ -136,9 +157,10 @@ commands.
 
 > [!WARNING]
 > Actively scanning third-party systems without authorization can be a
-> criminal offense in many jurisdictions. Before the first scan: a signed
-> engagement, proof of ownership, a test window, professional liability
-> insurance, employer approval for secondary employment. Details:
+> criminal offense in many jurisdictions. Before the first scan you need,
+> at minimum, written authorization from the owner of every target, an
+> agreed test window, and — for professional work — suitable liability
+> insurance. Details:
 > [docs/legal.md](docs/legal.md) and
 > [`docs/spec/rules-of-engagement.md`](docs/spec/rules-of-engagement.md).
 > This repository is not legal advice.

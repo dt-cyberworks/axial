@@ -186,6 +186,17 @@ class MethodologyScope:
 
 
 @dataclass
+class AcceptedRiskRow:
+    """REQ-TRIAGE-004: a finding the operator accepted, with the stated reason.
+    Who decided stays internal (audit log), not in the customer document."""
+    severity: str
+    title: str
+    location: str
+    justification: str
+    accepted_on: str
+
+
+@dataclass
 class ReportModel:
     generated_at: str
     engagement_title: str
@@ -196,6 +207,8 @@ class ReportModel:
     findings: list[FindingRow]
     asset_inventory: AssetInventory
     methodology: MethodologyScope
+    accepted_risks: list[AcceptedRiskRow] = field(default_factory=list)
+    false_positive_count: int = 0
 
 
 # --- helpers (format-agnostic; unchanged from the original text renderer) --
@@ -435,6 +448,12 @@ def build_report_model(db: Session, eng: Engagement, report_run: ScanRun | None)
     ))
     sorted_findings = sorted(findings, key=_sort_key)
     counts = _severity_counts(findings)
+    accepted = sorted(db.scalars(
+        select(Finding).where(Finding.engagement_id == eng.id, Finding.status == "accepted_risk")
+    ), key=_sort_key)
+    false_positive_count = len(list(db.scalars(
+        select(Finding.id).where(Finding.engagement_id == eng.id, Finding.status == "false_positive")
+    )))
     runs = list(db.scalars(
         select(ScanRun).where(ScanRun.engagement_id == eng.id).order_by(ScanRun.started_at.desc())
     ))
@@ -451,4 +470,15 @@ def build_report_model(db: Session, eng: Engagement, report_run: ScanRun | None)
         findings=[_finding_row(db, finding) for finding in sorted_findings],
         asset_inventory=_asset_inventory(db, eng.id),
         methodology=_methodology_and_scope(db, eng, runs, report_run),
+        accepted_risks=[_accepted_risk_row(db, finding) for finding in accepted],
+        false_positive_count=false_positive_count,
+    )
+
+
+def _accepted_risk_row(db: Session, finding: Finding) -> AcceptedRiskRow:
+    row = _finding_row(db, finding)
+    accepted_on = finding.status_changed_at.date().isoformat() if finding.status_changed_at else "n/a"
+    return AcceptedRiskRow(
+        severity=row.severity, title=row.title, location=row.location,
+        justification=redact_prose(finding.status_note or "No justification recorded."), accepted_on=accepted_on,
     )

@@ -81,6 +81,22 @@ export interface ScopeAsset {
   port_to?: number | null;
 }
 
+export type FindingStatus = "open" | "accepted_risk" | "false_positive" | "resolved";
+
+/** An API call that got an HTTP error response; `status` lets callers tell
+ * "does not exist / not yours" (404, or 422 for a malformed id) from a
+ * network or server failure. The message is unchanged from before. */
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+export function isNotFound(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 404 || error.status === 422);
+}
+
 export interface Finding {
   id: string;
   engagement_id: string;
@@ -99,7 +115,11 @@ export interface Finding {
   cvss_base: number | null;
   epss: number | null;
   confidence: "inferred" | "validated";
-  status: string;
+  status: FindingStatus;
+  // REQ-TRIAGE-001: the last status change - why, when, and by whom ("scan" = reopened by a later scan).
+  status_note: string | null;
+  status_changed_at: string | null;
+  status_changed_by: string | null;
   severity: "info" | "low" | "medium" | "high" | "critical" | null;
   risk_score: number | null;
   evidence: Record<string, unknown> | null;
@@ -227,6 +247,7 @@ export interface ReportJob {
 export interface EngagementSummary {
   risk_ampel: string;
   counts_by_severity: Record<string, number>;
+  counts_by_status: Partial<Record<FindingStatus, number>>;
   top_actions: string[];
 }
 
@@ -518,7 +539,7 @@ async function request<T>(path: string, init?: RequestInit, isRetry = false): Pr
       // Keep the status-only message if the response body is not JSON.
     }
     const suffix = detail ? `: ${detail}` : "";
-    throw new Error(`${init?.method ?? "GET"} ${path} -> ${res.status}${suffix}`);
+    throw new ApiError(`${init?.method ?? "GET"} ${path} -> ${res.status}${suffix}`, res.status);
   }
   return res.status === 204 ? (undefined as T) : res.json();
 }
@@ -628,6 +649,9 @@ export const api = {
     const qs = new URLSearchParams(params as Record<string, string>).toString();
     return request<Finding[]>(`/engagements/${id}/findings${qs ? `?${qs}` : ""}`);
   },
+  // REQ-TRIAGE-001: a note is required for accepted_risk and false_positive.
+  triageFinding: (id: string, findingId: string, body: { status: FindingStatus; note?: string }) =>
+    request<Finding>(`/engagements/${id}/findings/${findingId}`, { method: "PATCH", body: JSON.stringify(body) }),
   explainFindingWithLens: (id: string, findingId: string) =>
     request<FindingExplanation>(`/engagements/${id}/findings/${findingId}/lens-explanation`, { method: "POST" }),
   // REQ-REPORT-001: generation is synchronous, so the returned job is already

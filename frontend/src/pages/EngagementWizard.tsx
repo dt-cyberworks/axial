@@ -282,7 +282,7 @@ export default function EngagementWizard() {
             <h2>Parties and test window</h2>
             <div className="form-grid">
               <label>Title<input value={title} onChange={(e) => setTitle(e.target.value)} /></label>
-              <label>Emergency contact<input value={emergencyContact} onChange={(e) => setEmergencyContact(e.target.value)} /></label>
+              <label>Emergency contact<input value={emergencyContact} placeholder="Who to call if a test causes problems (name, phone)" onChange={(e) => setEmergencyContact(e.target.value)} /></label>
               <label>Authorized from<input type="date" value={authorizedFrom} onChange={(e) => setAuthorizedFrom(e.target.value)} /></label>
               <label>Authorized until<input type="date" value={authorizedUntil} onChange={(e) => setAuthorizedUntil(e.target.value)} /></label>
             </div>
@@ -291,6 +291,9 @@ export default function EngagementWizard() {
               <label>Maximum authorized port range (to)<input type="number" min="1" max="65535" value={tcpPortTo} onChange={(e) => setTcpPortTo(e.target.value)} /></label>
             </div>
             <p className="muted-line">Default: all TCP ports (1-65535). Use the same start and end value to authorize one port only. This is a ceiling for the whole engagement - individual targets can narrow it further in the next step (Scope assets), but never widen it.</p>
+            {/* REQ-CONSOLE-011: expert switches are optional and folded away; all default to off. */}
+            <details className="advanced-options">
+            <summary>Advanced options (UDP discovery, Vector Agent, asset review)</summary>
             <label className="toggle-row">
               <input type="checkbox" checked={udpDiscoveryEnabled} onChange={(e) => setUdpDiscoveryEnabled(e.target.checked)} />
               <span>Enable bounded UDP discovery (53, 123, 161, 443, 500, 1900, 4500, 5060, 5353)</span>
@@ -303,9 +306,11 @@ export default function EngagementWizard() {
               <input type="checkbox" checked={assetReviewEnabled} onChange={(e) => setAssetReviewEnabled(e.target.checked)} />
               <span>Pause after discovery for manual asset review before scanning continues</span>
             </label>
+            </details>
+            <p className="muted-line">This saves a draft. Nothing is scanned until you authorize and activate the engagement in step 5.</p>
             <div className="form-actions">
               <button onClick={handleCreateEngagement} disabled={isCreating || !title || !authorizedFrom || !authorizedUntil}>
-                {isCreating ? "Creating…" : "Create engagement"}
+                {isCreating ? "Creating…" : "Save draft and continue"}
               </button>
             </div>
           </section>

@@ -16,7 +16,14 @@ from app.models.engagement import Engagement
 from app.models.finding import Finding, FindingObservation
 from app.models.report import Report
 from app.models.resolved_host import ResolvedHost
-from app.schemas.finding import DnsRecordOut, EngagementSummary, FindingExplanationOut, FindingOut
+from app.schemas.finding import (
+    FINDING_STATUSES,
+    DnsRecordOut,
+    EngagementSummary,
+    FindingExplanationOut,
+    FindingOut,
+    FindingTriageIn,
+)
 from app.models.user import User
 from app.security import require_user
 from app.settings_store import get_llm_config
@@ -170,6 +177,9 @@ def _finding_out(db: Session, finding: Finding, last_seen: dt.datetime | None = 
         epss=float(finding.epss) if finding.epss is not None else None,
         confidence=finding.confidence,
         status=finding.status,
+        status_note=finding.status_note,
+        status_changed_at=finding.status_changed_at,
+        status_changed_by=finding.status_changed_by,
         severity=finding.severity,
         risk_score=float(finding.risk_score) if finding.risk_score is not None else None,
         evidence=finding.evidence or None,
@@ -206,6 +216,39 @@ def list_findings(
     return [_finding_out(db, finding, last_seen_by_finding_id.get(finding.id)) for finding in rows]
 
 
+@router.patch("/{engagement_id}/findings/{finding_id}", response_model=FindingOut)
+def triage_finding(
+    engagement_id: uuid.UUID, finding_id: uuid.UUID, body: FindingTriageIn,
+    user: User = Depends(require_user), db: Session = Depends(get_db),
+):
+    """REQ-TRIAGE-001: mark a finding open / accepted risk / false positive /
+    resolved. The engagement's ownership is checked router-wide; the finding
+    must belong to that engagement. Every change is written to the
+    engagement's hash-chained audit log."""
+    finding = db.get(Finding, finding_id)
+    if finding is None or finding.engagement_id != engagement_id:
+        raise HTTPException(404, "finding not found")
+    previous = finding.status
+    finding.status = body.status
+    finding.status_note = body.note
+    finding.status_changed_at = dt.datetime.now(dt.timezone.utc)
+    finding.status_changed_by = user.email
+    db.commit()
+    append_audit_log(
+        db, engagement_id=engagement_id, actor=f"user:{user.email}", action="finding_triage",
+        decision=body.status, reason=body.note,
+        payload={"finding_id": str(finding.id), "title": finding.title, "from": previous, "to": body.status},
+    )
+    db.refresh(finding)
+    return _finding_out(db, finding, _last_seen(db, finding))
+
+
+def _last_seen(db: Session, finding: Finding) -> dt.datetime | None:
+    return db.scalar(
+        select(func.max(FindingObservation.observed_at)).where(FindingObservation.finding_id == finding.id)
+    )
+
+
 @router.get("/{engagement_id}/dns-records", response_model=list[DnsRecordOut])
 def list_dns_records(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     """DNS/Hosting-Inventar (CNAME-Ketten, Provider, Dangling-Status) fuer die
@@ -236,9 +279,15 @@ def summary(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
         f.title
         for f in sorted(findings, key=lambda f: f.risk_score or 0, reverse=True)[:3]
     ]
+    by_status = dict.fromkeys(FINDING_STATUSES, 0)
+    for status, count in db.execute(
+        select(Finding.status, func.count()).where(Finding.engagement_id == engagement_id).group_by(Finding.status)
+    ).all():
+        by_status[status] = count
     return EngagementSummary(
         risk_ampel=_AMPEL_BY_SEVERITY.get(worst, "blau"),
         counts_by_severity=counts,
+        counts_by_status=by_status,
         top_actions=top_actions,
     )
 
