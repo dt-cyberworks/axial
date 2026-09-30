@@ -1,0 +1,9 @@
+# GitHub issue #43: versions forced above what HexStrike's pinned mitmproxy 10.4.2
+# allows (tornado<=6.4.1, pyOpenSSL<24.3), because those releases carry known
+# HIGH CVEs. Verified in the runner image: hexstrike_server.py's mitmproxy
+# imports, DumpMaster construction and CA generation all work with these.
+# Applied by scripts/regenerate_hexstrike_lock.sh (uv --override). pip is run
+# with --no-deps, so mitmproxy's own upper bounds are not enforced at install.
+tornado>=6.5.8
+pyopenssl>=26.0.0
+cryptography>=46,<47

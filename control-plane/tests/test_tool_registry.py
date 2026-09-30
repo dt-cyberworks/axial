@@ -10,11 +10,11 @@ from app.tools.registry import CATEGORIES, EXECUTION_CLASSES
 
 def test_whitelist_contains_only_enabled_available_defaults():
     assert registry.enabled_whitelist() == {
-        "recon": {"subfinder", "amass"},
-        "fingerprint": {"httpx", "whatweb", "nmap", "sslscan", "testssl", "wafw00f",
-                        "redis-probe", "activemq-banner"},
+        "recon": {"subfinder"},
+        "fingerprint": {"httpx", "nmap", "testssl", "wafw00f",
+                        "redis-probe", "activemq-banner", "katana", "screenshot"},
         "vuln": {"nuclei", "nikto", "http_request", "ffuf", "activemq-openwire-probe"},
-        "cred": {"default-cred-check"},
+        "cred": set(),
         "exploit": set(),
     }
 

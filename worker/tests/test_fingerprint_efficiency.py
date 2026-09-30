@@ -25,6 +25,7 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(fingerprint.client, "add_finding", lambda *a, **k: {"id": "f-1"})
     monkeypatch.setattr(fingerprint.tool_execution, "record", lambda *a, **k: None)
     monkeypatch.setattr(fingerprint, "lookup_known_vuln", lambda *a: None)
+    monkeypatch.setattr(fingerprint.scan_executor, "execute_plan", lambda **k: None)
 
 
 def _asset(name: str, idx: int) -> dict:
@@ -49,7 +50,7 @@ def _dedup_harness(monkeypatch, hosts, ip_map, envelopes=None, record=None):
         return ([{"port": 443, "product": "nginx", "protocol": "tcp"}], True)
 
     monkeypatch.setattr(fingerprint, "_execute_port_scan", fake_execute)
-    monkeypatch.setattr(fingerprint, "_web_suite", lambda *a, **k: [])
+    monkeypatch.setattr(fingerprint, "_probe_web_surface", lambda *a, **k: (None, None))
     if record is not None:
         monkeypatch.setattr(fingerprint.tool_execution, "record",
                             lambda *a, **k: record.append(k))
@@ -134,7 +135,7 @@ def test_dns_is_rematerialized_per_host_not_once_per_run(monkeypatch):
     monkeypatch.setattr(fingerprint.client, "materialize_dns", fake_materialize)
     monkeypatch.setattr(fingerprint.client, "get_scan_envelope", lambda eid, host=None: BROAD)
     monkeypatch.setattr(fingerprint, "_execute_port_scan", lambda *a, **k: ([], True))
-    monkeypatch.setattr(fingerprint, "_web_suite", lambda *a, **k: [])
+    monkeypatch.setattr(fingerprint, "_probe_web_surface", lambda *a, **k: (None, None))
 
     fingerprint.run(EID, [_asset(h, i) for i, h in enumerate(hosts)], scan_run_id=RUN)
 
@@ -155,7 +156,7 @@ def test_no_rematerialization_when_the_scan_is_served_from_cache(monkeypatch):
     monkeypatch.setattr(fingerprint.client, "materialize_dns", fake_materialize)
     monkeypatch.setattr(fingerprint.client, "get_scan_envelope", lambda eid, host=None: BROAD)
     monkeypatch.setattr(fingerprint, "_execute_port_scan", lambda *a, **k: ([], True))
-    monkeypatch.setattr(fingerprint, "_web_suite", lambda *a, **k: [])
+    monkeypatch.setattr(fingerprint, "_probe_web_surface", lambda *a, **k: (None, None))
 
     fingerprint.run(EID, [_asset(h, i) for i, h in enumerate(hosts)], scan_run_id=RUN)
 
@@ -179,7 +180,7 @@ def test_negative_a_failed_rematerialization_does_not_scan_a_stale_ip(monkeypatc
         fingerprint, "_execute_port_scan",
         lambda eid, aid, target, ip, run: seen_ip.append(ip) or ([], False),
     )
-    monkeypatch.setattr(fingerprint, "_web_suite", lambda *a, **k: [])
+    monkeypatch.setattr(fingerprint, "_probe_web_surface", lambda *a, **k: (None, None))
     recorded: list[dict] = []
     monkeypatch.setattr(fingerprint.tool_execution, "record", lambda *a, **k: recorded.append(k))
 
@@ -219,44 +220,46 @@ def test_a_udp_service_on_443_is_not_read_as_an_https_listener():
 
 
 # --- REQ-FPEFF-004: deep tools deduplicate by SURFACE, not by host or IP ----
+# The scan plan carries the decision: a surface identical to one already
+# planned keeps its per-name checks (waf, tls) and skips the deep ones with the
+# reason `duplicate_vhost_of:<host>`.
 
 _LIVE = {"url": "https://a.example.com", "status_code": 404, "webserver": "nginx",
          "title": "404 Not Found", "content_length": 153}
+_DEEP = ("header_findings", "ffuf", "nuclei:tech", "nuclei:headless", "nuclei:takeover")
 
 
-def _suite_harness(monkeypatch, probes):
-    """probes: hostname -> the httpx result dict (or None for dead)."""
-    called: list[tuple[str, str]] = []
-    monkeypatch.setattr(fingerprint, "_http_probe",
-                        lambda eid, aid, host, run, sp=None: probes.get(host))
-    for tool in ("_web_enum", "_waf_detect", "_tls_scan", "_nuclei_scan", "_content_discovery"):
-        monkeypatch.setattr(
-            fingerprint, tool,
-            lambda eid, aid, host, *a, _t=tool, **k: called.append((host, _t)),
-        )
-    monkeypatch.setattr(fingerprint, "_record_deep_skip", lambda *a, **k: None)
-    return called
+def _plan_of(monkeypatch, probes, requests):
+    """probes: hostname -> httpx result (or None for dead). requests: [(host, port)]
+    probed in order against ONE run context. Returns {(host, port): {check_id: (state, reason)}}."""
+    from app.planner import IndexInfo, Options
+
+    monkeypatch.setattr(fingerprint, "_http_probe", lambda eid, aid, host, run, sp=None: probes.get(host))
+    ctx = fingerprint._RunContext()
+    surfaces = []
+    for host, port in requests:
+        live, surface = fingerprint._probe_web_surface(ctx, EID, f"asset-{host}", host, "1.2.3.4", RUN, port, [])
+        if surface is not None:
+            surfaces.append(surface)
+    payload = fingerprint._plan_payload(surfaces, Options(), IndexInfo())
+    return {(row["host"], row["port"]): {c["check_id"]: (c["state"], c["reason"]) for c in row["checks"]} for row in payload}
 
 
 def test_identical_surfaces_on_one_ip_deep_scan_once(monkeypatch):
-    called = _suite_harness(monkeypatch, {"a.example.com": _LIVE, "b.example.com": dict(_LIVE)})
-    ctx = fingerprint._RunContext()
-    fingerprint._web_suite(ctx, EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None)
-    fingerprint._web_suite(ctx, EID, "asset-2", "b.example.com", "1.2.3.4", RUN, None)
-
-    deep = [(h, t) for h, t in called if t in ("_web_enum", "_nuclei_scan", "_content_discovery")]
-    assert [h for h, _ in deep] == ["a.example.com"] * 3
+    plan = _plan_of(monkeypatch, {"a.example.com": _LIVE, "b.example.com": dict(_LIVE)},
+                    [("a.example.com", None), ("b.example.com", None)])
+    a, b = plan[("a.example.com", 443)], plan[("b.example.com", 443)]
+    assert all(a[c][0] == "planned" for c in _DEEP)
+    assert all(b[c] == ("skipped", "duplicate_vhost_of:a.example.com") for c in ("header_findings", "ffuf", "nuclei"))
 
 
 def test_httpx_and_testssl_always_run_per_hostname(monkeypatch):
-    called = _suite_harness(monkeypatch, {"a.example.com": _LIVE, "b.example.com": dict(_LIVE)})
-    ctx = fingerprint._RunContext()
-    fingerprint._web_suite(ctx, EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None)
-    fingerprint._web_suite(ctx, EID, "asset-2", "b.example.com", "1.2.3.4", RUN, None)
-
+    plan = _plan_of(monkeypatch, {"a.example.com": _LIVE, "b.example.com": dict(_LIVE)},
+                    [("a.example.com", None), ("b.example.com", None)])
     # A certificate presented for one name says nothing about another.
-    assert [h for h, t in called if t == "_tls_scan"] == ["a.example.com", "b.example.com"]
-    assert [h for h, t in called if t == "_waf_detect"] == ["a.example.com", "b.example.com"]
+    for host in ("a.example.com", "b.example.com"):
+        assert plan[(host, 443)]["testssl"][0] == "planned"
+        assert plan[(host, 443)]["wafw00f"][0] == "planned"
 
 
 @pytest.mark.parametrize("field,value", [
@@ -268,12 +271,9 @@ def test_httpx_and_testssl_always_run_per_hostname(monkeypatch):
 def test_negative_any_single_fingerprint_difference_means_both_are_scanned(monkeypatch, field, value):
     other = dict(_LIVE)
     other[field] = value
-    called = _suite_harness(monkeypatch, {"a.example.com": _LIVE, "b.example.com": other})
-    ctx = fingerprint._RunContext()
-    fingerprint._web_suite(ctx, EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None)
-    fingerprint._web_suite(ctx, EID, "asset-2", "b.example.com", "1.2.3.4", RUN, None)
-
-    scanned = {h for h, t in called if t == "_nuclei_scan"}
+    plan = _plan_of(monkeypatch, {"a.example.com": _LIVE, "b.example.com": other},
+                    [("a.example.com", None), ("b.example.com", None)])
+    scanned = {h for (h, _), checks in plan.items() if checks["nuclei:tech"][0] == "planned"}
     assert scanned == {"a.example.com", "b.example.com"}, f"{field} difference was wrongly collapsed"
 
 
@@ -281,55 +281,54 @@ def test_negative_a_404_root_with_no_duplicate_is_still_fully_deep_scanned(monke
     """The explicit non-goal: content discovery exists to find paths that
     respond where the root does not, so a 404 root is never itself a reason
     to skip ffuf."""
-    called = _suite_harness(monkeypatch, {"only.example.com": _LIVE})
-    fingerprint._web_suite(fingerprint._RunContext(), EID, "asset-1", "only.example.com", "1.2.3.4", RUN, None)
-
-    tools = {t for _, t in called}
-    assert "_content_discovery" in tools and "_nuclei_scan" in tools and "_web_enum" in tools
+    plan = _plan_of(monkeypatch, {"only.example.com": _LIVE}, [("only.example.com", None)])
+    checks = plan[("only.example.com", 443)]
+    assert checks["ffuf"][0] == "planned" and checks["nuclei:tech"][0] == "planned"
+    assert checks["header_findings"][0] == "planned"
 
 
 def test_negative_an_unknown_fingerprint_is_never_deduplicated(monkeypatch):
     """No status code => un-deduplicable => both hosts scanned in full."""
     blank = {"url": "https://x", "status_code": None, "webserver": "", "title": "", "content_length": None}
-    called = _suite_harness(monkeypatch, {"a.example.com": dict(blank), "b.example.com": dict(blank)})
-    ctx = fingerprint._RunContext()
-    fingerprint._web_suite(ctx, EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None)
-    fingerprint._web_suite(ctx, EID, "asset-2", "b.example.com", "1.2.3.4", RUN, None)
-    assert {h for h, t in called if t == "_nuclei_scan"} == {"a.example.com", "b.example.com"}
+    plan = _plan_of(monkeypatch, {"a.example.com": dict(blank), "b.example.com": dict(blank)},
+                    [("a.example.com", None), ("b.example.com", None)])
+    assert {h for (h, _), c in plan.items() if c["nuclei:tech"][0] == "planned"} == {"a.example.com", "b.example.com"}
 
 
 def test_an_unresolved_host_has_no_surface_key_at_all():
     """Defensive counterpart: without a resolved IP there is no surface
     identity to compare, so nothing can ever be collapsed onto it.
 
-    Tested directly rather than through _web_suite, because REQ-DISCO-004 now
-    skips the whole suite for an unresolved host before this is ever reached.
-    """
+    Tested directly rather than through the probe, because REQ-DISCO-004 skips
+    an unresolved host before this is ever reached."""
     assert fingerprint._web_surface_key(None, 443, _LIVE) is None
 
 
 def test_a_different_port_on_the_same_ip_is_a_different_surface(monkeypatch):
-    called = _suite_harness(monkeypatch, {"a.example.com": _LIVE})
-    ctx = fingerprint._RunContext()
-    fingerprint._web_suite(ctx, EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None)
-    fingerprint._web_suite(ctx, EID, "asset-1", "a.example.com", "1.2.3.4", RUN, 8080)
-    assert len([1 for _, t in called if t == "_nuclei_scan"]) == 2
+    plan = _plan_of(monkeypatch, {"a.example.com": _LIVE}, [("a.example.com", None), ("a.example.com", 8080)])
+    assert plan[("a.example.com", 443)]["nuclei:tech"][0] == "planned"
+    assert plan[("a.example.com", 8080)]["nuclei:tech"][0] == "planned"
 
 
 # --- REQ-FPEFF-005: ordering ------------------------------------------------
 
-def test_web_suite_runs_cheapest_and_most_informative_first(monkeypatch):
-    called = _suite_harness(monkeypatch, {"a.example.com": _LIVE})
-    fingerprint._web_suite(fingerprint._RunContext(), EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None)
+def test_the_plan_runs_cheapest_and_most_informative_first(monkeypatch):
+    from app.planner import IndexInfo, Options
 
-    order = [t for _, t in called]
-    assert order == ["_waf_detect", "_tls_scan", "_web_enum", "_content_discovery", "_nuclei_scan"]
+    monkeypatch.setattr(fingerprint, "_http_probe", lambda eid, aid, host, run, sp=None: _LIVE)
+    _, surface = fingerprint._probe_web_surface(
+        fingerprint._RunContext(), EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None, [])
+    (row,) = fingerprint._plan_payload([surface], Options(), IndexInfo())
+    order = [c["check_id"] for c in row["checks"] if c["state"] == "planned"]
+    assert order[:4] == ["wafw00f", "testssl", "header_findings", "ffuf"]
+    assert order.index("nuclei:tech") < order.index("nuclei:products") < order.index("nuclei:headless")
+    assert order[-1] == "nuclei:takeover", "the most expensive checks run last"
 
 
-def test_a_dead_port_still_runs_no_further_tools(monkeypatch):
-    called = _suite_harness(monkeypatch, {"a.example.com": None})
-    fingerprint._web_suite(fingerprint._RunContext(), EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None)
-    assert called == []
+def test_a_dead_port_becomes_no_surface(monkeypatch):
+    monkeypatch.setattr(fingerprint, "_http_probe", lambda eid, aid, host, run, sp=None: None)
+    assert fingerprint._probe_web_surface(
+        fingerprint._RunContext(), EID, "asset-1", "a.example.com", "1.2.3.4", RUN, None, []) == (None, None)
 
 
 def test_negative_a_failed_scan_is_never_cached_or_reported_as_a_reused_success(monkeypatch):
@@ -350,7 +349,7 @@ def test_negative_a_failed_scan_is_never_cached_or_reported_as_a_reused_success(
         fingerprint, "_execute_port_scan",
         lambda eid, aid, target, ip, run: attempts.append(target) or ([], False),
     )
-    monkeypatch.setattr(fingerprint, "_web_suite", lambda *a, **k: [])
+    monkeypatch.setattr(fingerprint, "_probe_web_surface", lambda *a, **k: (None, None))
     recorded: list[dict] = []
     monkeypatch.setattr(fingerprint.tool_execution, "record", lambda *a, **k: recorded.append(k))
 

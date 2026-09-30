@@ -35,7 +35,7 @@ Expected results:
   strip wildcards, and keep only names within the queried root; an HTTP error
   or a rate-limit message yields an empty set (best-effort).
 
-## TC-SCANQUAL-002: nikto runs the broad non-intrusive tuning
+## TC-SCANQUAL-002: nikto runs the broad non-intrusive tuning (superseded by TC-PIPE-013)
 
 Requirements:
 
@@ -43,17 +43,17 @@ Requirements:
 
 Automated tests:
 
-- `worker/tests/test_scan_quality.py`
+- `worker/tests/test_scan_pipeline_v2.py`
 
 Objective:
 
-Verify the nikto invocation requests tuning categories 1,2,3,b and never the
-intrusive/destructive categories.
+Superseded (REQ-PIPE-013, 2026-09-29): the automatic scan no longer runs nikto,
+so the former tuning check has nothing to verify. What replaces it is that no
+scan step runs nikto and that header findings come from httpx.
 
 Expected results:
 
-- The nikto `additional_args` contain `-Tuning 123b`.
-- No intrusive category (4,5,6,7,8,9,0,a,c) is requested.
+- No step of the web suite proposes or runs nikto (TC-PIPE-013).
 
 ## TC-SCANQUAL-003: Web tools cover nmap-discovered ports
 

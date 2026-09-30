@@ -31,9 +31,9 @@
 	# answer the console's fetch() from the cached HTML page of the same URL -
 	# the engagement page then never loads. API data (findings, scope) must
 	# not be stored in the browser cache at all. One Cache-Control per class:
-	@shared_paths path /auth* /engagements* /approvals* /settings* /tools* /admin* /callback*
+	@shared_paths path /auth* /engagements* /approvals* /findings* /settings* /tools* /admin* /callback*
 	@hashed_assets path /assets/*
-	@app_shell not path /assets/* /auth* /engagements* /approvals* /settings* /tools* /admin* /callback*
+	@app_shell not path /assets/* /auth* /engagements* /approvals* /findings* /settings* /tools* /admin* /callback*
 	header @shared_paths {
 		defer
 		Cache-Control "no-store"
@@ -62,16 +62,16 @@
 		# SPA shell keeps the bandwidth benefit, since it has no per-request
 		# secrets to leak this way.
 		@not_api {
-			not path /auth* /engagements* /approvals* /settings* /tools* /admin* /callback*
+			not path /auth* /engagements* /approvals* /findings* /settings* /tools* /admin* /callback*
 		}
 		encode @not_api gzip
 
 		@internal path /internal*
 		respond @internal 404
 
-		# /engagements*, /settings*, and /admin* also match real frontend SPA
+		# /engagements*, /findings*, /settings*, and /admin* also match real frontend SPA
 		# routes at the exact same path shape (/engagements/:id and its
-		# sub-routes, bare /settings, /admin/users, /admin/audit) - a hard
+		# sub-routes, /findings, bare /settings, /admin/users, /admin/audit) - a hard
 		# navigation/refresh there must still get the SPA shell, not the
 		# backend's JSON. Only the app's own fetch()/XHR calls (which never
 		# send an HTML-preferring Accept header, unlike a real browser
@@ -81,7 +81,7 @@
 		# over-matched, serving the backend's 404 instead of the SPA on a
 		# hard refresh.
 		@api {
-			path /auth* /engagements* /approvals* /settings* /tools* /admin*
+			path /auth* /engagements* /approvals* /findings* /settings* /tools* /admin*
 			not header Accept *text/html*
 		}
 		reverse_proxy @api 127.0.0.1:{$PROD_API_PORT}
@@ -119,16 +119,16 @@
 		# gzip is scoped away from the API paths, kept for the static SPA
 		# shell.
 		@not_api {
-			not path /auth* /engagements* /approvals* /settings* /tools* /admin* /callback*
+			not path /auth* /engagements* /approvals* /findings* /settings* /tools* /admin* /callback*
 		}
 		encode @not_api gzip
 
 		@internal path /internal*
 		respond @internal 404
 
-		# /engagements*, /settings*, and /admin* also match real frontend SPA
+		# /engagements*, /findings*, /settings*, and /admin* also match real frontend SPA
 		# routes at the exact same path shape (/engagements/:id and its
-		# sub-routes, bare /settings, /admin/users, /admin/audit) - a hard
+		# sub-routes, /findings, bare /settings, /admin/users, /admin/audit) - a hard
 		# navigation/refresh there must still get the SPA shell, not the
 		# backend's JSON. Only the app's own fetch()/XHR calls (which never
 		# send an HTML-preferring Accept header, unlike a real browser
@@ -138,7 +138,7 @@
 		# over-matched, serving the backend's 404 instead of the SPA on a
 		# hard refresh.
 		@api {
-			path /auth* /engagements* /approvals* /settings* /tools* /admin*
+			path /auth* /engagements* /approvals* /findings* /settings* /tools* /admin*
 			not header Accept *text/html*
 		}
 		reverse_proxy @api 127.0.0.1:{$INT_API_PORT}

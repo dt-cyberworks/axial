@@ -35,7 +35,8 @@ assert.match(graph, /cytoscape/);
 assert.match(graph, /name:\s*"dagre"/, "layout must be deterministic (layered), not randomized force-directed");
 
 // The engagement detail page mounts the graph section.
-assert.match(detail, /import SurfaceGraph/);
+// REQ-CONSOLE-015: loaded on demand, so the graph library is not in the main bundle.
+assert.match(detail, /const SurfaceGraph = lazy\(\(\) => import\("\.\.\/components\/SurfaceGraph"\)\)/);
 assert.match(detail, /<SurfaceGraph engagementId=\{id\}/);
 
 console.log("ok - REQ-GRAPH-004/005 attack-surface graph dashboard is wired and scoped");

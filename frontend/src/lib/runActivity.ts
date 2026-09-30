@@ -129,6 +129,8 @@ const TOOL_LABELS: Record<string, string> = {
   testssl: "TLS test",
   nuclei: "Nuclei",
   nikto: "Nikto",
+  katana: "Crawler",
+  screenshot: "Screenshot",
   wafw00f: "WAF detection",
   ffuf: "Content discovery",
   subfinder: "Subdomain discovery",
@@ -182,6 +184,19 @@ function compoundReasonExplanation(reason: string): string | null {
       `Reduced detection coverage: ${tools || "a core tool"} was attempted but never once succeeded ` +
       `during this run, so this result is NOT a clean bill of health — parts of the attack surface ` +
       `were never actually examined. Technical detail: ${detail}.`
+    );
+  }
+  if (reason.startsWith("coverage_partial:")) {
+    const detail = reason.slice("coverage_partial:".length);
+    const tools = detail
+      .split(",")
+      .map((part) => part.split("=")[0])
+      .filter(Boolean)
+      .join(", ");
+    return (
+      `Partial coverage: at least one ${tools || "check"} check stopped at its time budget before it finished. ` +
+      `Everything it reported before that is real, but a short findings list does NOT mean the ` +
+      `examined surface is clean. Technical detail: ${detail}.`
     );
   }
   if (reason.startsWith("agent_incomplete:")) {

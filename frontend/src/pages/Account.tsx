@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import QRCode from "qrcode";
+import { QR_FAILED, QR_LOADING, qrCodeDataUrl } from "../lib/qrCode";
 
-import { api, setSessionToken } from "../api/client";
+import { api } from "../api/client";
 import { useLogout } from "../lib/useLogout";
 
 export default function Account() {
@@ -19,21 +19,23 @@ export default function Account() {
   const [reenrollPassword, setReenrollPassword] = useState("");
   const [reenroll, setReenroll] = useState<{ secret: string; otpauth_uri: string } | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState("");
+  const [qrFailed, setQrFailed] = useState(false);
   const [reenrollCode, setReenrollCode] = useState("");
   const [newBackupCodes, setNewBackupCodes] = useState<string[] | null>(null);
   const [mfaError, setMfaError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (reenroll) QRCode.toDataURL(reenroll.otpauth_uri, { width: 200 }).then(setQrDataUrl).catch(() => setQrDataUrl(""));
+    if (!reenroll) return;
+    setQrDataUrl("");
+    setQrFailed(false);
+    qrCodeDataUrl(reenroll.otpauth_uri).then(setQrDataUrl).catch(() => setQrFailed(true));
   }, [reenroll]);
 
   const changePasswordMutation = useMutation({
     mutationFn: () => api.changePassword(currentPassword, newPassword),
-    // GitHub issue #26: this action revokes every other session and issues
-    // this tab a fresh one - without picking up the new token here, the
-    // next request would 401 on the now-revoked old one.
-    onSuccess: (r) => {
-      setSessionToken(r.session_token);
+    // GitHub issue #26: this revokes every other session and issues this
+    // browser a fresh cookie, which it carries from here on.
+    onSuccess: () => {
       setPwSuccess(true); setPwError(null); setCurrentPassword(""); setNewPassword("");
       qc.invalidateQueries({ queryKey: ["sessions"] });
     },
@@ -50,7 +52,6 @@ export default function Account() {
     mutationFn: () => api.mfaReenrollConfirm(reenrollCode),
     // GitHub issue #26: same reasoning as changePasswordMutation above.
     onSuccess: (r) => {
-      setSessionToken(r.session_token);
       setNewBackupCodes(r.backup_codes); setReenroll(null); setMfaError(null);
       qc.invalidateQueries({ queryKey: ["sessions"] });
     },
@@ -97,7 +98,9 @@ export default function Account() {
           </>
         ) : reenroll ? (
           <>
-            {qrDataUrl && <img src={qrDataUrl} alt="New MFA QR code" style={{ display: "block", margin: "0 auto 12px" }} />}
+            {qrDataUrl
+              ? <img src={qrDataUrl} alt="New MFA QR code" style={{ display: "block", margin: "0 auto 12px" }} />
+              : <p className={qrFailed ? "error-block" : "muted-line"} style={{ textAlign: "center" }}>{qrFailed ? QR_FAILED : QR_LOADING}</p>}
             <p className="muted-line" style={{ wordBreak: "break-all", textAlign: "center" }}>Manual entry: <code>{reenroll.secret}</code></p>
             <label>6-digit code
               <input inputMode="numeric" maxLength={6} value={reenrollCode} onChange={(e) => setReenrollCode(e.target.value)} />

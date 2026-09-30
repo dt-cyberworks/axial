@@ -40,7 +40,7 @@ def test_parse_raw_probe_handles_missing_result():
 
 def test_redis_probe_skips_without_a_materialized_ip():
     obs = dispatch._dispatch_redis_probe("eid", "asset-1", "redis.example", None, "run-1")
-    assert "keine materialisierte IP" in obs.summary
+    assert "no materialized IP" in obs.summary
 
 
 def test_redis_probe_reports_unauthenticated_pong_as_a_high_severity_finding(monkeypatch):
@@ -99,7 +99,7 @@ def test_redis_probe_no_response_is_not_a_finding(monkeypatch):
 
 def test_activemq_banner_skips_without_a_materialized_ip():
     obs = dispatch._dispatch_activemq_banner("eid", "asset-1", "mq.example", None, "run-1")
-    assert "keine materialisierte IP" in obs.summary
+    assert "no materialized IP" in obs.summary
 
 
 def test_activemq_banner_reports_a_finding_on_any_readable_greeting(monkeypatch):

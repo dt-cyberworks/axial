@@ -2,7 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { api, type ScopeAsset } from "../api/client";
+import { api, type ScanProfile, type ScopeAsset } from "../api/client";
+import DiscoverySwitches, { DEFAULT_DISCOVERY_FLAGS, discoveryFlagSummary, type DiscoveryFlags } from "../components/DiscoverySwitches";
+import ScanDepth from "../components/ScanDepth";
 
 type EnabledChoice = "inherit" | "on" | "off";
 interface ToolOverrideState { enabled: EnabledChoice; approval: boolean; }
@@ -36,6 +38,8 @@ export default function EngagementEdit() {
   const [tcpPortFrom, setTcpPortFrom] = useState("1");
   const [tcpPortTo, setTcpPortTo] = useState("65535");
   const [udpDiscoveryEnabled, setUdpDiscoveryEnabled] = useState(false);
+  const [discoveryFlags, setDiscoveryFlags] = useState<DiscoveryFlags>(DEFAULT_DISCOVERY_FLAGS);
+  const [scanProfile, setScanProfile] = useState<ScanProfile>("standard");
   const [formError, setFormError] = useState<string | null>(null);
 
   const { data: engagement, isLoading, error } = useQuery({
@@ -55,6 +59,13 @@ export default function EngagementEdit() {
     setTcpPortFrom(String(engagement.tcp_port_from));
     setTcpPortTo(String(engagement.tcp_port_to));
     setUdpDiscoveryEnabled(engagement.udp_discovery_enabled);
+    setScanProfile(engagement.scan_profile ?? "standard");
+    setDiscoveryFlags({
+      subfinder_enabled: engagement.subfinder_enabled,
+      crawling_enabled: engagement.crawling_enabled,
+      oob_enabled: engagement.oob_enabled,
+      screenshots_enabled: engagement.screenshots_enabled,
+    });
   }, [engagement]);
 
   const isDraft = engagement?.status === "draft";
@@ -70,6 +81,9 @@ export default function EngagementEdit() {
         emergency_contact: emergencyContact || null,
         ai_testing_allowed: aiTestingAllowed,
         asset_review_enabled: assetReviewEnabled,
+        // Editable at any status: they can only narrow what scope and grants allow.
+        ...discoveryFlags,
+        scan_profile: scanProfile,
         // The scan envelope can only change while draft (control-plane 409s
         // otherwise) - only send it then, so a save on an active engagement
         // never fails purely because these unrelated fields were included.
@@ -274,6 +288,20 @@ export default function EngagementEdit() {
           <input type="checkbox" checked={assetReviewEnabled} onChange={(e) => setAssetReviewEnabled(e.target.checked)} />
           <span>Pause after discovery for manual asset review before scanning continues</span>
         </label>
+
+        <h2 style={{ marginTop: 18 }}>Discovery extras</h2>
+        <p className="muted-line">
+          Each switch applies from the next scan. Scope, tool grants and the Scope Gateway still decide what may run;
+          turning a switch off only ever narrows it.
+        </p>
+        <DiscoverySwitches flags={discoveryFlags} onChange={setDiscoveryFlags} />
+
+        <h2 style={{ marginTop: 18 }}>Scan depth</h2>
+        <p className="muted-line">
+          Applies from the next scan. It only changes how many checks run on each web service; scope, tool grants and
+          the switches above still decide what is allowed.
+        </p>
+        <ScanDepth value={scanProfile} onChange={setScanProfile} />
 
         <h2 style={{ marginTop: 18 }}>Scan envelope</h2>
         <div className="warning-block">

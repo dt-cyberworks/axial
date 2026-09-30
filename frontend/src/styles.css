@@ -831,8 +831,6 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 
 @media (max-width: 1040px) {
   .app-shell { grid-template-columns: 1fr; }
-  .sidebar { position: static; height: auto; }
-  .side-nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .timeline-panel { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .console-grid, .wizard-layout, .current-activity-panel, .phase-handoff { grid-template-columns: 1fr; }
 }
@@ -1107,3 +1105,97 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .advanced-options summary { cursor: pointer; color: var(--ink-soft); font-weight: 700; }
 .advanced-options[open] summary { margin-bottom: 8px; }
 
+
+/* REQ-CONSOLE-013: engagement sections as page-level tabs (findings first). */
+.page-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.page-tab {
+  border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: transparent;
+  min-height: 44px; padding: 10px 16px; color: var(--muted); font-weight: 700; white-space: nowrap;
+}
+.page-tab:hover { color: var(--text); background: transparent; }
+.page-tab.active { color: var(--text); border-bottom-color: var(--teal); }
+.page-tab .tab-count { margin-left: 8px; }
+.lazy-placeholder { padding: 16px; }
+
+/* REQ-CONSOLE-016: filters and pager of the all-findings page. */
+.findings-filters { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.findings-filters label { display: grid; gap: 4px; font-size: 0.82rem; color: var(--muted); font-weight: 600; }
+.findings-filters select, .findings-filters input { min-width: 180px; }
+.findings-filters .search-filter { flex: 1 1 240px; }
+.findings-filters .search-filter input { width: 100%; }
+.pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line); color: var(--muted); }
+.finding-open-link { display: inline-block; margin: 0 0 12px; }
+
+/* REQ-CONSOLE-014: small screens get a top bar and a drawer instead of the
+   sidebar. The approval modal (z-index 110) stays above all of this. */
+.mobile-topbar, .nav-backdrop { display: none; }
+@media (max-width: 1040px) {
+  .mobile-topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 97; height: 56px; padding: 0 12px 0 14px;
+    background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .menu-button { min-width: 44px; min-height: 44px; padding: 0; font-size: 1.35rem; line-height: 1; }
+  .sidebar {
+    position: fixed; top: 56px; left: 0; bottom: 0; z-index: 95;
+    width: min(280px, 85vw); height: auto; overflow-y: auto;
+    transform: translateX(-100%); visibility: hidden;
+    transition: transform 0.2s ease, visibility 0.2s;
+  }
+  .sidebar .brand-block { display: none; }
+  /* Opening shows the drawer at once (so focus can move into it); closing keeps
+     it visible until it has slid out. */
+  .app-shell.nav-open .sidebar { transform: none; visibility: visible; transition: transform 0.2s ease; }
+  .nav-backdrop { display: block; position: fixed; inset: 56px 0 0 0; z-index: 90; background: rgba(4,7,12,0.6); }
+  .side-nav { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
+}
+
+/* REQ-CONSOLE-013: readiness and the start action in one compact row. */
+.start-run-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px 16px; padding: 12px 16px; }
+.start-run-panel .warning-block, .start-run-panel .success-block, .start-run-panel .error-block { margin: 0; padding: 8px 12px; }
+.start-run-panel .warning-block ul { margin: 4px 0 0; padding-left: 18px; }
+.start-run-panel .muted-line { margin: 0; }
+.start-run-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.start-run-error { grid-column: 1 / -1; }
+@media (max-width: 760px) {
+  .start-run-panel { grid-template-columns: 1fr; }
+  .start-run-actions { justify-content: flex-start; }
+}
+.severity-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.severity-chip { min-height: 34px; padding: 4px 12px; border-radius: 999px; background: var(--surface-2); color: var(--ink-soft); font-weight: 700; gap: 6px; }
+.severity-chip.selected { border-color: var(--teal); color: var(--text); box-shadow: inset 0 0 0 1px var(--teal); }
+.severity-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+.severity-dot.sev-critical { background: var(--red-critical); }
+.severity-dot.sev-high { background: var(--red); }
+.severity-dot.sev-medium { background: var(--yellow); }
+.severity-dot.sev-low { background: var(--blue); }
+.severity-dot.sev-info { background: #5b6675; }
+.findings-table a, .finding-open-link { color: var(--teal); text-decoration: none; }
+.findings-table a:hover, .finding-open-link:hover { text-decoration: underline; }
+/* REQ-CONSOLE-013: on phones the four header metrics take two rows, not four. */
+@media (max-width: 760px) {
+  .status-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .status-band > div:nth-child(odd) { border-right: 1px solid var(--line); }
+  .status-band > div:nth-last-child(-n+2) { border-bottom: 0; }
+}
+
+/* REQ-PIPE-005/010: scan depth choice and the run's scan plan. */
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.scan-depth { border: 0; padding: 0; margin: 0; display: grid; gap: 0; }
+.scan-depth .toggle-row { align-items: start; margin: 8px 0; }
+.scan-depth .toggle-row input { margin-top: 3px; }
+.plan-surfaces { display: grid; gap: 12px; padding: 12px 16px 16px; }
+.plan-surface { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.plan-surface-head {
+  width: 100%; display: grid; gap: 4px; padding: 10px 14px; text-align: left; border: 0; border-radius: 0; background: var(--surface-2);
+  color: inherit; cursor: pointer; font: inherit; justify-content: stretch; justify-items: start; align-items: start; white-space: normal;
+}
+.plan-surface-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.plan-counts { display: flex; gap: 6px; flex-wrap: wrap; }
+.plan-surface > p { margin: 8px 14px 0; }
+.plan-check.plan-skipped td { color: var(--muted); }
+.plan-check.plan-failed td:first-child, .plan-check.plan-partial td:first-child { font-weight: 700; }
+.plan-check td:nth-child(5) { white-space: nowrap; }

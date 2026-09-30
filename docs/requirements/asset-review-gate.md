@@ -127,3 +127,35 @@ lowercasing `root_values` at the point it's built. Regression test:
 `worker/tests/test_discovery_scope.py` (proven to fail against the old code
 and pass against the fix). Pending deployment to production - the fix lives
 in the worker's Docker image and needs a rebuild, not a hot-reload.
+
+## REQ-ASSETREVIEW-009: Only current, active-eligible candidates leave discovery
+
+**Security review (R3):** approved by johannes (project/security owner) on
+2026-09-29. A real dev scan against `cloud.example.com` is still owed at deploy time.
+
+GitHub issue #33: discovery computed `in_scope` per candidate but returned
+every candidate anyway, re-added previously known IPs without re-checking the
+scope, ignored `active_allowed` on single `ip` assets, matched passive-source
+names without a label boundary, and could only ever set `in_scope` to true.
+The Scope Gateway still denied every active call, but asset review, the
+fingerprint phase, and the agent saw a broader, staler list than the scope.
+
+Acceptance criteria:
+
+- Discovery returns (to asset review and fingerprinting) only values that the
+  current scope allows, that no deny rule covers, and that an
+  `active_allowed` allow rule covers. Domain and wildcard matching is the
+  gateway's own (a wildcard covers subdomains, not the bare root).
+- [Negative test] A single `ip` asset with `active_allowed=false` is never a
+  candidate, like a passive-only `cidr` asset is never swept.
+- [Negative test] A previously discovered IP or name that no current allow
+  rule covers, or that a new deny rule covers, is not a candidate on the
+  next run and its stored `in_scope` is set to false.
+- [Negative test] Passive-source names are matched on a label boundary:
+  `badexample.com` never enters the pool for `example.com`.
+- `discovered_asset.in_scope` follows the current scope both ways (demoted
+  and promoted again), so the agent's in-scope pool reflects the current
+  scope. Demoted values stay in the inventory.
+- The asset-review dialog says the listed hosts are the ones the current
+  scope allows for active testing.
+

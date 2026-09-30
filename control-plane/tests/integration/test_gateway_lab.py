@@ -219,15 +219,38 @@ def test_outside_time_window_blocked(db, lab_engagement):
 
 
 def test_active_without_grant_blocked(db, lab_engagement):
-    """cred hat im lab_engagement keinen aktiven Grant -> no_tool_grant.
-    (active_allowed am Asset ist true, aber der Grant fehlt.)"""
+    """Ohne aktiven Grant fuer die Kategorie -> no_tool_grant.
+    (active_allowed am Asset ist true, aber der Grant fehlt.) Kein aktiviertes
+    cred-Tool mehr (REQ-COVER-005): der vuln-Grant wird deshalb entfernt."""
+    from app.models.engagement import ToolGrant
+
+    db.query(ToolGrant).filter_by(engagement_id=lab_engagement.id, tool_category="vuln").delete()
+    db.commit()
     call = ToolCall(
-        engagement_id=lab_engagement.id, tool="default-cred-check", category="cred",
-        mode="active", target="metasploitable2", args={"max_attempts": 3, "wordlist": "default"},
+        engagement_id=lab_engagement.id, tool="nuclei", category="vuln",
+        mode="active", target="metasploitable2",
     )
     decision = authorize(db, call)
     assert not decision.allowed
     assert decision.reason == "no_tool_grant"
+
+
+@pytest.mark.parametrize("tool,category,mode", [
+    ("amass", "recon", "passive"),
+    ("whatweb", "fingerprint", "active"),
+    ("sslscan", "fingerprint", "active"),
+    ("default-cred-check", "cred", "active"),
+])
+def test_negative_tools_retired_by_req_cover_005_are_denied(db, lab_engagement, tool, category, mode):
+    """REQ-COVER-005: enabled-but-never-used tools left the runtime whitelist."""
+    call = ToolCall(
+        engagement_id=lab_engagement.id, tool=tool, category=category,
+        mode=mode, target="metasploitable2",
+    )
+    decision = authorize(db, call)
+    assert not decision.allowed
+    # cred has no grant in this fixture, so it is refused one step earlier.
+    assert decision.reason in {"tool_not_whitelisted", "no_tool_grant"}
 
 
 # --------------------------------------------------------------------------

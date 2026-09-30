@@ -135,35 +135,38 @@ def test_negative_an_unresolved_host_runs_no_web_tools_at_all(monkeypatch):
     requests plus fabricated findings."""
     called: list[str] = []
     recorded: list[dict] = []
-    for tool in ("_http_probe", "_web_enum", "_waf_detect", "_tls_scan", "_nuclei_scan", "_content_discovery"):
+    for tool in ("_http_probe", "_header_findings", "_waf_detect", "_tls_scan", "_nuclei_pass", "_content_discovery"):
         monkeypatch.setattr(fingerprint, tool, lambda *a, _t=tool, **k: called.append(_t))
     monkeypatch.setattr(fingerprint.tool_execution, "record", lambda *a, **k: recorded.append(k))
 
-    out = fingerprint._web_suite(
-        fingerprint._RunContext(), EID, "asset-1", "nxdomain.example.com", None, RUN, None,
+    live, surface = fingerprint._probe_web_surface(
+        fingerprint._RunContext(), EID, "asset-1", "nxdomain.example.com", None, RUN, None, [],
     )
 
-    assert out == []
+    assert (live, surface) == (None, None), "an unresolved host is not a surface"
     assert called == [], "no web tool may run without a materialized IP"
     # Every skipped tool is recorded, so the audit trail explains the absence.
-    assert {r["tool"] for r in recorded} == {"httpx", "nikto", "wafw00f", "testssl", "ffuf", "nuclei"}
+    assert {r["tool"] for r in recorded} == {"httpx", "wafw00f", "testssl", "ffuf", "nuclei"}
     assert all(r["result"]["error_reason"] == "materialized_ip_missing" for r in recorded)
 
 
-def test_a_resolved_host_is_unaffected_and_runs_the_suite(monkeypatch):
-    called: list[str] = []
+def test_a_resolved_host_is_unaffected_and_is_planned_the_suite(monkeypatch):
+    from app.planner import IndexInfo, Options
+
     monkeypatch.setattr(fingerprint, "_http_probe",
                         lambda *a, **k: {"url": "https://h", "status_code": 200, "webserver": "nginx",
                                          "title": "t", "content_length": 10})
-    for tool in ("_web_enum", "_waf_detect", "_tls_scan", "_nuclei_scan", "_content_discovery"):
-        monkeypatch.setattr(fingerprint, tool, lambda *a, _t=tool, **k: called.append(_t))
     monkeypatch.setattr(fingerprint.tool_execution, "record", lambda *a, **k: None)
 
-    fingerprint._web_suite(
-        fingerprint._RunContext(), EID, "asset-1", "real.example.com", "192.0.2.10", RUN, None,
+    live, surface = fingerprint._probe_web_surface(
+        fingerprint._RunContext(), EID, "asset-1", "real.example.com", "192.0.2.10", RUN, None, [],
     )
 
-    assert called == ["_waf_detect", "_tls_scan", "_web_enum", "_content_discovery", "_nuclei_scan"]
+    assert live is not None and surface["service_class"] == "web"
+    (row,) = fingerprint._plan_payload([surface], Options(), IndexInfo())
+    planned = [c["check_id"] for c in row["checks"] if c["state"] == "planned"]
+    assert planned[:4] == ["wafw00f", "testssl", "header_findings", "ffuf"]
+    assert {"nuclei:tech", "nuclei:headless", "nuclei:takeover"} <= set(planned)
 
 
 # --- REQ-DISCO-003: a denial-marked response is never target evidence ------

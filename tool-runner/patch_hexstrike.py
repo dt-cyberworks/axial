@@ -173,6 +173,43 @@ def patch_source(source: str) -> str:
         'def list_processes():'
     )
     source = _replace_once(source, marker, endpoint, "run termination endpoint")
+    # REQ-PIPE-007: the worker declares a time budget per check in the
+    # X-ASM-Timeout-Seconds header; the one function every endpoint uses
+    # enforces it, bounded by runner_budget.HARD_MAX_SECONDS. Without the header
+    # the upstream default (COMMAND_TIMEOUT) still applies.
+    source = _replace_once(
+        source,
+        "    executor = EnhancedCommandExecutor(command)\n    result = executor.execute()",
+        "    executor = EnhancedCommandExecutor(command, timeout=_asm_command_timeout())\n    result = executor.execute()",
+        "per-request command budget",
+    )
+    source = _replace_once(
+        source,
+        "@app.before_request\n",
+        "from runner_budget import BUDGET_HEADER as _ASM_BUDGET_HEADER, command_timeout as _asm_budget_timeout\n"
+        "\n"
+        "def _asm_command_timeout():\n"
+        "    # REQ-PIPE-007: the caller's declared budget, clamped by the runner.\n"
+        "    requested = request.headers.get(_ASM_BUDGET_HEADER) if has_request_context() else None\n"
+        "    return _asm_budget_timeout(requested, COMMAND_TIMEOUT)\n"
+        "\n"
+        "@app.before_request\n",
+        "per-request budget helper",
+    )
+    # REQ-CONCUR-001: upstream caches every successful result for an hour, keyed
+    # by the command string only, and the dedicated /api/tools/* endpoints never
+    # pass the request's use_cache through - so a resumed run or another
+    # engagement got a replayed result recorded as a fresh execution (live
+    # 2026-09-29). Caching is switched off inside the one function every
+    # endpoint uses, whatever the caller asks for.
+    source = _replace_once(
+        source,
+        "    # Check cache first\n    if use_cache:\n        cached_result = cache.get(command, {})",
+        "    use_cache = False  # REQ-CONCUR-001: never serve or store a cached result\n"
+        "\n"
+        "    # Check cache first\n    if use_cache:\n        cached_result = cache.get(command, {})",
+        "result cache disabled",
+    )
     return source
 
 

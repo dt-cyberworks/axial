@@ -6,7 +6,10 @@ const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
 const requirementDoc = read("docs/requirements/finding-triage.md");
-const findings = read("frontend/src/components/FindingsSection.tsx");
+// The findings list, the shared detail panel (triage), and the shared status helpers.
+const findingsSection = read("frontend/src/components/FindingsSection.tsx");
+const findingsLib = read("frontend/src/lib/findings.ts");
+const findings = [findingsSection, read("frontend/src/components/FindingDetail.tsx"), findingsLib].join("\n");
 const client = read("frontend/src/api/client.ts");
 
 function requirement(id) {
@@ -21,7 +24,10 @@ test("REQ-TRIAGE-003 findings list has one tab per status, open by default", () 
   for (const status of ["open", "accepted_risk", "false_positive", "resolved"]) {
     assert.match(findings, new RegExp(`status: "${status}"`), `tab for ${status}`);
   }
-  assert.match(findings, /useState<FindingStatus>\("open"\)/, "Open is the default tab");
+  // REQ-CONSOLE-013 moved the status into the URL; anything unknown or missing still means "open".
+  assert.match(findingsSection, /const statusFilter = parseFindingStatus\(searchParams\.get\("status"\)\)/);
+  assert.match(findingsLib, /export function parseFindingStatus\(value: string \| null\): FindingStatus \{\s*return STATUS_TABS\.some\(\(tab\) => tab\.status === value\) \? \(value as FindingStatus\) : "open";/,
+    "Open is the default tab");
   assert.match(findings, /counts_by_status/, "tabs show per-status counts");
   assert.match(findings, /role="tablist"/, "tabs are exposed as a tablist");
 });

@@ -47,7 +47,7 @@ def gate(engagement_id: str, scan_run_id: str, discovered: list[dict]) -> list[d
     try:
         review = client.create_asset_review(uuid.UUID(engagement_id), uuid.UUID(scan_run_id), candidates)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("asset review konnte nicht angelegt werden: %s", exc)
+        logger.warning("asset review could not be created: %s", exc)
         return None
     review_id = review.get("id")
     if not review_id:
@@ -63,7 +63,7 @@ def gate(engagement_id: str, scan_run_id: str, discovered: list[dict]) -> list[d
         try:
             status = client.get_asset_review(str(review_id))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("asset review poll fehlgeschlagen: %s", exc)
+            logger.warning("asset review poll failed: %s", exc)
             time.sleep(_REVIEW_POLL_SECONDS)
             waited += _REVIEW_POLL_SECONDS
             continue

@@ -45,3 +45,53 @@ def parse_nuclei_jsonl(stdout: str) -> list[dict]:
             "matched_at": rec.get("matched-at") or rec.get("host", ""),
         })
     return findings
+
+
+# --- Technology detection (REQ-PIPE-002) ------------------------------------------
+
+_TECH_ID_SUFFIXES = (
+    "-detect", "-detection", "-version", "-panel", "-login", "-exposure", "-installed", "-default-login",
+    "-discovery", "-info", "-fingerprint",
+)
+
+
+def _id_stem(template_id: str) -> str:
+    stem = str(template_id or "").lower()
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _TECH_ID_SUFFIXES:
+            if stem.endswith(suffix) and len(stem) > len(suffix):
+                stem = stem[: -len(suffix)]
+                changed = True
+    return stem
+
+
+def parse_nuclei_tech(stdout: str) -> list[str]:
+    """Technology names one technology-detection run found (raw, not yet
+    normalized): the template's own product/vendor metadata when it has any, the
+    matcher name of a multi-technology template (`tech-detect`), else the
+    template id without its `-detect`/`-version`/`-panel` suffix. Duplicates
+    are dropped, order kept."""
+    names: dict[str, None] = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        info = rec.get("info") or {}
+        meta = info.get("metadata") or {}
+        template_id = str(rec.get("template-id", ""))
+        found = [str(meta.get("product") or ""), str(meta.get("vendor") or "")]
+        matcher = str(rec.get("matcher-name") or "")
+        if matcher and template_id in ("tech-detect", "wappalyzer-technology-detection"):
+            found.append(matcher)
+        if not any(found):
+            found.append(_id_stem(template_id))
+        for name in found:
+            if name.strip():
+                names.setdefault(name.strip(), None)
+    return list(names)

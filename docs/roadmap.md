@@ -41,7 +41,7 @@ explicit authorization before implementation
    (subfinder), subdomain-takeover templates, crawling and URL history for
    endpoint discovery, and a self-hosted interaction server so blind
    vulnerability classes become visible.
-   ([backlog](requirements/backlog-discovery-detection-coverage.md))
+   ([backlog](requirements/extended-discovery.md))
 3. **Bug-bounty workflow** — import program scope from platform APIs and
    export a finding as a ready-to-submit report.
    ([backlog](requirements/backlog-bug-bounty-workflow.md))

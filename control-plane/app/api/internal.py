@@ -5,35 +5,45 @@ Nicht oeffentlich exponieren - in Produktion nur aus dem Cluster-internen
 Netz erreichbar (kein Ingress), s. Deployment-Architektur Kap. 5.
 """
 
+import base64
+import binascii
 import datetime
 import hashlib
 import uuid
 from secrets import compare_digest, token_urlsafe
+from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app import config_resolver, report_service
 from app.db.base import get_db
 from app.gateway.audit import append_audit_log
-from app.gateway.authorize import ToolCall, authorize
+from app.gateway.authorize import ToolCall, _matching_rules, authorize
 from app.gateway.dns_materialization import materialize
+from app.gateway import rate_reservation
 from app.gateway.raw_egress_policy import render_for_engagement
 from app.gateway.raw_egress_lease import _effective_port_ranges_for_target, issue_raw_egress_lease
 from app.graph.builder import materialize_graph, read_graph
-from app.settings_store import get_llm_config, get_nvd_config
+from app.settings_store import get_llm_config, get_nvd_config, get_subfinder_keys
 from app.models.asset import DiscoveredAsset, Service
 from app.models.asset_review import AssetReviewRequest
 from app.models.cve_cache import CveLookupCache, EpssScoreCache, KevCatalogCache
+from app.models.discovery_artifacts import DiscoveredEndpoint, WebScreenshot
 from app.models.dns_record import DnsRecord
 from app.models.approval import ApprovalRequest
 from app.models.finding import Finding, FindingObservation
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset, ToolGrant
 from app.models.openwire_callback import OpenwireCallbackToken
+from app.models.scan_plan import ScanCheck, ScanSurface
 from app.models.scan_run import AgentStep, ScanRun
-from app.scan_lifecycle import ScanRunAlreadyActive, reap_all_stale_runs, reap_stale_runs, start_scan_run
+from app import scan_plan
+from app.scan_lifecycle import (
+    ScanRunAlreadyActive, ScanRunNotClaimable, claim_scan_run, reap_all_stale_runs, reap_stale_runs, start_scan_run,
+)
 from app.scoring.risk_score import compute_risk_score, compute_severity, risk_score_floor_for_severity
 from app.schemas.internal import (
     AgentEventIn,
@@ -45,6 +55,7 @@ from app.schemas.internal import (
     CveLookupCacheIn,
     CveLookupCacheOut,
     DecisionOut,
+    DiscoveredEndpointsIn,
     DiscoveredAssetIn,
     DnsRecordIn,
     EpssCacheBatchIn,
@@ -62,12 +73,18 @@ from app.schemas.internal import (
     RawEgressLeaseIn,
     RawEgressLeaseOut,
     RawEgressPolicyOut,
+    ScanCheckUpdate,
+    ScanPlanIn,
     ScanRunCreate,
     ScanRunOut,
+    ScanRunClaimIn,
+    ScanRunClaimOut,
     ScanRunUpdate,
+    ScanSurfaceUpdate,
     ServiceIn,
     ToolExecutionEventIn,
     ToolCallIn,
+    WebScreenshotIn,
 )
 
 def require_internal_token(x_asm_internal_token: str | None = Header(default=None)) -> None:
@@ -461,6 +478,25 @@ def internal_proxy_audit(engagement_id: uuid.UUID, body: ProxyAuditEventIn, db: 
     return {"ok": True}
 
 
+@router.post("/engagements/{engagement_id}/rate-reservation")
+def reserve_proxy_rate_slot(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
+    """GitHub issue #40 (REQ-RATE-005): the egress proxy reserves a slot of
+    the bug-bounty program's max_rps BEFORE it forwards a request. The proxy is
+    read-only on the database by design, so the reservation happens here, with
+    the same primitive and window the gateway uses. The limit comes from the
+    program row, never from the caller."""
+    eng = db.get(Engagement, engagement_id)
+    if eng is None:
+        raise HTTPException(404, "engagement not found")
+    prog = db.scalar(select(BountyProgram).where(BountyProgram.engagement_id == engagement_id))
+    if prog is None:
+        return {"allowed": False, "reason": "bounty_program_missing", "retry_after_seconds": None}
+    slot = rate_reservation.reserve(db, engagement_id, "proxy", float(prog.max_rps))
+    db.commit()
+    return {"allowed": slot.allowed, "reason": "allow" if slot.allowed else "rate_limited",
+            "retry_after_seconds": slot.retry_after_seconds}
+
+
 @router.get("/engagements/{engagement_id}/raw-egress-policy", response_model=RawEgressPolicyOut)
 def raw_egress_policy(engagement_id: uuid.UUID, namespace: str | None = None, db: Session = Depends(get_db)):
     """Render the nmap/raw-scan NetworkPolicy for this engagement.
@@ -603,12 +639,46 @@ def internal_complete_approval(
     return {"id": str(ap.id), "state": ap.state}
 
 
+def _fence(run: ScanRun, attempt: int | None) -> None:
+    """REQ-RESUME-002: a worker attempt that has been replaced must not write."""
+    if attempt is not None and run.attempt != attempt:
+        raise HTTPException(409, "superseded: this scan_run is owned by a newer worker attempt")
+
+
+@router.post("/scan-runs/{scan_run_id}/claim", response_model=ScanRunClaimOut)
+def claim_scan_run_endpoint(scan_run_id: uuid.UUID, body: ScanRunClaimIn, db: Session = Depends(get_db)):
+    """A worker task takes ownership of a run and learns where to continue
+    (GitHub issue #42, REQ-RESUME-002)."""
+    try:
+        run = claim_scan_run(
+            db, scan_run_id, task_id=body.task_id,
+            budget_max_iterations=body.budget_max_iterations,
+            approval_timeout_seconds=body.approval_timeout_seconds,
+        )
+    except ScanRunNotClaimable as exc:
+        raise HTTPException(409, f"not claimable: {exc.reason}") from None
+    return ScanRunClaimOut(
+        attempt=run.attempt, phase=run.phase, state=run.state,
+        cancel_requested=bool(run.cancel_requested), checkpoint=run.checkpoint,
+    )
+
+
 @router.get("/scan-runs/{scan_run_id}/cancel-requested")
-def scan_run_cancel_requested(scan_run_id: uuid.UUID, db: Session = Depends(get_db)):
-    """Der Worker pollt hier, ob ein Stopp angefordert wurde (REQ-RUN-001)."""
+def scan_run_cancel_requested(
+    scan_run_id: uuid.UUID, db: Session = Depends(get_db), attempt: Annotated[int | None, Query()] = None,
+):
+    """Der Worker pollt hier, ob ein Stopp angefordert wurde (REQ-RUN-001).
+
+    A poll from the run's current attempt also counts as a sign of life: a
+    worker waiting hours for an operator's approval is alive, not lost
+    (REQ-RESUME-004). A replaced attempt gets 409 and stops."""
     run = db.get(ScanRun, scan_run_id)
     if run is None:
         raise HTTPException(404, "scan_run not found")
+    _fence(run, attempt)
+    if attempt is not None and run.state in ("running", "waiting_approval"):
+        run.heartbeat_at = datetime.datetime.now(datetime.timezone.utc)
+        db.commit()
     return {"cancel_requested": bool(run.cancel_requested)}
 
 
@@ -638,6 +708,7 @@ def update_scan_run(scan_run_id: uuid.UUID, body: ScanRunUpdate, db: Session = D
     run = db.scalar(select(ScanRun).where(ScanRun.id == scan_run_id).with_for_update())
     if run is None:
         raise HTTPException(404, "scan_run not found")
+    _fence(run, body.attempt)
 
     # The operator-owned cancellation transition is terminal and immutable. A
     # stale worker may finish an HTTP request later, but it cannot resurrect or
@@ -658,6 +729,8 @@ def update_scan_run(scan_run_id: uuid.UUID, body: ScanRunUpdate, db: Session = D
         run.state = body.state
     if body.state_reason is not None:
         run.state_reason = body.state_reason
+    if body.checkpoint:
+        run.checkpoint = {**(run.checkpoint or {}), **body.checkpoint}
     if body.state in ("done", "failed", "aborted"):
         run.finished_at = datetime.datetime.now(datetime.timezone.utc)
     # REQ-FIDELITY-006: nur anwenden, wenn im Request-Body tatsaechlich gesetzt -
@@ -687,13 +760,14 @@ def update_scan_run(scan_run_id: uuid.UUID, body: ScanRunUpdate, db: Session = D
 
 
 @router.post("/scan-runs/{scan_run_id}/heartbeat")
-def heartbeat_scan_run(scan_run_id: uuid.UUID, db: Session = Depends(get_db)):
+def heartbeat_scan_run(scan_run_id: uuid.UUID, db: Session = Depends(get_db), attempt: Annotated[int | None, Query()] = None):
     """Leichtes Lebenszeichen fuer laufende Laeufe (REQ-RAWLEASE-001), damit lange
     Operationen (z. B. ein mehrminuetiger Nmap) nicht faelschlich als verwaist
     geerntet werden. Terminale Laeufe bleiben unangetastet (idempotent)."""
     run = db.get(ScanRun, scan_run_id)
     if run is None:
         raise HTTPException(404, "scan_run not found")
+    _fence(run, attempt)
     if run.state in ("running", "waiting_approval"):
         run.heartbeat_at = datetime.datetime.now(datetime.timezone.utc)
         db.commit()
@@ -712,8 +786,11 @@ def add_discovered_asset(engagement_id: uuid.UUID, body: DiscoveredAssetIn, db: 
     )
     if existing is not None:
         existing.last_seen = datetime.datetime.now(datetime.timezone.utc)
-        if body.in_scope:
-            existing.in_scope = True
+        # GitHub issue #33: discovery classifies every value against the
+        # CURRENT scope on every run, so the flag follows it both ways - a value
+        # whose allow rule was removed, or that a new deny rule covers, drops
+        # out of the agent's in-scope pool instead of staying in it forever.
+        existing.in_scope = body.in_scope
         # REQ-GRAPH-006: backfill the structural subdomain->domain backbone on
         # re-scan for assets created before it was populated. parent_id is
         # structural metadata only - the Scope Gateway never reads it.
@@ -759,6 +836,205 @@ def list_discovered_assets(engagement_id: uuid.UUID, in_scope: bool | None = Non
     if in_scope is not None:
         stmt = stmt.where(DiscoveredAsset.in_scope.is_(in_scope))
     return [{"id": a.id, "value": a.value, "in_scope": a.in_scope} for a in db.scalars(stmt)]
+
+
+@router.get("/engagements/{engagement_id}/discovery-options")
+def discovery_options(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
+    """REQ-COVER-007: the per-engagement switches, for the worker to decide
+    which optional steps to attempt. Convenience only - the Scope Gateway
+    enforces the same switches on every call."""
+    eng = db.get(Engagement, engagement_id)
+    if eng is None:
+        raise HTTPException(404, "engagement not found")
+    return {
+        "subfinder": bool(eng.subfinder_enabled),
+        "crawling": bool(eng.crawling_enabled),
+        "oob": bool(eng.oob_enabled),
+        "screenshots": bool(eng.screenshots_enabled),
+    }
+
+
+# REQ-PIPE-015: never more than two checks of one engagement at a time.
+MAX_PARALLEL_CHECKS = 2
+
+
+@router.get("/engagements/{engagement_id}/scan-settings")
+def scan_settings(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
+    """REQ-PIPE-005/015: how deep this engagement's scans go, how many checks
+    may run at once and which tools the campaign has switched off. A bug-bounty program's own concurrency cap can only lower
+    the number (the stricter limit wins); the egress proxy enforces it on the
+    network regardless."""
+    eng = db.get(Engagement, engagement_id)
+    if eng is None:
+        raise HTTPException(404, "engagement not found")
+    parallel = MAX_PARALLEL_CHECKS
+    prog = db.scalar(select(BountyProgram).where(BountyProgram.engagement_id == engagement_id))
+    if prog is not None:
+        parallel = max(1, min(parallel, int(prog.max_concurrency)))
+    # The tools this campaign has switched off (or that are not installed), so the plan
+    # can say so up front. The gateway still decides every call: this is only
+    # what the plan shows, never what is allowed.
+    disabled = sorted(c.tool for c in config_resolver.effective_tool_policy(db, engagement_id) if not c.enabled)
+    return {"scan_profile": eng.scan_profile or "standard", "max_parallel_checks": parallel, "disabled_tools": disabled}
+
+
+def _run_for_plan(db: Session, scan_run_id: uuid.UUID, attempt: int | None, *, lock: bool = False) -> ScanRun:
+    stmt = select(ScanRun).where(ScanRun.id == scan_run_id)
+    run = db.scalar(stmt.with_for_update() if lock else stmt)
+    if run is None:
+        raise HTTPException(404, "scan_run not found")
+    _fence(run, attempt)
+    return run
+
+
+@router.post("/scan-runs/{scan_run_id}/plan", status_code=201)
+def store_scan_plan(
+    scan_run_id: uuid.UUID, body: ScanPlanIn, db: Session = Depends(get_db),
+    attempt: Annotated[int | None, Query()] = None,
+):
+    """REQ-PIPE-003: persist the surfaces and their planned/skipped checks.
+    Idempotent - re-posting after a worker restart never resets progress."""
+    run = _run_for_plan(db, scan_run_id, attempt, lock=True)
+    if run.state not in ("running", "waiting_approval"):
+        raise HTTPException(409, f"scan_run is not active: {run.state}")
+    return scan_plan.store_plan(db, run.id, run.engagement_id, body)
+
+
+@router.get("/scan-runs/{scan_run_id}/plan")
+def get_scan_plan(scan_run_id: uuid.UUID, db: Session = Depends(get_db)):
+    if db.get(ScanRun, scan_run_id) is None:
+        raise HTTPException(404, "scan_run not found")
+    return scan_plan.read_plan(db, scan_run_id, internal=True)
+
+
+@router.patch("/scan-checks/{check_id}")
+def update_scan_check(check_id: uuid.UUID, body: ScanCheckUpdate, db: Session = Depends(get_db)):
+    check = db.scalar(select(ScanCheck).where(ScanCheck.id == check_id).with_for_update())
+    if check is None:
+        raise HTTPException(404, "scan_check not found")
+    run = _run_for_plan(db, check.scan_run_id, body.attempt)
+    if run.state not in ("running", "waiting_approval"):
+        raise HTTPException(409, f"scan_run is not active: {run.state}")
+    scan_plan.apply_check_update(check, body)
+    run.heartbeat_at = datetime.datetime.now(datetime.timezone.utc)
+    db.commit()
+    return scan_plan.check_out(check)
+
+
+@router.patch("/scan-surfaces/{surface_id}")
+def update_scan_surface(surface_id: uuid.UUID, body: ScanSurfaceUpdate, db: Session = Depends(get_db)):
+    surface = db.scalar(select(ScanSurface).where(ScanSurface.id == surface_id).with_for_update())
+    if surface is None:
+        raise HTTPException(404, "scan_surface not found")
+    _run_for_plan(db, surface.scan_run_id, body.attempt)
+    scan_plan.apply_surface_update(surface, body)
+    db.commit()
+    return {"id": str(surface.id), "profile": surface.profile}
+
+
+@router.get("/subfinder-config")
+def internal_subfinder_config(db: Session = Depends(get_db)):
+    """REQ-COVER-001: decrypted subfinder provider keys for the worker. Cluster-
+    internal only, like /llm-config; the public settings API never returns them."""
+    return {"keys": get_subfinder_keys(db)}
+
+
+_MAX_ENDPOINTS_PER_ENGAGEMENT = 5000
+_MAX_SCREENSHOT_BYTES = 2_000_000
+_MAX_SCREENSHOTS_PER_ENGAGEMENT = 200
+_AGENT_CONTEXT_ENDPOINTS = 30
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _url_in_scope(db: Session, engagement_id: uuid.UUID, url: str) -> tuple[str, int] | None:
+    """(host, port) of an http(s) URL that is inside the allow scope and not
+    denied, else None. Crawler and URL-history output is untrusted input."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
+        return None
+    host = parts.hostname.lower().rstrip(".")
+    path = parts.path or "/"
+    if _matching_rules(db, engagement_id, host, path, "deny"):
+        return None
+    if not _matching_rules(db, engagement_id, host, path, "allow"):
+        return None
+    return host, port or (443 if parts.scheme == "https" else 80)
+
+
+@router.post("/engagements/{engagement_id}/discovered-endpoints")
+def store_discovered_endpoints(engagement_id: uuid.UUID, body: DiscoveredEndpointsIn, db: Session = Depends(get_db)):
+    """REQ-COVER-003: persist crawler/URL-history results. Out-of-scope URLs are
+    dropped here too (defense in depth: the worker filters first); an endpoint
+    is context, it never adds scope."""
+    eng = db.get(Engagement, engagement_id)
+    if eng is None:
+        raise HTTPException(404, "engagement not found")
+    if not eng.crawling_enabled:
+        raise HTTPException(409, "crawling is not enabled for this engagement")
+    existing = db.scalar(
+        select(func.count()).select_from(DiscoveredEndpoint).where(DiscoveredEndpoint.engagement_id == engagement_id)
+    ) or 0
+    stored = dropped = 0
+    for item in body.endpoints:
+        located = _url_in_scope(db, engagement_id, item.url)
+        if located is None or existing + stored >= _MAX_ENDPOINTS_PER_ENGAGEMENT:
+            dropped += 1
+            continue
+        host, port = located
+        row = db.scalar(select(DiscoveredEndpoint).where(
+            DiscoveredEndpoint.engagement_id == engagement_id,
+            DiscoveredEndpoint.method == item.method, DiscoveredEndpoint.url == item.url,
+        ))
+        if row is not None:
+            row.param_names = sorted(set(row.param_names or []) | set(item.param_names))
+            continue
+        db.add(DiscoveredEndpoint(
+            engagement_id=engagement_id, scan_run_id=body.scan_run_id, url=item.url, host=host, port=port,
+            method=item.method, source=item.source, param_names=sorted(set(item.param_names)),
+        ))
+        stored += 1
+    db.commit()
+    return {"stored": stored, "dropped": dropped}
+
+
+@router.post("/engagements/{engagement_id}/web-screenshots", status_code=201)
+def store_web_screenshot(engagement_id: uuid.UUID, body: WebScreenshotIn, db: Session = Depends(get_db)):
+    """REQ-COVER-006: persist one screenshot (PNG). Replaces an older one of the
+    same URL so a re-scan does not grow the table."""
+    eng = db.get(Engagement, engagement_id)
+    if eng is None:
+        raise HTTPException(404, "engagement not found")
+    if not eng.screenshots_enabled:
+        raise HTTPException(409, "screenshots are not enabled for this engagement")
+    located = _url_in_scope(db, engagement_id, body.url)
+    if located is None:
+        raise HTTPException(422, "url is outside the authorized scope")
+    try:
+        content = base64.b64decode(body.png_base64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(422, "png_base64 is not valid base64") from None
+    if not content.startswith(_PNG_MAGIC):
+        raise HTTPException(422, "content is not a PNG image")
+    if len(content) > _MAX_SCREENSHOT_BYTES:
+        raise HTTPException(413, "screenshot too large")
+    db.execute(delete(WebScreenshot).where(WebScreenshot.engagement_id == engagement_id, WebScreenshot.url == body.url))
+    count = db.scalar(
+        select(func.count()).select_from(WebScreenshot).where(WebScreenshot.engagement_id == engagement_id)
+    ) or 0
+    if count >= _MAX_SCREENSHOTS_PER_ENGAGEMENT:
+        raise HTTPException(409, "screenshot limit reached for this engagement")
+    host, port = located
+    shot = WebScreenshot(
+        engagement_id=engagement_id, scan_run_id=body.scan_run_id, url=body.url, host=host, port=port,
+        byte_size=len(content), sha256=hashlib.sha256(content).hexdigest(), content=content,
+    )
+    db.add(shot)
+    db.commit()
+    return {"id": str(shot.id), "byte_size": shot.byte_size}
 
 
 @router.get("/engagements/{engagement_id}/asset-review-required")
@@ -928,6 +1204,15 @@ def agent_context(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
                  "status": (s.tech_stack or {}).get("status") if s.tech_stack else None}
                 for s in services
             ],
+            # REQ-COVER-003: crawled endpoints as context, capped for the LLM.
+            "endpoints": [
+                {"method": e.method, "url": e.url, "params": list(e.param_names or [])}
+                for e in db.scalars(
+                    select(DiscoveredEndpoint)
+                    .where(DiscoveredEndpoint.engagement_id == engagement_id, DiscoveredEndpoint.host == a.value)
+                    .order_by(DiscoveredEndpoint.first_seen_at).limit(_AGENT_CONTEXT_ENDPOINTS)
+                )
+            ],
             "findings": [
                 {"title": f.title, "severity": f.severity, "category": f.category,
                  "confidence": f.confidence,
@@ -998,9 +1283,26 @@ def add_service(engagement_id: uuid.UUID, body: ServiceIn, db: Session = Depends
     return {"id": service.id}
 
 
+# REQ-TEXT-001: these finding titles used to be German. The fingerprint keeps
+# hashing the original wording, so a re-scan still matches a finding (and its
+# triage decision) recorded before the translation. Migration 0032 renamed the
+# stored titles; never change the legacy side of this table.
+_LEGACY_TITLE_PREFIXES = (
+    ("missing security headers: ", "fehlende security-header: "),
+    ("waf detected: ", "waf erkannt: "),
+    ("openssh - outdated version", "openssh - veraltete version"),
+    ("apache tomcat - outdated version", "apache tomcat - veraltete version"),
+    ("mysql - authentication bypass on repeated login", "mysql - authentication bypass bei wiederholtem login"),
+)
+
+
 def _fingerprint(asset_value: str, port: int | None, category: str, title: str, cve_ids: list[str] | None) -> str:
-    """Kap. 4.4 Listing 9: stabiler Dedup-Fingerprint ueber Tools & Runs hinweg."""
+    """Stable de-duplication fingerprint across tools and runs (spec chapter 4.4, listing 9)."""
     norm_title = title.strip().lower()
+    for english, legacy in _LEGACY_TITLE_PREFIXES:
+        if norm_title.startswith(english):
+            norm_title = legacy + norm_title[len(english):]
+            break
     raw = f"{asset_value}|{port}|{category}|{norm_title}|{','.join(sorted(cve_ids or []))}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

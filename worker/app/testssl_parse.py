@@ -58,3 +58,26 @@ def parse_testssl_json(stdout: str) -> list[dict]:
             "title": f"TLS: {check_id} - {finding_text}"[:200],
         })
     return findings
+
+
+_NOT_TLS_MARKERS = ("doesn't seem to be a tls/ssl enabled server", "does not seem to be a tls", "no ssl/tls", "not a tls")
+
+
+def testssl_scan_problem(stdout: str) -> tuple[str, str] | None:
+    """(`not_a_tls_service` | `tls_scan_problem`, text) when testssl itself could
+    not test the service, else None. A service that is not TLS at all is not a
+    failure of the scan, but an empty result from one must never read as clean."""
+    start = stdout.find("[")
+    if start == -1:
+        return ("tls_scan_problem", "testssl produced no output") if not stdout.strip() else None
+    try:
+        records = json.loads(stdout[start:])
+    except json.JSONDecodeError:
+        return None
+    for rec in records if isinstance(records, list) else []:
+        if isinstance(rec, dict) and str(rec.get("id", "")).lower().startswith("scanproblem"):
+            text = str(rec.get("finding", "")).strip()[:300]
+            if any(marker in text.lower() for marker in _NOT_TLS_MARKERS):
+                return ("not_a_tls_service", text)
+            return ("tls_scan_problem", text)
+    return None

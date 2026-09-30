@@ -34,6 +34,20 @@ def _is_egress_denial(rec: dict) -> bool:
     return EGRESS_DENIAL_HEADER in str(raw).lower()
 
 
+def _normalized_headers(rec: dict) -> dict[str, str]:
+    """Response headers as {lowercase-dashed-name: value}. httpx reports them
+    snake_cased (`strict_transport_security`); other versions keep the dashes."""
+    raw = rec.get("header") or rec.get("headers")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for name, value in raw.items():
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(v) for v in value)
+        out[str(name).strip().lower().replace("_", "-")] = str(value)
+    return out
+
+
 def parse_httpx_json(stdout: str) -> list[dict]:
     results: list[dict] = []
     for line in stdout.splitlines():
@@ -73,5 +87,10 @@ def parse_httpx_json(stdout: str) -> list[dict]:
             # httpx does not report it, which makes the surface
             # un-deduplicable rather than wrongly equal to another.
             "content_length": rec.get("content_length", rec.get("content-length")),
+            # REQ-PIPE-013 / REQ-PIPE-001: the response headers (security-header
+            # findings without a second request) and the redirect target (a port
+            # that only redirects to another scanned surface is an alias).
+            "headers": _normalized_headers(rec),
+            "location": str(rec.get("location") or ""),
         })
     return results

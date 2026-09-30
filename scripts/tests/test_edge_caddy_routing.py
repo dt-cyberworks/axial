@@ -253,7 +253,7 @@ def test_edge_caddyfile_spa_routes_survive_hard_navigation_despite_api_prefix_ov
 
         # A hard navigation/refresh at a real SPA route that overlaps an API
         # prefix must still get the SPA shell, not the backend's 404.
-        for path in ("/settings", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/admin/users"):
+        for path in ("/settings", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/admin/users", "/findings"):
             status, body = _get(f"{base}{path}", headers=_HTML_NAVIGATION_HEADERS)
             assert status == 200 and "SPA_FALLBACK_MARKER" in body, (
                 f"hard navigation to {path} did not get the SPA shell (over-broad API prefix match)"
@@ -261,7 +261,7 @@ def test_edge_caddyfile_spa_routes_survive_hard_navigation_despite_api_prefix_ov
 
         # The app's own XHR/fetch calls to those same path shapes must still
         # reach the backend - the fix must not have broken real API routing.
-        for path in ("/settings/llm", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47"):
+        for path in ("/settings/llm", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/findings"):
             status, body = _get(f"{base}{path}", headers=_XHR_HEADERS)
             assert "SPA_FALLBACK_MARKER" not in body, f"XHR call to {path} was wrongly served the SPA fallback"
             assert status == 404 and "Error response" in body
@@ -307,11 +307,11 @@ def test_edge_shared_caddyfile_spa_routes_survive_hard_navigation_despite_api_pr
         assert "SPA_FALLBACK_PROD" not in body
         assert status == 404 and "Error response" in body
 
-        for path in ("/settings", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/admin/users"):
+        for path in ("/settings", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/admin/users", "/findings"):
             status, body = _get(f"{base}{path}", headers=_HTML_NAVIGATION_HEADERS)
             assert status == 200 and "SPA_FALLBACK_PROD" in body, f"hard navigation to {path} did not get the SPA shell"
 
-        for path in ("/settings/llm", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47"):
+        for path in ("/settings/llm", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/findings"):
             status, body = _get(f"{base}{path}", headers=_XHR_HEADERS)
             assert "SPA_FALLBACK_PROD" not in body
             assert status == 404 and "Error response" in body
@@ -631,10 +631,12 @@ def test_edge_caddyfile_cache_policy_keeps_console_and_api_apart(tmp_path):
                      "-v", f"{tmp_path / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
                      "-v", f"{tmp_path / 'frontend'}:/srv/frontend:ro", CADDY_ALPINE]).returncode == 0
         base = "http://127.0.0.1:18110"
-        for headers, label in ((_HTML_NAVIGATION_HEADERS, "console page"), (_XHR_HEADERS, "API request")):
-            resp = _get_raw(f"{base}/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", headers=headers)
-            assert resp.headers.get("Cache-Control") == "no-store", label
-            assert "Accept" in [v.strip() for v in ",".join(resp.headers.get_all("Vary") or []).split(",")], label
+        # REQ-PORTFOLIO-002: /findings is a shared path too (console page and API list).
+        for path in ("/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/findings"):
+            for headers, label in ((_HTML_NAVIGATION_HEADERS, "console page"), (_XHR_HEADERS, "API request")):
+                resp = _get_raw(f"{base}{path}", headers=headers)
+                assert resp.headers.get("Cache-Control") == "no-store", (path, label)
+                assert "Accept" in [v.strip() for v in ",".join(resp.headers.get_all("Vary") or []).split(",")], (path, label)
         assert _get_raw(f"{base}/new", headers=_HTML_NAVIGATION_HEADERS).headers.get("Cache-Control") == "no-cache"
         assert _get_raw(f"{base}/assets/index-abc123.js").headers.get("Cache-Control") == \
             "public, max-age=31536000, immutable"
@@ -642,3 +644,40 @@ def test_edge_caddyfile_cache_policy_keeps_console_and_api_apart(tmp_path):
         _rm(backend, caddy)
         subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=15)
 
+
+
+# REQ-PORTFOLIO-002: each Caddyfile names the shared console/API prefixes in
+# several places (cache rule, console fallback, compression exclusion, API
+# matcher). A prefix added to one list and forgotten in another either serves
+# the console's HTML to an API call or caches API data - so every list must
+# hold the same prefixes. /assets/* (console files) and /callback* (its own
+# matcher, never in @api) are the documented differences.
+_SHARED_PREFIX_EXCEPTIONS = {"/assets/*", "/callback*"}
+
+
+def _shared_prefix_lists(text: str) -> list[list[str]]:
+    lists = []
+    for line in text.splitlines():
+        words = line.split()
+        if "path" not in words or "/auth*" not in words:
+            continue
+        lists.append(words[words.index("path") + 1:])
+    return lists
+
+
+@pytest.mark.parametrize("caddyfile", ["edge/Caddyfile", "edge-shared/Caddyfile"])
+def test_negative_every_shared_prefix_list_in_a_caddyfile_is_the_same(caddyfile):
+    lists = _shared_prefix_lists((ROOT / caddyfile).read_text())
+    # cache rule + console fallback + (compression exclusion + API matcher) per site block
+    assert len(lists) >= 4, f"{caddyfile}: expected at least 4 shared-prefix lists, found {len(lists)}"
+    normalized = {frozenset(set(prefixes) - _SHARED_PREFIX_EXCEPTIONS) for prefixes in lists}
+    assert len(normalized) == 1, f"{caddyfile}: shared-prefix lists differ: {[sorted(n) for n in normalized]}"
+    assert "/findings*" in next(iter(normalized)), f"{caddyfile}: /findings* is not routed (REQ-PORTFOLIO-002)"
+
+
+def test_negative_both_caddyfiles_route_the_same_shared_prefixes():
+    single, shared = (
+        {frozenset(set(p) - _SHARED_PREFIX_EXCEPTIONS) for p in _shared_prefix_lists((ROOT / f).read_text())}
+        for f in ("edge/Caddyfile", "edge-shared/Caddyfile")
+    )
+    assert single == shared

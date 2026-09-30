@@ -16,8 +16,8 @@ assert.match(requirement, /## REQ-DOWNLOAD-001:/);
 assert.match(client, /async function downloadBlob\(/, "a blob-download helper must exist");
 assert.match(
   client,
-  /headers: token \? \{ Authorization: `Bearer \$\{token\}` \} : \{\}/,
-  "the download must attach the bearer token",
+  /headers: CONSOLE_HEADERS,\s+credentials: "include"/,
+  "the download must go through the same cookie-authenticated path as every other call",
 );
 assert.match(client, /await res\.blob\(\)/, "the response must be read as a Blob");
 assert.match(client, /URL\.createObjectURL\(blob\)/);

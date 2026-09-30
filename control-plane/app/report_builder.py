@@ -44,6 +44,7 @@ from app.models.asset import DiscoveredAsset, Service
 from app.models.dns_record import DnsRecord
 from app.models.engagement import Engagement, ScopeAsset
 from app.models.finding import Finding
+from app.models.scan_plan import ScanCheck, ScanSurface
 from app.models.scan_run import ScanRun
 from app.report_redaction import redact_prose, redact_value, safe_evidence_items
 
@@ -81,7 +82,7 @@ DEGRADED_WARNING = (
 )
 
 METHOD_LINES: tuple[str, ...] = (
-    "Phases: discovery, fingerprint, correlate, agent, validate, score, report.",
+    "Phases: discovery, fingerprint, correlate, agent, score, report.",
     "Every active tool call was authorized by the Scope Gateway before execution; deny "
     "rules always take precedence over allow rules, and out-of-scope targets are blocked "
     "rather than tested. Autonomous agent activity proposes checks only - it cannot widen "
@@ -102,6 +103,29 @@ class ExecutiveSummary:
     open_count: int
     trend_line: str
     top_actions: list[str] = field(default_factory=list)
+    # REQ-PIPE-011: set when a check of the report run stopped at its time
+    # budget or failed - a short findings list must not read as a clean result.
+    coverage_note: str | None = None
+
+
+COVERAGE_NOTE = (
+    "{partial} check(s) stopped at their time budget and {failed} failed during this run. "
+    "The results of those checks are incomplete: a short list of findings for the affected "
+    "services does NOT mean they are clean. See \"Coverage of this run\" in section 5."
+)
+
+# How a skip reads to a customer. Anything not listed is shown as its plain words.
+_SKIP_TEXT = {
+    "switch_off": "switched off for this engagement",
+    "tool_disabled": "the tool is switched off in this engagement's tool list",
+    "not_a_tls_service": "plain HTTP, no TLS layer to test",
+    "not_a_web_service": "not a web service",
+    "no_endpoints": "the crawl found no URL with parameters",
+    "no_matching_templates": "no template matches",
+    "oob_unavailable": "interaction server not deployed",
+    "materialized_ip_missing": "the name did not resolve",
+    "cancelled_by_operator": "stopped by the operator",
+}
 
 
 @dataclass
@@ -186,6 +210,27 @@ class MethodologyScope:
 
 
 @dataclass
+class CoverageRow:
+    """REQ-PIPE-011: how completely one service was checked in the report run."""
+    service: str
+    kind: str
+    technologies: str
+    complete: int
+    partial: int
+    failed: int
+    skipped: int
+    not_covered: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CoverageSection:
+    rows: list[CoverageRow] = field(default_factory=list)
+    scan_depth: str = "standard"
+    partial_total: int = 0
+    failed_total: int = 0
+
+
+@dataclass
 class AcceptedRiskRow:
     """REQ-TRIAGE-004: a finding the operator accepted, with the stated reason.
     Who decided stays internal (audit log), not in the customer document."""
@@ -209,6 +254,7 @@ class ReportModel:
     methodology: MethodologyScope
     accepted_risks: list[AcceptedRiskRow] = field(default_factory=list)
     false_positive_count: int = 0
+    coverage: CoverageSection | None = None
 
 
 # --- helpers (format-agnostic; unchanged from the original text renderer) --
@@ -441,6 +487,59 @@ def _methodology_and_scope(
     )
 
 
+_KIND_LABEL = {
+    "web": "Web", "web_alias": "Web (redirect only)", "tls_service": "TLS service", "service": "Service", "unknown": "Unknown",
+}
+
+
+def _skip_text(reason: str) -> str:
+    if reason.startswith("web_alias_of:"):
+        return f"only redirects to {reason.split(':', 1)[1]}, which is checked there"
+    if reason.startswith("duplicate_vhost_of:"):
+        return f"same site as {reason.split(':', 1)[1]}, checked once there"
+    if reason.startswith("gateway_denied:"):
+        return f"refused by the scope gateway ({reason.split(':', 1)[1]})"
+    return _SKIP_TEXT.get(reason, reason.replace("_", " "))
+
+
+def _coverage_section(db: Session, report_run: ScanRun | None) -> CoverageSection | None:
+    """REQ-PIPE-011: per service of the report run, which checks ran completely,
+    partially, failed or were skipped, and why."""
+    if report_run is None:
+        return None
+    surfaces = list(db.scalars(
+        select(ScanSurface).where(ScanSurface.scan_run_id == report_run.id).order_by(ScanSurface.host, ScanSurface.port)
+    ))
+    if not surfaces:
+        return None
+    checks = list(db.scalars(select(ScanCheck).where(ScanCheck.scan_run_id == report_run.id).order_by(ScanCheck.seq)))
+    by_surface: dict[uuid.UUID, list[ScanCheck]] = {}
+    for check in checks:
+        by_surface.setdefault(check.surface_id, []).append(check)
+    section = CoverageSection(scan_depth=report_run.scan_profile or "standard")
+    for surface in surfaces:
+        own = by_surface.get(surface.id, [])
+        row = CoverageRow(
+            service=redact_prose(f"{surface.host}:{surface.port}"), kind=_KIND_LABEL.get(surface.service_class, "Service"),
+            technologies=redact_prose(", ".join(surface.profile or []) or "none identified"),
+            complete=sum(c.state == "complete" for c in own), partial=sum(c.state == "partial" for c in own),
+            failed=sum(c.state == "failed" for c in own), skipped=sum(c.state == "skipped" for c in own),
+        )
+        for check in own:
+            if check.state in ("partial", "failed"):
+                detail = str((check.outcome_summary or {}).get("detail") or "").replace("_", " ")
+                word = "stopped at its time budget" if check.state == "partial" else "failed"
+                row.not_covered.append(f"{check.check_id}: {word}" + (f" ({detail})" if detail and check.state == "failed" else ""))
+            elif check.state == "skipped" and check.reason not in ("switch_off",):
+                row.not_covered.append(f"{check.check_id}: skipped, {_skip_text(check.reason)}")
+            elif check.state == "planned":
+                row.not_covered.append(f"{check.check_id}: not run (the scan ended first)")
+        section.rows.append(row)
+        section.partial_total += row.partial
+        section.failed_total += row.failed
+    return section
+
+
 def build_report_model(db: Session, eng: Engagement, report_run: ScanRun | None) -> ReportModel:
     """The full report content, in the Kap. 6.1 section order."""
     findings = list(db.scalars(
@@ -459,19 +558,25 @@ def build_report_model(db: Session, eng: Engagement, report_run: ScanRun | None)
     ))
     diff = scan_diff.compute_diff(db, report_run) if report_run is not None else None
 
+    coverage = _coverage_section(db, report_run)
+    summary = _executive_summary(findings, counts, diff)
+    if coverage is not None and (coverage.partial_total or coverage.failed_total):
+        summary.coverage_note = COVERAGE_NOTE.format(partial=coverage.partial_total, failed=coverage.failed_total)
+
     generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     return ReportModel(
         generated_at=generated_at.isoformat(),
         engagement_title=redact_prose(_fmt(eng.title)),
         engagement_id=str(eng.id),
         scan_run_id=str(report_run.id) if report_run else "n/a (no completed run)",
-        executive_summary=_executive_summary(findings, counts, diff),
+        executive_summary=summary,
         risk_overview=_risk_overview(counts, diff),
         findings=[_finding_row(db, finding) for finding in sorted_findings],
         asset_inventory=_asset_inventory(db, eng.id),
         methodology=_methodology_and_scope(db, eng, runs, report_run),
         accepted_risks=[_accepted_risk_row(db, finding) for finding in accepted],
         false_positive_count=false_positive_count,
+        coverage=coverage,
     )
 
 

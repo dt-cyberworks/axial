@@ -15,7 +15,13 @@ regulaeres engagement" - dieselbe Pipeline, nur eine andere Aufloesungsquelle).
 
 import fnmatch
 import ipaddress
+import json
 import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 import time
 import uuid
 
@@ -23,6 +29,7 @@ import httpx
 
 from app import dns_intel, tool_execution
 from app.control_plane_client import client
+from app.discovery_parse import parse_url_list
 from app.lab_hosts import is_lab_host
 from app.raw_egress_client import raw_egress_gateway
 from app.raw_nmap import execute_host_discovery_sweep
@@ -61,6 +68,37 @@ def _denied(value: str, deny_named: list[dict]) -> bool:
     return False
 
 
+def _named_rule_matches(value: str, asset: dict) -> bool:
+    """Same matching as the Scope Gateway's _matches_asset_value for domain and
+    wildcard rules (authorize.py), so discovery never calls a name in scope
+    that the gateway would refuse."""
+    if asset["asset_type"] == "domain":
+        return _under(value, asset["value"].lower().lstrip("*.").rstrip("."))
+    if asset["asset_type"] == "wildcard":
+        return fnmatch.fnmatch(value, asset["value"].lower())
+    return False
+
+
+def _ip_active_eligible(value: str, scope_assets: list[dict], deny_ip_cidr: list[dict]) -> bool:
+    """GitHub issue #33: an address is a candidate for the active pipeline only
+    while an active-allowed ip/cidr allow rule covers it and no deny rule does."""
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if _denied_ip(value, deny_ip_cidr):
+        return False
+    for a in scope_assets:
+        if a["rule"] != "allow" or a["asset_type"] not in ("ip", "cidr") or not a.get("active_allowed"):
+            continue
+        try:
+            if addr in ipaddress.ip_network(a["value"], strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _closest_parent_value(value: str, present: dict[str, str]) -> str | None:
     """REQ-GRAPH-006: the closest ancestor name already registered as a
     discovered_asset, or None. Walks progressively shorter suffixes (dropping the
@@ -87,7 +125,7 @@ def _query_crtsh(domain: str) -> set[str]:
             rows = resp.json()
             break
         except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("crt.sh Versuch %d/%d fuer %s fehlgeschlagen: %s",
+            logger.warning("crt.sh attempt %d/%d for %s failed: %s",
                            attempt, CRT_SH_ATTEMPTS, domain, exc)
             if attempt < CRT_SH_ATTEMPTS:
                 time.sleep(3 * attempt)
@@ -97,15 +135,21 @@ def _query_crtsh(domain: str) -> set[str]:
     subdomains = set()
     for row in rows:
         for name in str(row.get("name_value", "")).splitlines():
-            name = name.strip().lstrip("*.").lower()
-            if name.endswith(domain):
+            name = name.strip().lstrip("*.").lower().rstrip(".")
+            if name and _under(name, domain):
                 subdomains.add(name)
     return subdomains
 
 
+def _under(name: str, domain: str) -> bool:
+    """`name` is `domain` or one of its subdomains - on a label boundary, so
+    `badexample.com` is not under `example.com` (GitHub issue #33)."""
+    return name == domain or name.endswith("." + domain)
+
+
 def _scope_name(raw: str, domain: str) -> str | None:
     name = str(raw).strip().lstrip("*.").lower().rstrip(".")
-    return name if name and name.endswith(domain) else None
+    return name if name and _under(name, domain) else None
 
 
 def _query_certspotter(domain: str) -> set[str]:
@@ -116,7 +160,7 @@ def _query_certspotter(domain: str) -> set[str]:
         resp.raise_for_status()
         records = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("certspotter fuer %s fehlgeschlagen: %s", domain, exc)
+        logger.warning("certspotter for %s failed: %s", domain, exc)
         return set()
     out: set[str] = set()
     for rec in records if isinstance(records, list) else []:
@@ -136,7 +180,7 @@ def _query_hackertarget(domain: str) -> set[str]:
         resp.raise_for_status()
         body = resp.text
     except httpx.HTTPError as exc:
-        logger.warning("hackertarget fuer %s fehlgeschlagen: %s", domain, exc)
+        logger.warning("hackertarget for %s failed: %s", domain, exc)
         return set()
     if "API count exceeded" in body or "error" in body.lower():
         return set()
@@ -162,7 +206,7 @@ def _passive_subdomains(domain: str) -> set[str]:
         try:
             found |= source(domain)
         except Exception as exc:  # noqa: BLE001 - a source must never break discovery
-            logger.warning("passive source %s fuer %s fehlgeschlagen: %s", getattr(source, "__name__", source), domain, exc)
+            logger.warning("passive source %s for %s failed: %s", getattr(source, "__name__", source), domain, exc)
     return found
 
 
@@ -291,7 +335,9 @@ def _active_ip_discovery(engagement_id: str, scope_assets: list[dict], scan_run_
     sweep needed, registered directly like a domain's "scope-direct" entry); a
     `cidr` asset needs a liveness sweep first to find out which addresses
     inside it are even worth registering at all."""
-    allow_ip = [a for a in scope_assets if a["rule"] == "allow" and a["asset_type"] == "ip"]
+    # GitHub issue #33: a passive-only (active_allowed=false) ip asset is not an
+    # active target, exactly like a passive-only cidr asset is never swept.
+    allow_ip = [a for a in scope_assets if a["rule"] == "allow" and a["asset_type"] == "ip" and a.get("active_allowed")]
     allow_cidr = [
         a for a in scope_assets
         if a["rule"] == "allow" and a["asset_type"] == "cidr" and a.get("active_allowed")
@@ -302,17 +348,21 @@ def _active_ip_discovery(engagement_id: str, scope_assets: list[dict], scan_run_
     seen: set[str] = set()
     for a in allow_ip:
         value = a["value"]
+        in_scope = not _denied_ip(value, deny_ip_cidr)
         resp = client.add_discovered_asset(
             engagement_id, asset_type="ip", value=value,
-            discovered_via="scope-direct", in_scope=not _denied_ip(value, deny_ip_cidr),
+            discovered_via="scope-direct", in_scope=in_scope,
         )
-        results.append({"value": value, "asset_id": resp["id"], "asset_type": "ip"})
         seen.add(value)
+        if in_scope:  # GitHub issue #33: a denied address is recorded, never a candidate
+            results.append({"value": value, "asset_id": resp["id"], "asset_type": "ip"})
 
     # REQ-CIDRDISC-003: resilience against a single empty/failed sweep, same
     # rationale as the domain path's own "known in-scope assets" step (3) -
     # a previously live-discovered host stays a target even if this run's
-    # raw-egress lease is transiently unavailable.
+    # raw-egress lease is transiently unavailable. GitHub issue #33: only while
+    # the CURRENT scope still covers it; otherwise the stored in_scope flag is
+    # set back to false instead of being trusted.
     try:
         for a in client.list_discovered_assets(engagement_id, in_scope=True):
             value = a["value"]
@@ -322,10 +372,16 @@ def _active_ip_discovery(engagement_id: str, scope_assets: list[dict], scan_run_
                 ipaddress.ip_address(value)
             except ValueError:
                 continue
-            results.append({"value": value, "asset_id": a["id"], "asset_type": "ip"})
             seen.add(value)
+            if _ip_active_eligible(value, scope_assets, deny_ip_cidr):
+                results.append({"value": value, "asset_id": a["id"], "asset_type": "ip"})
+            else:
+                client.add_discovered_asset(
+                    engagement_id, asset_type="ip", value=value,
+                    discovered_via=a.get("discovered_via") or "known", in_scope=False,
+                )
     except Exception as exc:  # noqa: BLE001 - Vorbestand ist optional
-        logger.warning("Vorbestand in-scope-IP-Assets nicht abrufbar: %s", exc)
+        logger.warning("previously known in-scope IP assets not retrievable: %s", exc)
 
     if scan_run_id is None:
         return results  # REQ-CIDRDISC-001: a sweep is an active, run-bound operation
@@ -344,6 +400,161 @@ def _active_ip_discovery(engagement_id: str, scope_assets: list[dict], scan_run_
                 results.append({"value": live_ip, "asset_id": resp["id"], "asset_type": "ip"})
                 seen.add(live_ip)
     return results
+
+
+# REQ-COVER-001 (R3): subfinder, passive sources only, run inside the worker
+# image (architecture decision by johannes, 2026-09-29). It never contacts the
+# target - it queries third-party data sources - so it does not go through the
+# tool-runner or the egress proxy. Provider keys (admin setting, stored
+# encrypted) are written to a private temp file that is removed right after the
+# run; the subprocess gets a minimal environment, never the worker's secrets.
+SUBFINDER_BIN = os.environ.get("SUBFINDER_BIN", "subfinder")
+SUBFINDER_TIMEOUT_S = 150
+SUBFINDER_MAX_NAMES = 5000
+_DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
+_PROVIDER_RE = re.compile(r"^[a-z0-9]{1,32}$")
+
+
+def _run_subfinder(domain: str, keys: dict[str, str]) -> tuple[set[str], dict]:
+    """-> (names under `domain`, terminal result dict for the audit trail)."""
+    if not _DOMAIN_RE.match(domain):
+        return set(), {"success": False, "exit_code": -1, "stdout": "", "stderr": "unsafe_domain", "error_reason": "unsafe_domain"}
+    workdir = tempfile.mkdtemp(prefix="subfinder-")
+    try:
+        cmd = [SUBFINDER_BIN, "-d", domain, "-silent", "-duc", "-nc", "-timeout", "30", "-max-time", "2", "-rl", "20"]
+        usable = {k: v for k, v in keys.items() if _PROVIDER_RE.match(k) and isinstance(v, str) and v}
+        if usable:
+            config = os.path.join(workdir, "provider-config.yaml")
+            fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                for name, key in usable.items():
+                    fh.write(f"{name}:\n  - {json.dumps(key)}\n")
+            cmd += ["-pc", config]
+        env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": workdir}
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBFINDER_TIMEOUT_S, env=env, check=False)
+        except subprocess.TimeoutExpired:
+            return set(), {"success": False, "exit_code": -1, "stdout": "", "stderr": "subfinder timed out", "error_reason": "subfinder_timeout"}
+        except OSError as exc:
+            return set(), tool_execution.failed_result("subfinder_not_installed", exc)
+        names: set[str] = set()
+        for line in proc.stdout.splitlines()[:SUBFINDER_MAX_NAMES]:
+            name = _scope_name(line, domain)
+            if name:
+                names.add(name)
+        ok = proc.returncode == 0
+        invocation = " ".join(cmd)
+        return names, {
+            "success": ok, "exit_code": proc.returncode, "stdout": "",
+            "stderr": (proc.stderr or "")[:1000], "error_reason": None if ok else "nonzero_exit",
+            "command": invocation, "outcome_summary": {"names": len(names)},
+        }
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _subfinder_subdomains(engagement_id: str, scan_run_id: str | None, domain: str, keys: dict[str, str]) -> set[str]:
+    """One gateway-authorized, audited, fault-isolated subfinder run for `domain`."""
+    decision = client.authorize(uuid.UUID(engagement_id), {
+        "tool": "subfinder", "category": "recon", "mode": "passive", "target": domain, "args": {},
+        "is_automated": True, "phase": "discovery", "scan_run_id": scan_run_id,
+    })
+    if not decision.get("allowed"):
+        logger.info("subfinder on %s denied: %s", domain, decision.get("reason"))
+        tool_execution.record(
+            engagement_id, scan_run_id=scan_run_id, tool="subfinder", phase="discovery",
+            authorized_target=domain, resolved_target=None, port_range=None,
+            result=tool_execution.failed_result(f"gateway_denied:{decision.get('reason')}"),
+        )
+        return set()
+    names, result = _run_subfinder(domain, keys)
+    tool_execution.record(
+        engagement_id, scan_run_id=scan_run_id, tool="subfinder", phase="discovery",
+        authorized_target=domain, resolved_target=None, port_range=None, result=result,
+        discovered_services=0,
+    )
+    return names
+
+
+# REQ-COVER-003 (R4, switch `crawling_enabled`): URL history from public
+# archives. Passive and third-party only - nothing here touches the target, and
+# the URLs are stored as context (they never widen scope).
+WAYBACK_CDX_URL = "https://web.archive.org/cdx/search/cdx"
+COMMONCRAWL_COLLINFO_URL = "https://index.commoncrawl.org/collinfo.json"
+URL_HISTORY_LIMIT = 1500
+
+
+def _query_wayback_urls(domain: str) -> str:
+    try:
+        resp = httpx.get(
+            WAYBACK_CDX_URL,
+            params={"url": f"*.{domain}", "fl": "original", "collapse": "urlkey", "limit": str(URL_HISTORY_LIMIT),
+                    "filter": "statuscode:200"},
+            timeout=PASSIVE_SOURCE_TIMEOUT * 2, follow_redirects=True,
+        )
+        resp.raise_for_status()
+        return resp.text
+    except httpx.HTTPError as exc:
+        logger.warning("wayback for %s failed: %s", domain, exc)
+        return ""
+
+
+def _query_commoncrawl_urls(domain: str) -> str:
+    try:
+        info = httpx.get(COMMONCRAWL_COLLINFO_URL, timeout=PASSIVE_SOURCE_TIMEOUT, follow_redirects=True)
+        info.raise_for_status()
+        api = info.json()[0]["cdx-api"]
+        if not str(api).startswith("https://index.commoncrawl.org/"):
+            return ""
+        resp = httpx.get(
+            api, params={"url": f"*.{domain}", "output": "json", "fl": "url", "limit": str(URL_HISTORY_LIMIT)},
+            timeout=PASSIVE_SOURCE_TIMEOUT * 2, follow_redirects=True,
+        )
+        resp.raise_for_status()
+        urls = []
+        for line in resp.text.splitlines():
+            try:
+                urls.append(str(json.loads(line).get("url", "")))
+            except ValueError:
+                continue
+        return "\n".join(urls)
+    except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
+        logger.warning("commoncrawl for %s failed: %s", domain, exc)
+        return ""
+
+
+_URL_HISTORY_SOURCES = (("wayback", _query_wayback_urls), ("commoncrawl", _query_commoncrawl_urls))
+
+
+def _collect_url_history(engagement_id: str, scan_run_id: str | None, domain: str,
+                         allow_named: list[dict], deny_named: list[dict]) -> int:
+    """Fetch, scope-filter (allow AND not deny, same rules as discovery) and
+    store historical URLs for one root domain. Returns how many were sent."""
+    from urllib.parse import urlsplit
+
+    sent = 0
+    for source, fetch in _URL_HISTORY_SOURCES:
+        try:
+            items = parse_url_list(fetch(domain), source)
+        except Exception as exc:  # noqa: BLE001 - one source must never break discovery
+            logger.warning("url history source %s for %s failed: %s", source, domain, exc)
+            continue
+        payload = []
+        for item in items:
+            host = (urlsplit(item["url"]).hostname or "").lower()
+            if not host or not _under(host, domain) or _denied(host, deny_named):
+                continue
+            if not any(_named_rule_matches(host, a) for a in allow_named):
+                continue
+            payload.append({k: item[k] for k in ("url", "method", "source", "param_names")})
+        for i in range(0, min(len(payload), URL_HISTORY_LIMIT), 500):
+            try:
+                client.add_discovered_endpoints(uuid.UUID(engagement_id), scan_run_id, payload[i:i + 500])
+                sent += len(payload[i:i + 500])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("storing %s URL history for %s failed: %s", source, domain, exc)
+                break
+    return sent
 
 
 def run(engagement_id: str, scan_run_id: str | None = None) -> list[dict]:
@@ -405,13 +616,33 @@ def run(engagement_id: str, scan_run_id: str | None = None) -> list[dict]:
                 pass
             targets.setdefault(value, "known")
     except Exception as exc:  # noqa: BLE001 - Vorbestand ist optional
-        logger.warning("Vorbestand in-scope-Assets nicht abrufbar: %s", exc)
+        logger.warning("previously known in-scope assets not retrievable: %s", exc)
 
     # 4. Passive OSINT als Bonus-Quellen (crt.sh + OTX + Anubis, REQ-SCANQUAL-001,
     #    je best effort und fault-isoliert).
     for domain in real_domains:
         for value in _passive_subdomains(domain):
             targets.setdefault(value, "passive-osint")
+
+    # 4b. subfinder (REQ-COVER-001, per-engagement switch `subfinder_enabled`,
+    #     on by default). Same scope filter as every other source below:
+    #     names outside the root are dropped by _scope_name, deny rules win in
+    #     the in_scope computation. A failure never fails discovery.
+    options = client.get_discovery_options(uuid.UUID(engagement_id)) if real_domains else {}
+    if options.get("subfinder"):
+        keys = client.get_subfinder_config()
+        for domain in sorted(real_domains):
+            try:
+                for value in _subfinder_subdomains(engagement_id, scan_run_id, domain, keys):
+                    targets.setdefault(value, "subfinder")
+            except Exception as exc:  # noqa: BLE001 - one source must never break discovery
+                logger.warning("subfinder for %s failed: %s", domain, exc)
+
+    # 4c. URL history (REQ-COVER-003, switch `crawling_enabled`, off by default):
+    #     stored as endpoint context only - it adds no target and no scope.
+    if options.get("crawling"):
+        for domain in sorted(real_domains):
+            _collect_url_history(engagement_id, scan_run_id, domain, allow_named, deny_named)
 
     results: list[dict] = []
     # REQ-GRAPH-006: create shorter names before longer ones (by label count) so
@@ -420,11 +651,11 @@ def run(engagement_id: str, scan_run_id: str | None = None) -> list[dict]:
     # authorization outcome (the Scope Gateway never reads parent_id).
     asset_id_by_value: dict[str, str] = {}
     for value in sorted(targets, key=lambda v: (v.count("."), v)):
-        in_scope = (
-            value in lab_hosts or any(
-                value == d or value.endswith("." + d) for d in real_domains
-            )
-        ) and not _denied(value, deny_named)
+        # GitHub issue #33: the same allow matching the Scope Gateway applies
+        # (a wildcard rule covers subdomains, not the bare root), deny first.
+        matching_allows = [a for a in allow_named if _named_rule_matches(value, a)]
+        in_scope = bool(matching_allows) and not _denied(value, deny_named)
+        active = in_scope and any(a.get("active_allowed") for a in matching_allows)
         parent_value = _closest_parent_value(value, asset_id_by_value)
         resp = client.add_discovered_asset(
             engagement_id, asset_type="domain", value=value,
@@ -432,7 +663,8 @@ def run(engagement_id: str, scan_run_id: str | None = None) -> list[dict]:
             parent_id=asset_id_by_value.get(parent_value) if parent_value else None,
         )
         asset_id_by_value[value] = resp["id"]
-        results.append({"value": value, "asset_id": resp["id"], "in_scope": in_scope, "asset_type": "domain"})
+        results.append({"value": value, "asset_id": resp["id"], "in_scope": in_scope, "active": active,
+                        "asset_type": "domain"})
 
     _enrich_dns(engagement_id, results)
 
@@ -443,7 +675,13 @@ def run(engagement_id: str, scan_run_id: str | None = None) -> list[dict]:
     # gate already consume.
     results.extend(_active_ip_discovery(engagement_id, scope_assets, scan_run_id))
 
-    return [{"value": r["value"], "asset_id": r["asset_id"], "asset_type": r.get("asset_type", "domain")} for r in results]
+    # GitHub issue #33: only current, active-eligible candidates go on to asset
+    # review, fingerprinting, and the agent. Everything else stays recorded as
+    # inventory (with its current in_scope flag) but is not a target.
+    return [
+        {"value": r["value"], "asset_id": r["asset_id"], "asset_type": r.get("asset_type", "domain")}
+        for r in results if r.get("active", True)
+    ]
 
 
 def _enrich_dns(engagement_id: str, assets: list[dict], resolver=None) -> None:
@@ -466,16 +704,16 @@ def _enrich_dns(engagement_id: str, assets: list[dict], resolver=None) -> None:
         try:
             intel = dns_intel.resolve_chain(value, resolver)
         except Exception as exc:  # noqa: BLE001 - DNS darf Discovery nie abbrechen
-            logger.warning("DNS-Anreicherung fuer %s fehlgeschlagen: %s", value, exc)
+            logger.warning("DNS enrichment for %s failed: %s", value, exc)
             continue
 
         try:
             client.add_dns_record(engagement_id, **intel.as_record(asset_id=asset["asset_id"]))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("dns_record fuer %s nicht speicherbar: %s", value, exc)
+            logger.warning("dns_record for %s could not be saved: %s", value, exc)
 
         if intel.takeover_suspected:
             try:
                 client.add_finding(engagement_id, **dns_intel.takeover_finding(intel, asset["asset_id"]))
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Takeover-Finding fuer %s nicht speicherbar: %s", value, exc)
+                logger.warning("takeover finding for %s could not be saved: %s", value, exc)

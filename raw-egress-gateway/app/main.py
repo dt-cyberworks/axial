@@ -36,13 +36,30 @@ except OSError as exc:
 if not PROXY_ADDRESSES:
     raise RuntimeError("egress proxy has no address")
 
+# REQ-COVER-004: optional self-hosted interaction server. Unset -> no extra
+# rule at all (the deny-all policy is exactly as before).
+OOB_HOST = os.environ.get("OOB_SERVER_HOST", "").strip()
+OOB_PORT = int(os.environ.get("OOB_SERVER_PORT", "8080"))
+OOB_ADDRESSES: list[str] = []
+if OOB_HOST:
+    try:
+        OOB_ADDRESSES = sorted({
+            item[4][0] for item in socket.getaddrinfo(OOB_HOST, OOB_PORT, socket.AF_INET, socket.SOCK_STREAM)
+        })
+    except OSError:
+        # The interaction server is optional: if it is not up, run without it.
+        print("raw-egress-gateway: oob server not resolvable; oob disabled", flush=True)
+
 # REQ-CONCUR-002: bounded 1-8, defaulting to 2, so multiple users' raw-network
 # (nmap) scans don't hard-serialize behind a single global slot.
 MAX_CONCURRENT_LEASES = max(1, min(8, int(os.environ.get("RAW_EGRESS_MAX_CONCURRENT_LEASES", "2"))))
 
 gateway = RawEgressGateway(
     SECRET,
-    NftPolicyManager(proxy_addresses=PROXY_ADDRESSES, proxy_port=PROXY_PORT, num_slots=MAX_CONCURRENT_LEASES),
+    NftPolicyManager(
+        proxy_addresses=PROXY_ADDRESSES, proxy_port=PROXY_PORT, num_slots=MAX_CONCURRENT_LEASES,
+        oob_addresses=OOB_ADDRESSES, oob_port=OOB_PORT,
+    ),
     max_concurrent_leases=MAX_CONCURRENT_LEASES,
 )
 

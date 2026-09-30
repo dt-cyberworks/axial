@@ -14,6 +14,7 @@ from app import auth_service, passwords
 from app.db.base import get_db
 from app.gateway.account_audit import append_account_audit_log
 from app.models.user import AccountAuditLog, User
+from app.rate_limit import client_ip
 from app.security import require_user
 from app.schemas.auth import (
     AdminCreateUserIn,
@@ -39,9 +40,8 @@ _ADMIN_ROLE_LOCK_KEY = 0x41444D4C4F434B  # "ADMLOCK" as bytes, for a stable/legi
 
 
 def _client_info(request: Request) -> tuple[str | None, str | None]:
-    forwarded = request.headers.get("x-forwarded-for")
-    ip = (forwarded.split(",")[0].strip() if forwarded else None) or (request.client.host if request.client else None)
-    return ip, request.headers.get("user-agent")
+    # REQ-IAM-017: X-Forwarded-For only from a trusted proxy (see rate_limit.client_ip).
+    return client_ip(request), request.headers.get("user-agent")
 
 
 @router.get("/users", response_model=list[UserOut])

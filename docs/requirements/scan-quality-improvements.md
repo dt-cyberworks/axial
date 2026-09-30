@@ -61,6 +61,14 @@ Acceptance criteria:
 
 ## REQ-SCANQUAL-002: nikto covers non-intrusive misconfiguration and info-disclosure
 
+> **Superseded by REQ-PIPE-013 (johannes, 2026-09-29, decision D2).** The
+> automatic scan pipeline no longer runs nikto: it always stopped at its 40 s
+> budget and its useful checks overlap nuclei's generic templates. Missing
+> security headers now come from the response headers httpx records. nikto
+> stays available on demand to the agent. The criteria below describe the
+> retired behaviour and are kept for history; their test was replaced by
+> `worker/tests/test_scan_pipeline_v2.py` (TC-PIPE-013).
+
 Context: nikto ran with `-Tuning b` (software identification only). The missing
 -security-header findings the parser consumes DO still surface under `b` (they
 come from nikto's baseline header analysis - verified empirically), so this is

@@ -6,11 +6,12 @@ import { api, isNotFound, type AgentStep, type AssetReview } from "../api/client
 import NotFound from "./NotFound";
 import { severityClass } from "../components/FindingsSection";
 import RunActivity from "../components/RunActivity";
+import ScanPlanView from "../components/ScanPlanView";
 import { activityKey, reasonExplanation, type RunLogEntry } from "../lib/runActivity";
 import { PHASES, PHASE_META, fmtDuration, fmtTime, phaseStateFor, runNumber, runStatePill } from "../lib/runs";
 import { useTicker } from "../lib/useTicker";
 
-type Tab = "progress" | "diff" | "agent" | "activity";
+type Tab = "progress" | "plan" | "diff" | "agent" | "activity";
 
 // High-value run evidence only. Per-request proxy traffic remains on the Audit page.
 const STREAM_ACTIONS = [
@@ -44,6 +45,11 @@ export default function RunDetail() {
   // nothing under react-query's structural sharing.
   const now = useTicker(isRunning);
 
+  // REQ-PIPE-010: the plan updates while the run executes.
+  const { data: plan } = useQuery({
+    queryKey: ["scan-plan", id, runId], queryFn: () => api.scanRunPlan(id!, runId!),
+    enabled: engagementLoaded && !!runId, refetchInterval: isRunning ? 3000 : false,
+  });
   const { data: diff } = useQuery({ queryKey: ["scan-diff", id, runId], queryFn: () => api.scanRunDiff(id!, runId!), enabled: engagementLoaded && !!runId });
   const { data: agentSteps = [] } = useQuery({
     queryKey: ["agent-steps", id, runId], queryFn: () => api.agentSteps(id!, runId!),
@@ -135,6 +141,11 @@ export default function RunDetail() {
               reduced coverage
             </span>
           )}
+          {run?.state_reason?.includes("coverage_partial:") && (
+            <span className="pill warn" title={reasonExplanation(run.state_reason)}>
+              partial coverage
+            </span>
+          )}
           <span className={`pill ${runStatePill(run?.state ?? "")}`}>
             {run?.cancel_requested && isRunning ? "stopping…" : run?.state ?? "?"}
           </span>
@@ -158,9 +169,9 @@ export default function RunDetail() {
       )}
 
       <div className="tab-bar">
-        {(["progress", "diff", "agent", "activity"] as Tab[]).map((t) => (
+        {(["progress", "plan", "diff", "agent", "activity"] as Tab[]).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t === "progress" ? "Progress" : t === "diff" ? "Diff" : t === "agent" ? "Vector Agent" : "Activity"}
+            {t === "progress" ? "Progress" : t === "plan" ? "Plan" : t === "diff" ? "Diff" : t === "agent" ? "Vector Agent" : "Activity"}
           </button>
         ))}
       </div>
@@ -192,6 +203,8 @@ export default function RunDetail() {
           </div>
         </section>
       )}
+
+      {tab === "plan" && <ScanPlanView plan={plan} />}
 
       {tab === "diff" && (
         <section className="table-panel">
@@ -311,8 +324,10 @@ function AssetReviewModal({ review, busy, onSubmit }: {
           <div>
             <h2>Review discovered assets</h2>
             <p>
-              Discovery found {review.candidate_assets.length} in-scope host(s). Deselect any that should NOT be
-              scanned (e.g. stale DNS pointing outside your control) before the rest of the pipeline runs.
+              Discovery found {review.candidate_assets.length} host(s) that the current scope allows for active
+              testing - names and addresses that are out of scope, denied, or passive-only are already left out.
+              Deselect any that should NOT be scanned (e.g. stale DNS pointing outside your control) before the
+              rest of the pipeline runs.
             </p>
           </div>
         </div>

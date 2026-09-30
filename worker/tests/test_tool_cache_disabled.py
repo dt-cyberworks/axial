@@ -20,7 +20,7 @@ def test_nmap_body_disables_cache():
 
 
 def test_nuclei_body_disables_cache():
-    assert trc._nuclei_body("host.example.com", {})["use_cache"] is False
+    assert trc._nuclei_body("host.example.com", {"mode": "tech"})["use_cache"] is False
 
 
 def test_nikto_body_disables_cache():
@@ -40,5 +40,6 @@ def test_every_dedicated_endpoint_tool_disables_cache():
     remembering this - fails loudly instead of silently reintroducing stale
     cross-run/cross-engagement cache hits."""
     for tool, (endpoint, body_fn) in trc._ENDPOINTS.items():
-        body = body_fn("host.example.com", {"stage": "discovery", "flags": ["-sS"], "ports": "1-1024", "max_rate": 100})
+        body = body_fn("host.example.com", {"stage": "discovery", "flags": ["-sS"], "ports": "1-1024", "max_rate": 100,
+                                            "mode": "tech"})
         assert body.get("use_cache") is False, f"{tool} ({endpoint}) does not disable HexStrike's result cache"

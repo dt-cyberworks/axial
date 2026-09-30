@@ -45,7 +45,7 @@ def _patch_common(monkeypatch, *, triggered_sequence, execute_result=None):
 
 def test_skips_without_a_materialized_ip():
     obs = dispatch._dispatch_activemq_openwire_probe("019fc77d-ced9-72c6-be50-2335883f0a63", "asset-1", "mq.example", None, "run-1")
-    assert "keine materialisierte IP" in obs.summary
+    assert "no materialized IP" in obs.summary
 
 
 def test_a_callback_within_the_wait_window_is_reported_as_a_validated_critical_finding(monkeypatch):
@@ -63,7 +63,7 @@ def test_a_callback_within_the_wait_window_is_reported_as_a_validated_critical_f
     assert findings[0]["cve_ids"] == ["CVE-2023-46604"]
     assert findings[0]["is_kev"] is True
     assert findings[0]["evidence"]["evidence_basis"] == "direct_technical_proof"
-    assert "BESTAETIGT" in obs.summary
+    assert "CONFIRMED" in obs.summary
 
 
 def test_negative_no_callback_within_the_wait_window_is_not_a_finding(monkeypatch):
@@ -81,7 +81,7 @@ def test_negative_no_callback_within_the_wait_window_is_not_a_finding(monkeypatc
 
     assert finding_calls == []
     assert obs.findings == 0
-    assert "kein Befund" in obs.summary
+    assert "no finding" in obs.summary
 
 
 def test_a_connect_failure_is_not_a_finding_and_never_polls_for_a_callback(monkeypatch):

@@ -39,7 +39,6 @@ def _in_scope_host(monkeypatch):
                              if rule == "allow" else []
                          ))
     monkeypatch.setattr(proxy, "is_materialized_ip", lambda eid, ip: False)
-    monkeypatch.setattr(proxy, "recent_allowed_count", lambda eid, window_seconds=1.0: 0)
 
 
 def test_port_outside_configured_window_is_denied(monkeypatch):

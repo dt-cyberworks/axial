@@ -19,6 +19,7 @@ Requirements:
 Automated tests:
 
 - `worker/tests/test_tool_cache_disabled.py`
+- `tool-runner/tests/test_runner_auth.py`
 
 Objective:
 
@@ -33,6 +34,10 @@ Expected results:
   `_wafw00f_body` all return `use_cache: false`.
 - Iterating `_ENDPOINTS` and calling every registered body builder confirms
   `use_cache` is `false` for each, without relying on a fixed tool-name list.
+- The patched HexStrike `execute_command()` executes the same command twice
+  even when the caller asks for the cache, and stores nothing; a changed
+  upstream anchor makes the patch fail loudly.
+- Live: a resumed scan's nikto/nmap calls take their real run time, not ~20 ms.
 
 ## TC-CONCUR-002: Raw-network egress supports multiple concurrent, mutually isolated leases
 

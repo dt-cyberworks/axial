@@ -1,9 +1,17 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import QRCode from "qrcode";
 
-import { api, setSessionToken } from "../api/client";
+import { api, ApiError } from "../api/client";
+import { QR_FAILED, QR_LOADING, qrCodeDataUrl } from "../lib/qrCode";
 import AuthLayout from "../components/AuthLayout";
+
+/** REQ-IAM-016: a 429 is not a wrong password - say what actually happened. */
+function signInError(error: unknown, fallback: string): string {
+  if (error instanceof ApiError && error.status === 429) {
+    return "Too many sign-in attempts from your network. Wait a few minutes, then try again.";
+  }
+  return fallback;
+}
 
 type Step =
   | { name: "password" }
@@ -23,17 +31,19 @@ export default function Login() {
   const [newPassword, setNewPassword] = useState("");
   const [code, setCode] = useState("");
   const [qrDataUrl, setQrDataUrl] = useState("");
+  const [qrFailed, setQrFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (step.name === "mfa_enroll") {
-      QRCode.toDataURL(step.otpauthUri, { width: 200 }).then(setQrDataUrl).catch(() => setQrDataUrl(""));
+      setQrDataUrl("");
+      setQrFailed(false);
+      qrCodeDataUrl(step.otpauthUri).then(setQrDataUrl).catch(() => setQrFailed(true));
     }
   }, [step]);
 
-  const finishWithSession = (token: string, backupCodes?: string[] | null) => {
-    setSessionToken(token);
+  const finishWithSession = (backupCodes?: string[] | null) => {
     if (backupCodes && backupCodes.length) {
       setStep({ name: "backup_codes", codes: backupCodes });
     } else {
@@ -54,8 +64,8 @@ export default function Login() {
       } else {
         setStep({ name: "mfa_verify", challengeId: challenge.challenge_id });
       }
-    } catch {
-      setError("Invalid email or password.");
+    } catch (err) {
+      setError(signInError(err, "Invalid email or password."));
     } finally {
       setBusy(false);
     }
@@ -73,8 +83,8 @@ export default function Login() {
       } else {
         setStep({ name: "mfa_verify", challengeId: challenge.challenge_id });
       }
-    } catch {
-      setError("Could not set that password (must be at least 12 characters).");
+    } catch (err) {
+      setError(signInError(err, "Could not set that password (must be at least 12 characters)."));
     } finally {
       setBusy(false);
     }
@@ -86,9 +96,9 @@ export default function Login() {
     setBusy(true); setError(null);
     try {
       const result = await api.mfaEnrollConfirm(step.challengeId, code);
-      finishWithSession(result.session_token, result.backup_codes);
-    } catch {
-      setError("Invalid code. Check your authenticator app and try again.");
+      finishWithSession(result.backup_codes);
+    } catch (err) {
+      setError(signInError(err, "Invalid code. Check your authenticator app and try again."));
     } finally {
       setBusy(false);
     }
@@ -100,9 +110,9 @@ export default function Login() {
     setBusy(true); setError(null);
     try {
       const result = await api.loginMfa(step.challengeId, code);
-      finishWithSession(result.session_token);
-    } catch {
-      setError("Invalid code.");
+      finishWithSession();
+    } catch (err) {
+      setError(signInError(err, "Invalid code."));
     } finally {
       setBusy(false);
     }
@@ -145,7 +155,9 @@ export default function Login() {
   if (step.name === "mfa_enroll") {
     return (
       <AuthLayout title="Set up two-factor authentication" subtitle="Scan with Google Authenticator, 1Password, Authy, or any TOTP app.">
-        {qrDataUrl && <img src={qrDataUrl} alt="MFA QR code" style={{ display: "block", margin: "0 auto 12px" }} />}
+        {qrDataUrl
+          ? <img src={qrDataUrl} alt="MFA QR code" style={{ display: "block", margin: "0 auto 12px" }} />
+          : <p className={qrFailed ? "error-block" : "muted-line"} style={{ textAlign: "center" }}>{qrFailed ? QR_FAILED : QR_LOADING}</p>}
         <p className="muted-line" style={{ wordBreak: "break-all", textAlign: "center" }}>
           Can't scan? Enter manually: <code>{step.secret}</code>
         </p>

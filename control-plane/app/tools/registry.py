@@ -53,6 +53,10 @@ class ToolSpec:
     parser: str | None = None           # Modul/Funktion, das Output -> Findings/Services macht
     max_runtime_seconds: int = 120
     arg_validator: Callable[[dict], bool] | None = None
+    # False = only the deterministic pipeline may call this tool; the gateway
+    # denies it for phase "agent" and the Vector Agent is never offered it
+    # (REQ-COVER-007).
+    agent_callable: bool = True
     notes: str = ""
 
 
@@ -63,16 +67,24 @@ class ToolSpec:
 
 _SPECS: list[ToolSpec] = [
     # --- recon (passiv/OSINT) ---
+    # REQ-COVER-001: runs in the WORKER image (user-approved exception to "the
+    # worker runs no tool binaries": it only talks to third-party sources over
+    # the OSINT egress). Never via the runner, hence no worker_mapped and no
+    # hexstrike endpoint; discovery asks the gateway (recon/passive) before
+    # every run. Not offered to the agent.
     ToolSpec("subfinder", "recon", "passive", installed=True, default_enabled=True,
-             hexstrike_endpoint="/api/tools/subfinder", worker_mapped=True, dispatched=False,
-             parser=None, notes="gemappt, aber Discovery nutzt derzeit direkt crt.sh statt subfinder"),
-    ToolSpec("amass", "recon", "passive", installed=True, default_enabled=True,
+             hexstrike_endpoint=None, worker_mapped=False, dispatched=False,
+             parser="subfinder", agent_callable=False,
+             arg_validator=args_safety._subfinder_args_safe,
+             notes="passive subdomain sources, run in the worker image by discovery (REQ-COVER-001); "
+                   "per-engagement switch subfinder_enabled"),
+    ToolSpec("amass", "recon", "passive", installed=True, default_enabled=False,
              hexstrike_endpoint="/api/tools/amass", worker_mapped=True, dispatched=False,
-             parser=None, notes="gemappt, noch nicht in eine Phase orchestriert"),
+             parser=None, notes="mapped, not yet orchestrated into any phase"),
     ToolSpec("dnsx", "recon", "passive", installed=False, default_enabled=False,
-             notes="whitelisted, aber NICHT im Image (Dockerfile installiert dnsutils, nicht projectdiscovery/dnsx)"),
+             notes="whitelisted, but NOT in the image (the Dockerfile installs dnsutils, not projectdiscovery/dnsx)"),
     ToolSpec("tlsx", "recon", "passive", installed=False, default_enabled=False,
-             notes="whitelisted, aber NICHT im Image"),
+             notes="whitelisted, but NOT in the image"),
 
     # --- fingerprint ---
     ToolSpec("nmap", "fingerprint", "raw_network", installed=True, default_enabled=True,
@@ -84,24 +96,42 @@ _SPECS: list[ToolSpec] = [
              hexstrike_endpoint="/api/command", worker_mapped=True, dispatched=True,
              proxy_flag="-proxy", proxy_verified=True, parser="httpx",
              arg_validator=args_safety._httpx_args_safe,
-             notes="via /api/command (HexStrikes /api/tools/httpx nutzt -l = Dateiliste, kaputt "
-                   "fuer Einzel-Hosts); Symlink httpx-toolkit->httpx im Image; Liveness+Tech"),
-    ToolSpec("whatweb", "fingerprint", "http_proxy", installed=True, default_enabled=True,
+             notes="via /api/command (HexStrike's /api/tools/httpx uses -l = file list, broken "
+                   "for single hosts); symlink httpx-toolkit->httpx in the image; liveness + tech"),
+    # REQ-COVER-003: pipeline-only crawler (fingerprint baseline), through the
+    # egress proxy under the rate policy; depth/pages/time are worker constants.
+    ToolSpec("katana", "fingerprint", "http_proxy", installed=True, default_enabled=True,
+             hexstrike_endpoint="/api/command", worker_mapped=True, dispatched=True,
+             proxy_flag="-proxy", proxy_verified=False, parser="katana", max_runtime_seconds=120,
+             arg_validator=args_safety._no_args, agent_callable=False,
+             notes="crawler, one host per call, no headless mode; per-engagement switch crawling_enabled "
+                   "(REQ-COVER-003/007)"),
+    # REQ-COVER-006: one page load per live web service through the egress proxy.
+    ToolSpec("screenshot", "fingerprint", "http_proxy", installed=True, default_enabled=True,
+             hexstrike_endpoint="/api/command", worker_mapped=True, dispatched=True,
+             proxy_flag="--proxy-server", proxy_verified=False, parser="screenshot", max_runtime_seconds=60,
+             arg_validator=args_safety._no_args, agent_callable=False,
+             notes="headless Chromium screenshot via the egress proxy; per-engagement switch "
+                   "screenshots_enabled; denied for bug-bounty engagements (REQ-COVER-006/007)"),
+    ToolSpec("whatweb", "fingerprint", "http_proxy", installed=True, default_enabled=False,
              hexstrike_endpoint=None, worker_mapped=False, dispatched=False,
              proxy_flag="--proxy", proxy_verified=False, parser=None,
-             notes="installiert+whitelisted, aber weder im Client gemappt noch dispatcht"),
+             notes="installed + whitelisted, but neither mapped in the client nor dispatched"),
     ToolSpec("wafw00f", "fingerprint", "http_proxy", installed=True, default_enabled=True,
              hexstrike_endpoint="/api/tools/wafw00f", worker_mapped=True, dispatched=True,
              proxy_flag="-p", proxy_verified=True, parser="wafw00f",
-             notes="voll durch die Kette bewiesen (Egress-Proxy + WAF-Info-Finding)"),
-    ToolSpec("sslscan", "fingerprint", "raw_network", installed=True, default_enabled=True,
+             notes="proven end to end (egress proxy + WAF info finding)"),
+    ToolSpec("sslscan", "fingerprint", "raw_network", installed=True, default_enabled=False,
              hexstrike_endpoint=None, worker_mapped=False, dispatched=False,
-             parser=None, notes="direkte TLS-Verbindung; raw egress wie nmap, nicht HTTP-proxybar"),
+             parser=None, notes="direct TLS connection; raw egress like nmap, cannot go through the HTTP proxy"),
     ToolSpec("testssl", "fingerprint", "http_proxy", installed=True, default_enabled=True,
              hexstrike_endpoint="/api/command", worker_mapped=True, dispatched=True,
-             proxy_flag="--proxy", proxy_verified=True, parser="testssl", max_runtime_seconds=300,
-             notes="testssl.sh aus Git ins Image; --proxy (HTTP CONNECT) -> laeuft durch den "
-                   "Egress-Proxy wie nikto; TLS-/Zertifikats-Hygiene, --fast --severity LOW"),
+             proxy_flag="--proxy", proxy_verified=True, parser="testssl", max_runtime_seconds=600,
+             arg_validator=args_safety._testssl_args_safe,
+             notes="testssl.sh from Git in the image; --proxy (HTTP CONNECT) -> runs through the "
+                   "egress proxy like nikto; TLS/certificate hygiene, --fast --severity LOW. REQ-PIPE-009: "
+                   "also runs on non-web TLS services (mail, LDAP, ...), with --starttls where the "
+                   "protocol upgrades to TLS; the STARTTLS protocol is a fixed set."),
     # REQ-AGENT-025: curated, non-agent-composed raw-protocol probes for
     # services the HTTP-only toolkit above cannot touch at all - found live
     # 2026-08-04, Vulhub Redis/ActiveMQ scored zero findings for exactly this
@@ -146,17 +176,20 @@ _SPECS: list[ToolSpec] = [
              hexstrike_endpoint="/api/tools/nuclei", worker_mapped=True, dispatched=True,
              proxy_flag="-proxy", proxy_verified=True, parser="nuclei", max_runtime_seconds=300,
              arg_validator=args_safety._nuclei_args_safe,
-             notes="Templates zur Build-Zeit gebacken (/opt/nuclei-templates, -disable-update-check); "
-                   "-proxy durch Egress-Proxy; konservativ (nicht-intrusiv, -etags dos/intrusive/fuzz/"
-                   "csp-bypass, rate-limit). REQ-AGENT-018: laeuft in ZWEI Passes (Haupt non-headless + "
-                   "Mini-Headless nur domxss), weil HexStrikes Command-Executor JEDEN Aufruf hart bei "
-                   "300s killt (nicht pro Call ueberschreibbar) - ein kombinierter Headless+Voll-Lauf "
-                   "sprengte das live. Jeder Pass bleibt fuer sich unter 300s; s. worker _nuclei_body."),
+             notes="templates baked in at build time (/opt/nuclei-templates, -disable-update-check); "
+                   "-proxy through the egress proxy; conservative (non-intrusive, -etags dos/intrusive/fuzz/"
+                   "csp-bypass, rate limit). REQ-AGENT-018: runs in TWO passes (main non-headless + "
+                   "mini headless for domxss only), because HexStrike's command executor hard-kills EVERY "
+                   "call at 300s (not overridable per call) - a combined headless + full run exceeded "
+                   "that live. Each pass stays under 300s on its own; see worker _nuclei_body."),
     ToolSpec("nikto", "vuln", "http_proxy", installed=True, default_enabled=True,
              hexstrike_endpoint="/api/tools/nikto", worker_mapped=True, dispatched=True,
              proxy_flag="-useproxy", proxy_verified=True, parser="nikto_missing_headers",
              max_runtime_seconds=60,
-             notes="voll durch die Kette bewiesen (Egress-Proxy + Findings)"),
+             notes="REQ-PIPE-013: retired from the automatic scan pipeline - it always stopped at its 40 s "
+                   "budget (truncated) and its useful checks overlap nuclei's generic templates; missing "
+                   "security headers now come from the response headers httpx records. Still available on "
+                   "demand to the agent. Proven end to end (egress proxy + findings)."),
     # Agent-gesteuertes rohes HTTP-Lesen (beliebige Header/Pfad, safe methods)
     # durch den Egress-Proxy - Fundament fuer autonomes Pentesting: der Vector
     # Agent formt gezielte Requests (z. B. Auth-Header enumerieren) und bekommt
@@ -167,7 +200,7 @@ _SPECS: list[ToolSpec] = [
              hexstrike_endpoint="/api/command", worker_mapped=True, dispatched=True,
              proxy_flag="-x", proxy_verified=False, parser="http_response",
              max_runtime_seconds=30, arg_validator=args_safety._http_request_args_safe,
-             notes="roher HTTP-Lesezugriff via curl (generisches /api/command) durch den Egress-Proxy; volle Antwort ans LLM"),
+             notes="raw HTTP read access via curl (generic /api/command) through the egress proxy; full response to the LLM"),
     # Content-Discovery/Enumeration (Burp-Intruder-Aequivalent, das ins Modell
     # passt): ffuf leistet die Fleissarbeit, der Vector Agent KURATIERT
     # (kontextpassende SecLists-Wortliste + wenige eigene Kandidaten). Feuert
@@ -177,14 +210,14 @@ _SPECS: list[ToolSpec] = [
              hexstrike_endpoint="/api/command", worker_mapped=True, dispatched=True,
              proxy_flag="-x", proxy_verified=False, parser="ffuf", max_runtime_seconds=120,
              arg_validator=args_safety._ffuf_args_safe,
-             notes="kuratierte Content-Discovery via ffuf + SecLists durch den Egress-Proxy; "
-                   "Wortliste nur ueber Allowlist-Schluessel, nicht-destruktiv, rate-limitiert"),
+             notes="curated content discovery via ffuf + SecLists through the egress proxy; "
+                   "wordlist only by allowlist key, non-destructive, rate-limited"),
 
     # --- cred (nur mit Freigabe + Einzelbestaetigung) ---
-    ToolSpec("default-cred-check", "cred", "http_proxy", installed=True, default_enabled=True,
+    ToolSpec("default-cred-check", "cred", "http_proxy", installed=True, default_enabled=False,
              hexstrike_endpoint=None, worker_mapped=False, dispatched=False,
              parser=None, arg_validator=args_safety._default_cred_check_args_safe,
-             notes="nur herstellerbekannte Default-Logins, max 3 Versuche; noch nicht angebunden"),
+             notes="only vendor-documented default logins, at most 3 attempts; not wired yet"),
 
     # --- exploit (bewusst leer im Startangebot) ---
 ]
@@ -203,7 +236,7 @@ def agent_dispatchable() -> set[str]:
     (dispatched=True). Die EINE Quelle dafuer, was dem Vector Agent als
     verfuegbar gemeldet werden darf (REQ-TOOL-004) - haelt die dispatch-Realitaet
     des Workers und das Agent-Angebot synchron."""
-    return {name for name, spec in REGISTRY.items() if spec.dispatched}
+    return {name for name, spec in REGISTRY.items() if spec.dispatched and spec.agent_callable}
 
 
 def enabled_whitelist() -> dict[str, set[str]]:

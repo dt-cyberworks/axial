@@ -48,7 +48,7 @@ def test_agent_dispatch_httpx_records_dead_result(monkeypatch):
 
     obs = dispatch._dispatch_httpx("engagement-1", "asset-1", "dead-host.example.com", None, "run-1")
 
-    assert "kein lebender" in obs.summary
+    assert "no live" in obs.summary
     assert recorded == [("asset-1", False)]
 
 

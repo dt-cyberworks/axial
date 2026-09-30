@@ -42,7 +42,7 @@ def test_command_path_captures_the_real_invocation(monkeypatch):
         captured["path"], captured["payload"] = path, payload
         return _fake_response({"stdout": "ok", "return_code": 0, "success": True})
 
-    monkeypatch.setattr(trc.ToolRunnerClient, "_post_cancellable", lambda self, p, pl, s: fake_post(p, pl, s))
+    monkeypatch.setattr(trc.ToolRunnerClient, "_post_cancellable", lambda self, p, pl, s, b=None: fake_post(p, pl, s))
 
     result = trc.tool_runner.run("ffuf", "https://target.example.com", {"wordlist": "quickhits"})
 
@@ -58,7 +58,7 @@ def test_captured_command_matches_what_was_actually_sent(monkeypatch):
     output as the executed one, not a separate rendering."""
     captured = {}
 
-    def fake_post(self, path, payload, scan_run_id):
+    def fake_post(self, path, payload, scan_run_id, budget_s=None):
         captured["payload"] = payload
         return _fake_response({"stdout": "", "return_code": 0, "success": True})
 
@@ -78,7 +78,7 @@ def test_endpoint_path_captures_the_structured_body(monkeypatch):
     monkeypatch.setattr(trc.ToolRunnerClient, "raw_network_available", staticmethod(lambda: True))
     monkeypatch.setattr(
         trc.ToolRunnerClient, "_post_cancellable",
-        lambda self, p, pl, s: _fake_response({"stdout": "", "return_code": 0, "success": True}),
+        lambda self, p, pl, s, b=None: _fake_response({"stdout": "", "return_code": 0, "success": True}),
     )
 
     args = {"stage": "discovery", "flags": ["-sS"], "ports": "1-65535", "max_rate": 500}

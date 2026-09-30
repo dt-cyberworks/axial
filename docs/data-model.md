@@ -19,6 +19,7 @@ erDiagram
     engagement ||--o{ scan_run : "runs"
     engagement ||--o{ approval_request : "approvals"
     engagement ||--o{ audit_log : "logs"
+    engagement ||--o{ rate_reservation : "reserved rate slots"
     discovered_asset ||--o{ service : "exposes"
     discovered_asset ||--o{ finding : "affected"
     discovered_asset ||--o| dns_record : "resolves to"
@@ -75,6 +76,14 @@ only the original name is the asset. `takeover_suspected` flags dangling DNS
 confirmation is done by a human — the scanner never queries the third-party
 target itself.
 
+## Rate reservations: `rate_reservation`
+
+One row per call (`path = gateway`) or network request (`path = proxy`) that
+was allowed to go ahead, inserted before it goes ahead, under a transaction
+advisory lock per (engagement, path). The rate limit counts these rows inside
+its window; the audit log stays the record of what happened, not the counter.
+Rows older than an hour are pruned (REQ-RATE-005, migration 0033).
+
 ## The legal basis: `engagement.source`
 
 `source` deterministically drives the authorization source, the rules, and
@@ -106,10 +115,18 @@ always takes precedence** — including via wildcard or path. Matching logic:
 
 | `asset_type` | Example `value` | Matches |
 |---|---|---|
-| `domain` | `api.customer.com` | exactly `api.customer.com` |
+| `domain` | `api.customer.com` | `api.customer.com` and its subdomains (label boundary: not `xapi.customer.com`) |
 | `wildcard` | `*.customer.com` | `sub.customer.com` (fnmatch) |
 | `ip` | `10.0.0.5` | exactly this IP |
 | `cidr` | `10.0.0.0/24` | any IP in the network |
+
+`discovered_asset.in_scope` (REQ-ASSETREVIEW-009) is re-computed by
+discovery on every run with the same matching and deny precedence, and
+follows the current scope in both directions: a value whose allow rule was
+removed, or that a new deny rule covers, is set back to `false`. Only values
+that are in scope **and** covered by an `active_allowed` allow rule go on to
+asset review, fingerprinting, and the Vector Agent; the rest stay in the
+inventory.
 
 REQ-SCOPEVAL-001/002: `value` is format-validated and canonicalized at
 creation time (`ip`/`cidr` via `ipaddress`, host bits cleared; IPv6
@@ -167,6 +184,17 @@ turns only `cancel_requested=true` rows still in `running`/`waiting_approval`
 into terminal `aborted` rows, sets the operator-cancel reason/finish time, and
 closes approvals whose stored tool-call JSON carries that exact run ID.
 
+### Run resume (`scan_run.attempt`, `owner_task_id`, `checkpoint`)
+
+Migration `0034` (GitHub issue #42, REQ-RESUME-001..005). `attempt` counts worker
+claims and fences every worker write; `owner_task_id` is the Celery task that
+holds the run; `checkpoint` (JSON) holds what the next phase needs (discovered
+assets, fingerprinted services, warnings, task parameters). When a claimed run's
+heartbeat goes stale the reaper queues the run again (at most
+`scan_max_resumes`, default 2) instead of aborting it; a new task claims it and
+continues at `scan_run.phase`. The checkpoint is internal and never returned by
+an operator API.
+
 ### Run liveness & reaping (`scan_run.heartbeat_at`)
 
 `scan_run.heartbeat_at` (migration `0011`) is a liveness signal the worker
@@ -180,3 +208,35 @@ hung worker from permanently blocking new scans, and — together with the
 self-healing raw-egress lease (dead-heartbeat reclamation + idempotent release in
 the gateway) — makes the single-slot raw Nmap lifecycle crash-consistent. See
 `docs/requirements/raw-egress-lease-stability.md` (REQ-RAWLEASE-001..003).
+
+### Extended discovery (migration `0035`, REQ-COVER-003/006/007)
+
+`engagement` gets four booleans: `subfinder_enabled` (default true),
+`crawling_enabled`, `oob_enabled`, `screenshots_enabled` (default false).
+`discovered_endpoint` holds crawled and archived endpoints (URL without query,
+host, port, method, source, `param_names`, first seen), unique per engagement,
+method and URL. `web_screenshot` holds one PNG per URL (at most 2 MB, cap 200
+per engagement, SHA-256 recorded). Both tables are deleted with the engagement.
+Design: [`design/extended-discovery-architecture.md`](design/extended-discovery-architecture.md).
+
+### Scan plan (migrations `0036`, `0037`, REQ-PIPE-001/003/005/008)
+
+`0036` retires the `validate` phase: runs stored at it continue at `score` (the enum
+value stays, it is never written again). `0037` adds `engagement.scan_profile`
+(`standard` default, `thorough`), `scan_run.scan_profile` (the depth the run started
+with; a later change does not rewrite it) and two tables, both deleted with the run and
+the engagement:
+
+- `scan_surface` - one open port of an approved asset per run: host, ip, port,
+  scheme, `service_class` (`web`, `web_alias`, `tls_service`, `service`, `unknown`),
+  `alias_of`, `profile` (normalized product keys with optional `@version`) and a
+  `fingerprint` (what the checks need: url, status, title, server, technologies,
+  protocol, service id, response headers without cookies/authorization). Unique per
+  run, host and port.
+- `scan_check` - one planned or deliberately skipped check of a surface: `seq`
+  (execution order), `check_id`, `tool`, `args` (fixed typed selections only),
+  `depends_on`, `state`, `reason`, `budget_s`, `attempt`, timing, `findings` and an
+  `outcome_summary`. Unique per run, surface and check. The row is the check-level
+  checkpoint: a resumed run runs `planned` and `running` rows and never the finished ones.
+
+Design: [`design/scan-pipeline-architecture.md`](design/scan-pipeline-architecture.md).

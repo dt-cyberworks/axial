@@ -188,3 +188,29 @@ Expected results:
   (`test_allow_domain_scope_matching_is_case_insensitive`) - found live via
   the UAT scan-journey tier, see the addendum in
   `docs/requirements/asset-review-gate.md`.
+
+## TC-ASSETREVIEW-009: Only current, active-eligible candidates leave discovery
+
+Requirements:
+
+- REQ-ASSETREVIEW-009
+
+Automated tests:
+
+- `worker/tests/test_discovery_current_scope_candidates.py`
+- `control-plane/tests/integration/test_discovered_asset_scope_tracking.py`
+- `worker/tests/test_mixed_scope_discovery.py`
+
+Objective:
+
+Prove stale, denied, out-of-scope, passive-only, and lookalike values never
+become candidates, and that the stored `in_scope` flag follows the scope.
+
+Expected results:
+
+- Known IPs no longer covered, or newly denied, are dropped and demoted; still-covered ones stay candidates unchanged.
+- A passive-only `ip` asset is never a candidate or registered; a directly allowed but denied `ip` is recorded out of scope.
+- Names that fell out of scope or are denied are demoted and dropped; passive-only domains are inventory only; a wildcard covers subdomains but not the root; a mixed passive/active scope yields only the actively covered names.
+- Passive sources (crt.sh, CertSpotter, HackerTarget with mocked HTTP) drop `badexample.com`-style lookalikes.
+- `in_scope` is demoted and promoted again on the same row; demoted rows stay listed as inventory; the original `discovered_via` is kept.
+- Against the code before the fix, 11 of the 13 worker tests fail (the two that pass are regression guards).

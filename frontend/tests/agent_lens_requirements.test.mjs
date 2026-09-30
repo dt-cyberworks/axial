@@ -10,7 +10,9 @@ const wizard = read("frontend/src/pages/EngagementWizard.tsx");
 const edit = read("frontend/src/pages/EngagementEdit.tsx");
 const runDetail = read("frontend/src/pages/RunDetail.tsx");
 const runActivity = read("frontend/src/lib/runActivity.ts");
-const results = read("frontend/src/components/FindingsSection.tsx");
+// The findings list and the finding detail panel it shares with the all-findings page.
+const results = ["frontend/src/components/FindingsSection.tsx", "frontend/src/components/FindingDetail.tsx", "frontend/src/lib/findings.ts"]
+  .map(read).join("\n");
 const styles = read("frontend/src/styles.css");
 const settings = read("frontend/src/pages/Settings.tsx");
 const audit = read("frontend/src/pages/Audit.tsx");

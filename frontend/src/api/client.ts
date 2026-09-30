@@ -4,6 +4,8 @@
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
+export type ScanProfile = "standard" | "thorough";
+
 export interface Engagement {
   id: string;
   title: string;
@@ -17,6 +19,13 @@ export interface Engagement {
   tcp_port_to: number;
   udp_discovery_enabled: boolean;
   asset_review_enabled: boolean;
+  // REQ-COVER-007: extended-discovery switches (subfinder on by default).
+  subfinder_enabled: boolean;
+  crawling_enabled: boolean;
+  oob_enabled: boolean;
+  screenshots_enabled: boolean;
+  // REQ-PIPE-005: how deep a scan goes. Never widens scope, grants or switches.
+  scan_profile: ScanProfile;
   authorized_from: string;
   authorized_until: string;
   emergency_contact: string | null;
@@ -34,6 +43,11 @@ export interface EngagementUpdate {
   tcp_port_to?: number;
   udp_discovery_enabled?: boolean;
   asset_review_enabled?: boolean;
+  subfinder_enabled?: boolean;
+  crawling_enabled?: boolean;
+  oob_enabled?: boolean;
+  screenshots_enabled?: boolean;
+  scan_profile?: ScanProfile;
   // REQ-AUTH-001/003 (amended, GitHub issue #12): source stays hidden from
   // every ROUTINE edit - this field exists only so the one explicit "this
   // engagement follows a bug bounty program" toggle can set it. No other
@@ -65,6 +79,30 @@ export interface BountyProgram {
 }
 
 export type BountyProgramInput = Omit<BountyProgram, "id" | "engagement_id">;
+
+// REQ-COVER-003/006: what crawling and screenshots found.
+export interface DiscoveredEndpoint {
+  id: string;
+  url: string;
+  host: string;
+  port: number;
+  method: string;
+  source: string;
+  param_names: string[];
+  first_seen_at: string | null;
+}
+
+export interface WebScreenshotMeta {
+  id: string;
+  url: string;
+  host: string;
+  port: number;
+  byte_size: number;
+  created_at: string | null;
+}
+
+// REQ-COVER-001: provider keys are write-only; the API only says whether one is set.
+export interface SubfinderProvider { name: string; key_set: boolean }
 
 export interface ScopeAsset {
   id: string;
@@ -128,6 +166,31 @@ export interface Finding {
   last_seen: string | null;
 }
 
+// REQ-PORTFOLIO-001: GET /findings - findings across every engagement the
+// caller can see. The server applies the ownership rule; the console only
+// shows what it gets.
+export interface PortfolioFinding extends Finding {
+  engagement_title: string;
+}
+
+export interface FindingPage {
+  items: PortfolioFinding[];
+  total: number;
+  limit: number;
+  offset: number;
+  counts_by_status: Record<FindingStatus, number>;
+  counts_by_severity: Record<string, number>;
+}
+
+export interface FindingPageQuery {
+  status?: FindingStatus;
+  severity?: string;
+  engagement_id?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export interface DnsRecord {
   id: string;
   asset_id: string | null;
@@ -183,6 +246,50 @@ export interface ScanRun {
   current_tool: string | null;
   current_target: string | null;
   current_started_at: string | null;
+  scan_profile?: ScanProfile | null;
+}
+
+// REQ-PIPE-003/010: what a run planned, and what became of each check.
+export type CheckState = "planned" | "running" | "complete" | "partial" | "failed" | "skipped";
+
+export interface ScanPlanCheck {
+  id: string;
+  seq: number;
+  check_id: string;
+  tool: string;
+  state: CheckState;
+  reason: string;
+  args: Record<string, unknown>;
+  depends_on: string | null;
+  budget_s: number | null;
+  attempt: number;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_s: number | null;
+  findings: number;
+  outcome_summary: Record<string, unknown>;
+}
+
+export interface ScanPlanSurface {
+  id: string;
+  asset_id: string | null;
+  host: string;
+  ip: string | null;
+  port: number;
+  scheme: string | null;
+  service_class: "web" | "web_alias" | "tls_service" | "service" | "unknown";
+  alias_of: string | null;
+  profile: string[];
+  fingerprint: Record<string, unknown>;
+  checks: ScanPlanCheck[];
+}
+
+export interface ScanPlan {
+  scan_run_id: string;
+  scan_profile: ScanProfile;
+  state: string;
+  summary: { checks: number; surfaces: number; by_state: Partial<Record<CheckState, number>> };
+  surfaces: ScanPlanSurface[];
 }
 
 export interface ScanReadiness {
@@ -425,7 +532,6 @@ export interface LoginChallenge {
 }
 
 export interface SessionResult {
-  session_token: string;
   user: UserInfo;
   backup_codes?: string[] | null;
 }
@@ -493,32 +599,31 @@ export interface AuditQuery {
   before?: string;
 }
 
-const SESSION_TOKEN_KEY = "asm_session_token";
-
-export function getSessionToken(): string {
-  return sessionStorage.getItem(SESSION_TOKEN_KEY) ?? "";
-}
-
-export function setSessionToken(token: string): void {
-  sessionStorage.setItem(SESSION_TOKEN_KEY, token);
-}
+// REQ-IAM-018/019: the session lives only in an HttpOnly cookie the browser
+// sends by itself (credentials: "include"); no script ever sees the token.
+// Earlier versions kept it in sessionStorage - purge any that is still there.
+const LEGACY_SESSION_TOKEN_KEY = "asm_session_token";
 
 export function clearSession(): void {
-  sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  try {
+    sessionStorage.removeItem(LEGACY_SESSION_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_SESSION_TOKEN_KEY);
+  } catch {
+    // Storage can be blocked; there is nothing to clear then.
+  }
 }
+clearSession();
 
-// REQ-IAM-002: individual, MFA-verified accounts. The bearer token (in
-// sessionStorage) authenticates fetch() calls; the backend also sets a
-// matching HttpOnly session cookie at login, used only by EventSource (SSE),
-// which cannot send custom headers - both resolve to the same server-side
-// session (app/security.py:require_user).
+// REQ-IAM-019: every request proves it comes from the console. A cross-site
+// page cannot add this header without a CORS preflight, which the API refuses.
+const CONSOLE_HEADERS = { "X-Requested-With": "asm-console" };
+
 async function request<T>(path: string, init?: RequestInit, isRetry = false): Promise<T> {
-  const token = getSessionToken();
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...CONSOLE_HEADERS,
       ...(init?.headers ?? {}),
     },
     credentials: "include",
@@ -548,16 +653,13 @@ async function request<T>(path: string, init?: RequestInit, isRetry = false): Pr
  * REQ-DOWNLOAD-001: fetch a binary document through the SAME authenticated
  * path as every other call, then hand the browser a Blob to save.
  *
- * A plain `<a href={url} target="_blank">` is neither of this app's two
- * designed auth paths: it is not a fetch() (so no `Authorization: Bearer`
- * header) and cookie auth was only ever built for EventSource. It therefore
- * depended on the session cookie happening to be sent, and failed silently -
- * a 401 rendered as a blank tab with no error anywhere.
+ * A plain `<a href={url} target="_blank">` is not a fetch(): a 401 rendered
+ * as a blank tab with no error anywhere. Going through fetch() surfaces the
+ * real status and reason.
  */
 async function downloadBlob(path: string, fallbackFilename: string): Promise<void> {
-  const token = getSessionToken();
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers: CONSOLE_HEADERS,
     credentials: "include",
   });
   if (!res.ok) {
@@ -613,6 +715,7 @@ export const api = {
   agentSteps: (id: string, runId: string) => request<AgentStep[]>(`/engagements/${id}/scan-runs/${runId}/agent-steps`),
   listScanRuns: (id: string) => request<ScanRun[]>(`/engagements/${id}/scan-runs`),
   scanRunDiff: (id: string, runId: string) => request<ScanDiff>(`/engagements/${id}/scan-runs/${runId}/diff`),
+  scanRunPlan: (id: string, runId: string) => request<ScanPlan>(`/engagements/${id}/scan-runs/${runId}/plan`),
 
   listScopeAssets: (id: string) => request<ScopeAsset[]>(`/engagements/${id}/scope-assets`),
   addScopeAsset: (id: string, body: Partial<ScopeAsset>) =>
@@ -644,10 +747,24 @@ export const api = {
 
   summary: (id: string) => request<EngagementSummary>(`/engagements/${id}/summary`),
   surfaceGraph: (id: string) => request<SurfaceGraph>(`/engagements/${id}/surface-graph`),
+  discoveredEndpoints: (id: string) => request<DiscoveredEndpoint[]>(`/engagements/${id}/endpoints`),
+  webScreenshots: (id: string) => request<WebScreenshotMeta[]>(`/engagements/${id}/screenshots`),
+  screenshotImageUrl: (id: string, screenshotId: string) => `${BASE_URL}/engagements/${id}/screenshots/${screenshotId}/image`,
+  getSubfinderKeys: () => request<{ providers: SubfinderProvider[] }>("/settings/subfinder"),
+  setSubfinderKeys: (keys: Record<string, string | null>) =>
+    request<{ providers: SubfinderProvider[] }>("/settings/subfinder", { method: "PUT", body: JSON.stringify({ keys }) }),
   dnsRecords: (id: string) => request<DnsRecord[]>(`/engagements/${id}/dns-records`),
   findings: (id: string, params?: { severity?: string; status?: string }) => {
     const qs = new URLSearchParams(params as Record<string, string>).toString();
     return request<Finding[]>(`/engagements/${id}/findings${qs ? `?${qs}` : ""}`);
+  },
+  allFindings: (query: FindingPageQuery) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== "") params.set(key, String(value));
+    }
+    const qs = params.toString();
+    return request<FindingPage>(`/findings${qs ? `?${qs}` : ""}`);
   },
   // REQ-TRIAGE-001: a note is required for accepted_risk and false_positive.
   triageFinding: (id: string, findingId: string, body: { status: FindingStatus; note?: string }) =>
@@ -745,8 +862,7 @@ export const api = {
   logout: () => request<void>("/auth/logout", { method: "POST" }),
   me: () => request<UserInfo>("/auth/me"),
   // GitHub issue #26: both revoke every OTHER session for this account and
-  // rotate this one - the response carries the new session_token so the
-  // caller can stay logged in on it (see setSessionToken call sites).
+  // rotate this one - the browser picks up the new session cookie by itself.
   changePassword: (current_password: string, new_password: string) =>
     request<SessionResult>("/auth/change-password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
   listSessions: () => request<SessionInfo[]>("/auth/sessions"),
@@ -754,7 +870,7 @@ export const api = {
   mfaReenrollStart: (current_password: string) =>
     request<{ secret: string; otpauth_uri: string }>("/auth/mfa/reenroll/start", { method: "POST", body: JSON.stringify({ current_password }) }),
   mfaReenrollConfirm: (code: string) =>
-    request<{ backup_codes: string[]; session_token: string }>("/auth/mfa/reenroll/confirm", { method: "POST", body: JSON.stringify({ code }) }),
+    request<{ backup_codes: string[] }>("/auth/mfa/reenroll/confirm", { method: "POST", body: JSON.stringify({ code }) }),
 
   // --- Admin (REQ-IAM-008/009) ---
   adminListUsers: () => request<UserInfo[]>("/admin/users"),

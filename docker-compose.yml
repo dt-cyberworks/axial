@@ -187,6 +187,14 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
       S3_BUCKET: ${S3_BUCKET:-asm-evidence}
     networks: [ctrl, edge]        # ctrl: DB/Queue (intern). edge: API vom Host erreichbar.
+    # REQ-HARDEN-003: least privilege. No capability is needed (ports > 1024,
+    # no raw sockets), the root filesystem is read-only, and nothing may gain
+    # privileges. Writable: /tmp only (temp files).
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
     ports:
       # Dev: erreichbar auf allen Interfaces (npm run dev spricht lokal dagegen).
       # Produktion (REQ-IAM-010): CONTROL_PLANE_PUBLISH_HOST=127.0.0.1 setzen -
@@ -235,6 +243,10 @@ services:
       # execution boundary. The runner rejects any request without it, so a
       # compromised peer on the runner/egress network cannot drive /api/command.
       RUNNER_API_TOKEN: ${RUNNER_API_TOKEN:-runner-change-me-in-dev}
+      # REQ-COVER-004: address of the self-hosted interaction server, as seen
+      # from the runner. Empty -> the out-of-band scan pass records
+      # `oob_unavailable` instead of running.
+      OOB_SERVER_URL: ${OOB_SERVER_URL:-}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       # Verfuegbar nur wenn das Lease-Gateway erreichbar ist und seine
       # deny-all nftables-Policy bestaetigt. Ohne runner-Profil bleibt es aus.
@@ -257,6 +269,14 @@ services:
     # ctrl: DB/control-plane. egress: passive OSINT-Queries (crt.sh). control:
     # Kontrollkanal zum tool-runner (getrennt vom Datenkanal der Scan-Ziele).
     networks: [ctrl, egress, control]
+    # REQ-HARDEN-003: least privilege. No capability is needed (ports > 1024,
+    # no raw sockets), the root filesystem is read-only, and nothing may gain
+    # privileges. Writable: /tmp only (Celery beat schedule, temp files).
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
 
   egress-proxy:
     build: ./egress-proxy
@@ -279,6 +299,14 @@ services:
     # Original-Listing 2 der Deployment-Architektur fehlt diese Bruecke,
     # ohne sie koennte der Runner den Proxy nicht ansprechen.
     networks: [ctrl, runner, egress]
+    # REQ-HARDEN-003: least privilege. No capability is needed (ports > 1024,
+    # no raw sockets), the root filesystem is read-only, and nothing may gain
+    # privileges. Writable: /tmp only.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
 
   raw-egress-gateway:
     build: ./raw-egress-gateway
@@ -294,11 +322,17 @@ services:
       RAW_EGRESS_MAX_CONCURRENT_LEASES: ${RAW_EGRESS_MAX_CONCURRENT_LEASES:-2}
       EGRESS_PROXY_HOST: egress-proxy
       EGRESS_PROXY_PORT: 3128
+      # REQ-COVER-004: the self-hosted interaction server (profile `oob`).
+      # The gateway lets the runner's namespace reach ONLY this address on ONE
+      # port; if the server is not running the gateway simply runs without it.
+      OOB_SERVER_HOST: ${OOB_DOMAIN:-oob.invalid}
+      OOB_SERVER_PORT: 8080
       ENVIRONMENT: ${ENVIRONMENT:-development}
       PYTHONDONTWRITEBYTECODE: 1
     networks:
       control: {}
       runner: {}
+      oob: {}
       egress:
         gw_priority: 1
     cap_drop: [ALL]
@@ -331,10 +365,18 @@ services:
     # Teilt den Namespace mit dem Gateway: dessen OUTPUT-Deny-All gilt auch
     # fuer jeden Nmap-Prozess. Capabilities bleiben pro Prozess/Container.
     network_mode: "service:raw-egress-gateway"
+    # REQ-PIPE-007: HexStrike kills a check's process group at its budget but
+    # never reaps it, and as PID 1 the Python server does not adopt orphans
+    # either - 8 defunct nuclei processes were found after one scan. An init
+    # process as PID 1 reaps them.
+    init: true
     environment:
       # REQ-HARDEN-001: the execution boundary rejects any request whose
       # X-ASM-Runner-Token does not match this. Must equal the worker's value.
       RUNNER_API_TOKEN: ${RUNNER_API_TOKEN:-runner-change-me-in-dev}
+      # REQ-COVER-004: token nuclei presents to the interaction server. It
+      # lives only in the runner's environment, never in a command line.
+      OOB_TOKEN: ${OOB_TOKEN:-oob-token-change-me-in-dev}
     read_only: true
     tmpfs: [/tmp]           # HexStrike schreibt Tool-Skripte/Cache/Log nach /tmp
     cap_drop: [ALL]
@@ -347,6 +389,75 @@ services:
     # (nftables deny-all, kein control-plane/DB/Internet ausser per Lease).
     # Max-Haertung fuer spaeter: ambient caps via Entrypoint (behaelt no-new-privs),
     # gehoert ins Runner-Image / k8s securityContext.
+
+  # REQ-COVER-004 (R4, approved by johannes 2026-09-29): self-hosted
+  # out-of-band interaction server so nuclei's blind-vulnerability templates
+  # can confirm findings. Opt-in profile `oob`; a scan uses it only when the
+  # engagement's "out-of-band testing" switch is on. Reachable from the
+  # runner's namespace only through the `oob` network and the gateway's
+  # single allowed address:port. Not published to the host unless
+  # OOB_PUBLISH_HOST / the port variables are set (default: loopback only).
+  interactsh:
+    image: projectdiscovery/interactsh-server:v1.3.1@sha256:f75d1fdeb0598012ce4560158232a9ad99701da28b31c141dc95d03402e4aa4f
+    profiles: ["oob"]
+    command:
+      - -domain
+      - ${OOB_DOMAIN:-oob.invalid}
+      - -token
+      - ${OOB_TOKEN:-oob-token-change-me-in-dev}
+      - -http-port
+      - "8080"
+      - -https-port
+      - "8443"
+      - -dns-port
+      - "5353"
+      - -smtp-port
+      - "2525"
+      - -smtps-port
+      - "2587"
+      - -smtp-autotls-port
+      - "2465"
+      - -ldap-port
+      - "2389"
+      - -skip-acme
+      - -disable-update-check
+      - -eviction
+      - "${OOB_RETENTION_DAYS:-7}"
+    # interactsh binds only to its outbound (edge) address, so the runner side
+    # reaches its HTTP API through `oob-relay` below.
+    networks:
+      edge:
+        aliases: [interactsh-edge]
+    # Only DNS callbacks are published (the edge owns 80/443). Point OOB_DOMAIN's
+    # NS record at this host and set OOB_PUBLISH_HOST=0.0.0.0 (and the DNS port)
+    # to receive callbacks from the internet.
+    ports:
+      - "${OOB_PUBLISH_HOST:-127.0.0.1}:${OOB_PUBLISH_DNS_PORT:-15353}:5353/udp"
+      - "${OOB_PUBLISH_HOST:-127.0.0.1}:${OOB_PUBLISH_DNS_PORT:-15353}:5353/tcp"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    # The server writes its flag config under /root/.config at start-up.
+    tmpfs: [/tmp, /root/.config]
+    restart: unless-stopped
+
+  # Forwards the interaction server's HTTP API (one port) from the internal
+  # `oob` network to it. Its alias on `oob` is OOB_DOMAIN itself: nuclei builds
+  # its payload domain from the -iserver host name, so the name has to be the
+  # real domain, and inside the stack that name must resolve to this relay.
+  oob-relay:
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    profiles: ["oob"]
+    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:interactsh-edge:8080"]
+    networks:
+      oob:
+        aliases: ["${OOB_DOMAIN:-oob.invalid}"]
+      edge: {}
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    restart: unless-stopped
 
 networks:
   # REQ-MULTIENV-004: names are templated on ASM_NETWORK_PREFIX (unset ->
@@ -367,6 +478,7 @@ networks:
   ctrl:    { name: "${ASM_NETWORK_PREFIX:-asm}_ctrl", internal: true }      # DB/Queue/interne API - keine Internet-Route
   runner:  { name: "${ASM_NETWORK_PREFIX:-asm}_runner", internal: true }    # tool-runner <-> egress-proxy (Datenkanal)
   control: { name: "${ASM_NETWORK_PREFIX:-asm}_control", internal: true }   # worker <-> tool-runner (Kontrollkanal, kein ctrl-Zugriff)
+  oob:     { name: "${ASM_NETWORK_PREFIX:-asm}_oob", internal: true }       # REQ-COVER-004: nur oob-relay <-> raw-egress-gateway/tool-runner
   egress:  { name: "${ASM_NETWORK_PREFIX:-asm}_egress" }                    # kontrollierter Weg nach draussen (nur Proxy + worker-OSINT)
 
 volumes:

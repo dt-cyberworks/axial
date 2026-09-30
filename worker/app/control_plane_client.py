@@ -19,10 +19,53 @@ if ENVIRONMENT == "production" and INTERNAL_API_TOKEN in {"", "change-me-in-dev"
     raise RuntimeError("insecure production configuration: internal_api_token")
 
 
+class ScanRunSuperseded(Exception):
+    """GitHub issue #42: a newer worker attempt owns this scan_run. The old
+    attempt must stop without writing anything more."""
+
+
+class ScanRunNotClaimable(Exception):
+    """The control plane refused to hand this scan_run to this task (it is
+    finished, or another live attempt already owns it)."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _raise_if_superseded(response: httpx.Response) -> None:
+    if response.status_code == 409 and "superseded" in response.text:
+        raise ScanRunSuperseded(response.text)
+
+
 class ControlPlaneClient:
     def __init__(self, base_url: str = CONTROL_PLANE_URL, timeout: float = 30.0):
         headers = {"X-ASM-Internal-Token": INTERNAL_API_TOKEN} if INTERNAL_API_TOKEN else {}
         self._client = httpx.Client(base_url=base_url, timeout=timeout, headers=headers)
+        # scan_run_id -> the claim attempt this process holds. Every write for
+        # that run carries it, so a replaced attempt is refused (REQ-RESUME-002).
+        self._attempts: dict[str, int] = {}
+
+    def claim_scan_run(self, scan_run_id: uuid.UUID, *, task_id: str, budget_max_iterations: int | None = None,
+                       approval_timeout_seconds: int | None = None) -> dict:
+        r = self._client.post(
+            f"/internal/scan-runs/{scan_run_id}/claim",
+            json={"task_id": task_id, "budget_max_iterations": budget_max_iterations,
+                  "approval_timeout_seconds": approval_timeout_seconds},
+        )
+        if r.status_code == 409:
+            raise ScanRunNotClaimable(r.text)
+        r.raise_for_status()
+        claim = r.json()
+        self._attempts[str(scan_run_id)] = int(claim["attempt"])
+        return claim
+
+    def release_scan_run(self, scan_run_id: uuid.UUID | str) -> None:
+        self._attempts.pop(str(scan_run_id), None)
+
+    def _attempt_params(self, scan_run_id: uuid.UUID | str) -> dict:
+        attempt = self._attempts.get(str(scan_run_id))
+        return {} if attempt is None else {"attempt": attempt}
 
     def authorize(self, engagement_id: uuid.UUID, tool_call: dict) -> dict:
         r = self._client.post(f"/internal/engagements/{engagement_id}/gateway/authorize", json=tool_call)
@@ -66,7 +109,8 @@ class ControlPlaneClient:
         return r.json()["reaped"]
 
     def update_scan_run(self, scan_run_id: uuid.UUID, **fields) -> dict:
-        r = self._client.patch(f"/internal/scan-runs/{scan_run_id}", json=fields)
+        r = self._client.patch(f"/internal/scan-runs/{scan_run_id}", json={**fields, **self._attempt_params(scan_run_id)})
+        _raise_if_superseded(r)
         r.raise_for_status()
         return r.json()
 
@@ -103,8 +147,10 @@ class ControlPlaneClient:
         the current target-facing process instead of silently continuing.
         """
         r = self._client.get(
-            f"/internal/scan-runs/{scan_run_id}/cancel-requested", timeout=2.0
+            f"/internal/scan-runs/{scan_run_id}/cancel-requested", timeout=2.0,
+            params=self._attempt_params(scan_run_id),
         )
+        _raise_if_superseded(r)
         r.raise_for_status()
         return bool(r.json().get("cancel_requested"))
 
@@ -121,7 +167,8 @@ class ControlPlaneClient:
         langer Operationen (mehrminuetiger Nmap) haelt es den Lauf 'lebendig', darf
         ihn aber bei einem Fehler nie abreissen."""
         try:
-            self._client.post(f"/internal/scan-runs/{scan_run_id}/heartbeat", timeout=2.0)
+            self._client.post(f"/internal/scan-runs/{scan_run_id}/heartbeat", timeout=2.0,
+                              params=self._attempt_params(scan_run_id))
         except Exception:  # noqa: BLE001
             pass
 
@@ -166,6 +213,94 @@ class ControlPlaneClient:
             return r.json()
         except Exception:  # noqa: BLE001
             return {"ident_header_name": None, "ident_header_value": None, "ua_suffix": None, "max_rps": None}
+
+    def get_discovery_options(self, engagement_id: uuid.UUID) -> dict:
+        """REQ-COVER-001/003/004/006: the per-engagement switches. Fails closed:
+        a lookup failure turns every optional capability OFF - including
+        subfinder, whose default is on - because a missing answer must never
+        widen what a scan does. The Scope Gateway re-checks each switch on
+        every call anyway."""
+        try:
+            r = self._client.get(f"/internal/engagements/{engagement_id}/discovery-options")
+            r.raise_for_status()
+            data = r.json()
+            return {k: bool(data.get(k)) for k in ("subfinder", "crawling", "oob", "screenshots")}
+        except Exception:  # noqa: BLE001
+            return {"subfinder": False, "crawling": False, "oob": False, "screenshots": False}
+
+    def get_scan_settings(self, engagement_id: uuid.UUID) -> dict:
+        """REQ-PIPE-005/015: scan depth, the parallel-check limit and the tools the
+        campaign switched off. Fails toward the cheaper, stricter reading:
+        `standard` depth and one check at a time (the gateway still refuses a
+        disabled tool if the list could not be read)."""
+        try:
+            r = self._client.get(f"/internal/engagements/{engagement_id}/scan-settings")
+            r.raise_for_status()
+            data = r.json()
+            profile = data.get("scan_profile")
+            parallel = int(data.get("max_parallel_checks") or 1)
+            disabled = [t for t in (data.get("disabled_tools") or []) if isinstance(t, str)]
+            return {"scan_profile": profile if profile in ("standard", "thorough") else "standard",
+                    "max_parallel_checks": max(1, min(parallel, 2)), "disabled_tools": disabled}
+        except Exception:  # noqa: BLE001
+            return {"scan_profile": "standard", "max_parallel_checks": 1, "disabled_tools": []}
+
+    def store_scan_plan(self, scan_run_id: uuid.UUID | str, surfaces: list[dict]) -> dict:
+        """REQ-PIPE-003: persist surfaces and their planned/skipped checks
+        (idempotent: existing rows keep their state)."""
+        r = self._client.post(
+            f"/internal/scan-runs/{scan_run_id}/plan", json={"surfaces": surfaces},
+            params=self._attempt_params(scan_run_id),
+        )
+        _raise_if_superseded(r)
+        r.raise_for_status()
+        return r.json()
+
+    def get_scan_plan(self, scan_run_id: uuid.UUID | str) -> dict:
+        r = self._client.get(f"/internal/scan-runs/{scan_run_id}/plan")
+        r.raise_for_status()
+        return r.json()
+
+    def update_scan_check(self, scan_run_id: uuid.UUID | str, check_id: str, **fields) -> dict:
+        r = self._client.patch(
+            f"/internal/scan-checks/{check_id}", json={**fields, **self._attempt_params(scan_run_id)},
+        )
+        _raise_if_superseded(r)
+        r.raise_for_status()
+        return r.json()
+
+    def update_scan_surface(self, scan_run_id: uuid.UUID | str, surface_id: str, **fields) -> dict:
+        r = self._client.patch(
+            f"/internal/scan-surfaces/{surface_id}", json={**fields, **self._attempt_params(scan_run_id)},
+        )
+        _raise_if_superseded(r)
+        r.raise_for_status()
+        return r.json()
+
+    def get_subfinder_config(self) -> dict:
+        """Decrypted provider keys for subfinder. Best effort: none = keyless sources only."""
+        try:
+            r = self._client.get("/internal/subfinder-config")
+            r.raise_for_status()
+            return dict(r.json().get("keys") or {})
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def add_discovered_endpoints(self, engagement_id: uuid.UUID, scan_run_id: str | None, endpoints: list[dict]) -> dict:
+        r = self._client.post(
+            f"/internal/engagements/{engagement_id}/discovered-endpoints",
+            json={"scan_run_id": scan_run_id, "endpoints": endpoints},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def add_web_screenshot(self, engagement_id: uuid.UUID, scan_run_id: str | None, url: str, png_base64: str) -> dict:
+        r = self._client.post(
+            f"/internal/engagements/{engagement_id}/web-screenshots",
+            json={"scan_run_id": scan_run_id, "url": url, "png_base64": png_base64},
+        )
+        r.raise_for_status()
+        return r.json()
 
     def asset_review_required(self, engagement_id: uuid.UUID) -> bool:
         """REQ-ASSETREVIEW-001: reiner Config-Read, best effort. Ein Fehler hier

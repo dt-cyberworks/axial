@@ -88,8 +88,8 @@ Acceptance criteria:
 
 - There is no shared/legacy-token page or menu anywhere in the console
   today. The old shared operator token (`OPERATOR_API_TOKEN`) was already
-  fully replaced, frontend-side, by the per-user session token
-  (`asm_session_token`) as part of REQ-IAM-002's multi-user authentication
+  fully replaced, frontend-side, by the per-user session cookie
+  (`HttpOnly`, see REQ-IAM-018) as part of REQ-IAM-002's multi-user authentication
   system.
 - `INTERNAL_API_TOKEN` (control-plane ↔ worker) and `RUNNER_API_TOKEN`
   (tool-runner auth) are unrelated, backend-only, server-to-server secrets

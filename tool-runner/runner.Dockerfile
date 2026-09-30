@@ -32,13 +32,21 @@ ARG NUCLEI_TEMPLATES_TAG=v10.4.7
 # curl: agent-gesteuerter roher HTTP-Lesezugriff (http_request-Primitiv).
 # ffuf + seclists: kuratierte Content-Discovery - der Vector Agent WAEHLT die
 # passende Wortliste (aus /usr/share/seclists), ffuf leistet die Fleissarbeit.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip git ca-certificates curl \
-      nmap nuclei httpx-toolkit dnsutils whatweb nikto sslscan wafw00f \
-      subfinder amass ffuf seclists \
-      build-essential python3-dev libcap2-bin \
-      bsdextrautils openssl \
-      chromium \
+# The Kali mirror redirector now and then hands out a mirror with a broken TLS
+# certificate; a retry usually lands on a healthy one, so the step retries
+# instead of failing the whole build.
+RUN for attempt in 1 2 3 4 5 6; do \
+      apt-get update && apt-get install -y --no-install-recommends --fix-missing -o Acquire::Retries=3 \
+        python3 python3-venv python3-pip git ca-certificates curl \
+        nmap nuclei httpx-toolkit dnsutils whatweb nikto sslscan wafw00f \
+        subfinder amass ffuf seclists katana \
+        build-essential python3-dev libffi-dev libcap2-bin \
+        bsdextrautils openssl \
+        chromium \
+      && break; \
+      [ "$attempt" = 6 ] && exit 1; \
+      echo "apt attempt $attempt failed - retrying"; sleep 5; \
+    done \
   && rm -rf /var/lib/apt/lists/*
 # chromium: REQ-AGENT-018 - deliberate, explicit exception to this file's own
 # "only the allowlisted tools" minimalism (a real dependency-surface increase,
@@ -47,8 +55,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # which were previously silently never executed at all (they require a real
 # browser; without one, nuclei just skips them). Nothing else in this image
 # uses it - a browser that isn't installed can't be abused either.
+# 2026-09-29 (REQ-COVER-006, R4, approved by johannes): the same chromium also
+# takes the per-engagement, opt-in web screenshots (one page load per live web
+# service, through the egress proxy). katana (REQ-COVER-003, R4, approved the
+# same day) is the crawler behind the opt-in crawling switch; it runs without
+# its headless mode, through the egress proxy, one host per call.
 # build-essential + python3-dev: HexStrikes requirements.txt zieht Pakete mit
 # C-Extensions (u.a. msgpack), die Kali nicht vorkompiliert mitbringt.
+# libffi-dev: cffi (pulled in via zstandard) has no wheel for Kali's current
+# Python 3.14 and is compiled at build time, which needs ffi.h. Without it the
+# image build fails (CI was red because of this, 2026-09).
 # libcap2-bin: liefert setcap (Schritt 7).
 # bsdextrautils (hexdump) + openssl: von testssl.sh zur Laufzeit benoetigt.
 # seclists liegt unter /usr/share/seclists (Wortlisten fuer ffuf).
@@ -74,16 +90,29 @@ COPY patch_hexstrike.py /tmp/patch_hexstrike.py
 # imports runner_auth at runtime; it must sit next to hexstrike_server.py.
 # Staged via /tmp because `git clone . ` below requires an empty WORKDIR.
 COPY runner_auth.py /tmp/runner_auth.py
+# REQ-PIPE-007: the per-request time budget rule, imported the same way.
+COPY runner_budget.py /tmp/runner_budget.py
+# GitHub issue #43: HexStrike's own requirements.txt is loose version ranges,
+# so a plain `pip install -r requirements.txt` picks whatever PyPI serves on
+# build day. The vendored lock file pins every package (and every transitive
+# one) to an exact version with sha256 hashes, and `--require-hashes` makes pip
+# refuse anything that does not match. Bump procedure: whenever HEXSTRIKE_SHA
+# or the base image changes, run scripts/regenerate_hexstrike_lock.sh, review
+# the diff, and rebuild.
+COPY hexstrike-requirements.lock.txt /tmp/hexstrike-requirements.lock.txt
 RUN git clone https://github.com/0x4m4/hexstrike-ai.git . \
   && git checkout --detach "${HEXSTRIKE_SHA}" \
   && cp /tmp/runner_auth.py /opt/hexstrike/runner_auth.py \
-  && rm /tmp/runner_auth.py \
+  && cp /tmp/runner_budget.py /opt/hexstrike/runner_budget.py \
+  && rm /tmp/runner_auth.py /tmp/runner_budget.py \
   && sed -i '/^pwntools/d; /^angr/d' requirements.txt \
   && sed -i "s#logging.FileHandler('hexstrike.log')#logging.FileHandler('/tmp/hexstrike.log')#" hexstrike_server.py \
   && python3 /tmp/patch_hexstrike.py hexstrike_server.py \
   && rm /tmp/patch_hexstrike.py \
   && python3 -m venv venv \
-  && ./venv/bin/pip install --no-cache-dir -r requirements.txt
+  && ./venv/bin/pip install --no-cache-dir --require-hashes --no-deps \
+       -r /tmp/hexstrike-requirements.lock.txt \
+  && rm /tmp/hexstrike-requirements.lock.txt
 # Log-Pfad auf /tmp umgebogen: hexstrike_server.py schreibt hart nach
 # './hexstrike.log' (cwd-relativ, also /opt/hexstrike/) - kollidiert mit
 # readOnlyRootFilesystem (Deployment-Architektur Kap. 7.1). HexStrikes eigener
@@ -126,6 +155,15 @@ RUN set -e; git clone --depth 1 --branch "${NUCLEI_TEMPLATES_TAG}" \
   && rm -rf /opt/nuclei-templates/.git \
   && chmod -R a+rX /opt/nuclei-templates \
   && echo "nuclei-templates ${NUCLEI_TEMPLATES_TAG}: $(find /opt/nuclei-templates -name '*.yaml' | wc -l) Templates gebacken"
+
+# REQ-PIPE-004: template index for evidence-driven selection, built from the
+# baked templates (stdlib only). The build fails when the index is implausibly
+# small - a broken parser must never ship as "no templates selected".
+COPY nuclei_index.py /opt/asm/nuclei_index.py
+RUN set -e; chmod -R a+rX /opt/asm \
+  && python3 /opt/asm/nuclei_index.py build /opt/nuclei-templates /opt/nuclei-index.json --version "${NUCLEI_TEMPLATES_TAG}" \
+  && chmod a+r /opt/nuclei-index.json \
+  && python3 /opt/asm/nuclei_index.py summary | tee /dev/stderr | python3 -c "import json,sys; s=json.load(sys.stdin); assert s['total'] > 4000 and s['generic'] > 1000, s"
 
 # httpx: das Kali-Paket installiert das Binary als 'httpx-toolkit'. HexStrike
 # (und unser generischer Command-Aufruf) erwarten 'httpx' - Symlink davor.

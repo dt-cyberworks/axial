@@ -63,7 +63,7 @@ def _enrolled_user_with_password(db, admin, email) -> tuple[User, str]:
     return user, password
 
 
-def test_change_password_response_carries_a_fresh_token_and_evicts_the_old_one(engine, db):
+def test_change_password_sets_a_fresh_cookie_and_evicts_the_old_token(engine, db):
     admin = _admin(db)
     user, password = _enrolled_user_with_password(db, admin, "http-changepw@example.com")
     old_token, _ = auth_service.create_session(db, user, ip=None, user_agent=None)
@@ -76,7 +76,8 @@ def test_change_password_response_carries_a_fresh_token_and_evicts_the_old_one(e
             json={"current_password": password, "new_password": "a-new-http-password-123456"},
         )
         assert resp.status_code == 200
-        new_token = resp.json()["session_token"]
+        assert "session_token" not in resp.json()  # REQ-IAM-018: the cookie carries it
+        new_token = resp.cookies["session"]
         assert new_token and new_token != old_token
 
         # The token used to MAKE this call is now dead...

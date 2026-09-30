@@ -32,6 +32,7 @@ import uuid
 import httpx
 
 from app import command_redaction
+from app.tool_execution import BUDGET_REACHED
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,64 @@ CANCEL_STATUS_FAILURE_TOLERANCE = max(1, min(
 
 import re
 
+# REQ-COVER-004: internal address of the self-hosted interaction server, as the
+# tool-runner reaches it. Empty = no server deployed (oob pass is skipped).
+OOB_SERVER_URL = os.environ.get("OOB_SERVER_URL", "").strip()
+
+# REQ-PIPE-007: each check declares its own time budget and the runner enforces
+# it (X-ASM-Timeout-Seconds), instead of one fixed 300 s cap deciding what a
+# scan step may do. The runner clamps every request to RUNNER_MAX_BUDGET_S, so
+# a bug here can never lengthen a command beyond the agreed maximum.
+RUNNER_MAX_BUDGET_S = 1800
+RUNNER_DEFAULT_BUDGET_S = 300
+BUDGET_HEADER = "X-ASM-Timeout-Seconds"
+# Seconds. Measured step times (dev, 2026-09-29): httpx 1, wafw00f 3, testssl 30,
+# katana 39, screenshot 1-2; nuclei selections run minutes.
+CHECK_BUDGET_S: dict[str, int] = {
+    "httpx": 60, "wafw00f": 90, "testssl": 600, "ffuf": 240, "katana": 240,
+    "screenshot": 90, "http_request": 60, "nikto": 150, "subfinder": 180,
+    "amass": 300, "nmap": 600, "redis-probe": 30, "activemq-banner": 30,
+    "activemq-openwire-probe": 30,
+}
+NUCLEI_BUDGET_S: dict[str, int] = {
+    # `select` normally gets an explicit budget from its template count (see
+    # nuclei_select_budget_s); this is the fallback for a call without one.
+    "select": 900, "tech": 240, "headless": 300, "takeover": 300, "endpoints": 600, "oob": 600,
+}
+_SELECT_BASE_S = 120
+_SELECT_PER_TEMPLATE_S = 3.0
+# Margin between a tool's own internal deadline and the runner's kill, so the
+# tool ends itself (and prints/cleans up) before the runner has to.
+_INNER_MARGIN_S = 20
+
+
+def check_budget_s(tool: str, args: dict | None = None, override: int | None = None) -> int:
+    """The time budget, in seconds, one check of `tool` is allowed."""
+    if override is not None:
+        return max(1, min(int(override), RUNNER_MAX_BUDGET_S))
+    args = args or {}
+    if tool == "nuclei":
+        seconds = NUCLEI_BUDGET_S.get(str(args.get("mode") or "select"), RUNNER_DEFAULT_BUDGET_S)
+    else:
+        seconds = CHECK_BUDGET_S.get(tool, RUNNER_DEFAULT_BUDGET_S)
+    return max(1, min(seconds, RUNNER_MAX_BUDGET_S))
+
+
+def nuclei_select_budget_s(templates: int) -> int:
+    """Time budget of one selection call: a base for start-up and template
+    loading plus a per-template allowance, within the runner maximum."""
+    return max(1, min(int(_SELECT_BASE_S + _SELECT_PER_TEMPLATE_S * max(0, int(templates))), RUNNER_MAX_BUDGET_S))
+
+
+def _inner_deadline_s(args: dict, default: int) -> int:
+    """Deadline for a tool's own `timeout`/`-maxtime`: the runner budget minus a
+    margin, or the historical default when no budget was passed in."""
+    budget = args.get("_budget_s")
+    if isinstance(budget, int) and budget > 0:
+        return max(10, budget - _INNER_MARGIN_S)
+    return default
+
+
 _NMAP_SERVICE_PORTS_RE = re.compile(r"^[0-9]{1,5}(?:,[0-9]{1,5}){0,127}$")
 _NMAP_DISCOVERY_PORTS_RE = re.compile(r"^[1-9][0-9]{0,4}(?:-[1-9][0-9]{0,4})?$")
 _TARGETED_UDP_PORTS = {53, 123, 161, 443, 500, 1900, 4500, 5060, 5353}
@@ -77,7 +136,7 @@ _TARGETED_UDP_PORT_RANGE = "53,123,161,443,500,1900,4500,5060,5353"
 # must carry it itself. Deliberately excludes the raw_network tools (nmap,
 # redis-probe, activemq-*) - those don't speak HTTP at all, so there is no
 # header/UA to identify with.
-_HTTP_PROXIED_TOOLS = {"httpx", "nikto", "wafw00f", "testssl", "nuclei", "http_request", "ffuf"}
+_HTTP_PROXIED_TOOLS = {"httpx", "nikto", "wafw00f", "testssl", "nuclei", "http_request", "ffuf", "katana", "screenshot"}
 
 # Looked up once per engagement per worker process, not once per tool call -
 # a bounty program's policy doesn't change mid-run, and every fingerprint-
@@ -127,16 +186,16 @@ def _nmap_body(target: str, args: dict) -> dict:
     try:
         max_rate = int(args.get("max_rate"))
     except (TypeError, ValueError) as exc:
-        raise ValueError("tool_runner_client: ungueltige nmap max_rate") from exc
+        raise ValueError("tool_runner_client: invalid nmap max_rate") from exc
     if not 1 <= max_rate <= 1000:
-        raise ValueError("tool_runner_client: nmap max_rate ausserhalb des sicheren Bereichs")
+        raise ValueError("tool_runner_client: nmap max_rate outside the safe range")
 
     if stage == "discovery":
         if args.get("flags") != ["-sS"] or not _NMAP_DISCOVERY_PORTS_RE.fullmatch(ports):
-            raise ValueError("tool_runner_client: ungueltiges nmap discovery profile")
+            raise ValueError("tool_runner_client: invalid nmap discovery profile")
         bounds = [int(value) for value in ports.split("-", 1)]
         if not 1 <= bounds[0] <= bounds[-1] <= 65535:
-            raise ValueError("tool_runner_client: ungueltige nmap discovery ports")
+            raise ValueError("tool_runner_client: invalid nmap discovery ports")
         scan_type = "-sS"
         # --host-timeout grosszuegig (war 280s): ein Full-Range-Scan (1-65535)
         # eines ueberwiegend gefilterten Hosts braucht selbst bei 1000 pps ~200s;
@@ -145,7 +204,7 @@ def _nmap_body(target: str, args: dict) -> dict:
         extra = f"--privileged -T3 -Pn -n --max-rate {max_rate} --max-retries 2 --host-timeout 600s -oX -"
     elif stage == "udp_discovery":
         if args.get("flags") != ["-sU"] or ports != _TARGETED_UDP_PORT_RANGE or max_rate > 100:
-            raise ValueError("tool_runner_client: ungueltiges nmap UDP discovery profile")
+            raise ValueError("tool_runner_client: invalid nmap UDP discovery profile")
         scan_type = "-sU"
         extra = f"--privileged -T3 -Pn -n --max-rate {max_rate} --max-retries 1 --host-timeout 180s -oX -"
     elif stage == "host_discovery":
@@ -157,23 +216,23 @@ def _nmap_body(target: str, args: dict) -> dict:
         # raw-egress nftables policy allows for this lease (tcp dport 80,443
         # to the leased CIDR block, nothing else).
         if args.get("flags") != ["-sn"] or ports:
-            raise ValueError("tool_runner_client: ungueltiges nmap host_discovery profile")
+            raise ValueError("tool_runner_client: invalid nmap host_discovery profile")
         scan_type = "-sn"
         extra = f"--privileged -T3 -n -PS80,443 --max-rate {max_rate} --max-retries 1 --host-timeout 30s -oX -"
     elif stage in {"service", "udp_service"}:
         expected_flags = ["-sV"] if stage == "service" else ["-sU", "-sV"]
         if args.get("flags") != expected_flags or not _NMAP_SERVICE_PORTS_RE.fullmatch(ports):
-            raise ValueError("tool_runner_client: ungueltiges nmap service profile")
+            raise ValueError("tool_runner_client: invalid nmap service profile")
         parsed_ports = [int(value) for value in ports.split(",")]
         if any(not 1 <= value <= 65535 for value in parsed_ports) or parsed_ports != sorted(set(parsed_ports)):
-            raise ValueError("tool_runner_client: ungueltige nmap service ports")
+            raise ValueError("tool_runner_client: invalid nmap service ports")
         if stage == "udp_service" and (not set(parsed_ports) <= _TARGETED_UDP_PORTS or max_rate > 100):
-            raise ValueError("tool_runner_client: ungueltige nmap UDP service ports")
+            raise ValueError("tool_runner_client: invalid nmap UDP service ports")
         scan_type = "-sV" if stage == "service" else "-sU -sV"
         retry_bound = 2 if stage == "service" else 1
         extra = f"--version-light -T3 -Pn -n --max-rate {max_rate} --max-retries {retry_bound} --host-timeout 180s -oX -"
     else:
-        raise ValueError("tool_runner_client: nmap stage fehlt")
+        raise ValueError("tool_runner_client: nmap stage missing")
 
     return {
         "target": _safe_target(target),
@@ -200,7 +259,7 @@ _PROXY_RE = re.compile(r"^https?://[A-Za-z0-9][A-Za-z0-9._-]*(?::[0-9]{1,5})?/?$
 
 def _safe_target(target: str) -> str:
     if not _TARGET_RE.match(target):
-        raise ValueError(f"tool_runner_client: unsicheres Ziel fuer Command: {target!r}")
+        raise ValueError(f"tool_runner_client: unsafe target for a command: {target!r}")
     return target
 
 
@@ -208,7 +267,7 @@ def _proxy_url() -> str:
     if not EGRESS_PROXY_URL:
         return ""
     if not _PROXY_RE.match(EGRESS_PROXY_URL):
-        raise ValueError(f"tool_runner_client: unsichere Egress-Proxy-URL: {EGRESS_PROXY_URL!r}")
+        raise ValueError(f"tool_runner_client: unsafe egress proxy URL: {EGRESS_PROXY_URL!r}")
     return EGRESS_PROXY_URL.rstrip("/")
 
 
@@ -275,6 +334,14 @@ REDUNDANT_NUCLEI_TEMPLATE_IDS = (
 )
 
 
+_NT = "/opt/nuclei-templates"
+# REQ-PIPE-004: the tag set of the former single main pass. The template index
+# baked into the runner image (tool-runner/nuclei_index.py) holds exactly the
+# templates carrying one of these tags (minus the exclusions and the network/
+# and javascript/ directories); a test keeps both definitions identical.
+_ALL_TAGS = "cve,misconfig,exposure,exposures,default-login,waf,dast"
+
+
 def _nuclei_body(target: str, args: dict) -> dict:
     # Gebackene Templates (Build-Zeit, /opt/nuclei-templates), kein Runtime-
     # Fetch (-disable-update-check), JSONL auf stdout, Proxy erzwungen, und
@@ -316,7 +383,17 @@ def _nuclei_body(target: str, args: dict) -> dict:
         f"{_bounty_h_flags(args)}"
     )
 
-    if args.get("mode") == "headless":
+    if args.get("mode") == "takeover":
+        # REQ-COVER-002: Service-Fingerprints fuer dangling CNAMEs (~73 HTTP-
+        # Templates, je eine Anfrage) - ergaenzt die DNS-Ebene. Eigener Pass:
+        # live 2026-09-29 sprengte der Haupt-Pass mit diesem Tag zusaetzlich
+        # die 300s-Grenze von HexStrikes Command-Executor (nonzero_exit -1).
+        extra = (
+            common +
+            "-tags takeover -severity info,low,medium,high,critical -etags intrusive,dos,fuzz,csp-bypass "
+            f"-rate-limit {rate_limit} -timeout 8 -retries 1 {proxy}"
+        ).strip()
+    elif args.get("mode") == "headless":
         # Mini-Pass: NUR das eine generische DOM-XSS-Template
         # (headless/window-name-domxss.yaml). DOM-XSS-Templates tragen nie das
         # 'dast'-Tag, nur 'headless'/'xss'/'domxss'; 'domxss' trifft praezise
@@ -337,21 +414,21 @@ def _nuclei_body(target: str, args: dict) -> dict:
             f"-rate-limit {rate_limit} -timeout 8 -retries 1 {proxy}"
             " -headless -system-chrome -ho \"--no-sandbox\" -hbs 2 -headc 2 -page-timeout 20"
         ).strip()
-    else:
-        # Haupt-Pass: schnelle, non-headless HTTP-Templates. 'dast' = gebackene
-        # generische Verwundbarkeits-Templates (xss, sqli inkl. blind/time-
-        # based, redirect, lfi, rfi, cmdi, ssrf, ssti, xxe, crlf - je
-        # max-request:1, kein 'fuzz'-Tag, daher nicht von -etags ausgeschlossen;
-        # REQ-AGENT-016). csp-bypass ausgeschlossen: braucht -headless UND
-        # ~192 Vendor-spezifische Templates - fuer eine generische ASM-Baseline
-        # unverhaeltnismaessig teuer (gemessen: ~530s allein fuer die 24
-        # Templates im headless/-Verzeichnis gegen ein Ziel).
+    elif args.get("mode") == "tech":
+        # REQ-PIPE-002: technology-detection templates (one or a few requests
+        # each) whose findings enrich the surface's technology profile. Info
+        # severity by nature; the same conservative exclusions and rate limit.
+        base_common = common.replace("-t /opt/nuclei-templates ", "", 1)
         extra = (
-            common +
-            "-tags cve,misconfig,exposure,exposures,default-login,waf,dast "
+            base_common + f"-t {_NT}/http/technologies "
             "-severity info,low,medium,high,critical -etags intrusive,dos,fuzz,csp-bypass "
             f"-rate-limit {rate_limit} -timeout 8 -retries 1 {proxy}"
         ).strip()
+    else:
+        # The main pass is a selection resolved against the image's template
+        # index (mode "select", a shell command - see _nuclei_command); HexStrike's
+        # dedicated endpoint only serves the passes above.
+        raise ValueError(f"tool_runner_client: nuclei mode {args.get('mode')!r} is not an endpoint mode")
 
     # REQ-CONCUR-001: see _nmap_body - HexStrike's own result cache is not
     # engagement-scoped, must be disabled per call.
@@ -481,8 +558,19 @@ def _httpx_command(target: str, args: dict) -> str:
     ).strip()
 
 
+# REQ-PIPE-009: STARTTLS protocols testssl is asked to speak; mirrors the gateway's set.
+TESTSSL_STARTTLS = ("smtp", "imap", "pop3", "ftp", "ldap", "xmpp", "nntp", "postgres", "mysql")
+
+
 def _testssl_command(target: str, args: dict) -> str:
-    url = _safe_target(target if "://" in target else f"https://{target}")
+    starttls = args.get("starttls")
+    if starttls is not None and starttls not in TESTSSL_STARTTLS:
+        raise ValueError("tool_runner_client: invalid testssl STARTTLS protocol")
+    starttls_arg = f"--starttls {starttls} " if starttls else ""
+    # A web surface is a full URL. A non-web TLS service is `host:port`, handed to
+    # testssl as it is: no scheme that could be read as the protocol to speak.
+    bare = bool(starttls) or (("://" not in target) and re.search(r":[0-9]{1,5}$", target) is not None)
+    url = _safe_target(target if ("://" in target or bare) else f"https://{target}")
     proxy = f"--proxy {_proxy_hostport()} " if EGRESS_PROXY_URL else ""
     # testssl loest DNS LOKAL auf (anders als nikto/nuclei) - der isolierte
     # Runner hat aber kein DNS. Daher die materialisierte IP per --ip; der
@@ -509,7 +597,7 @@ def _testssl_command(target: str, args: dict) -> str:
     # server-default hygiene. These are diagnostic probes (crafted handshakes,
     # read responses), no exploitation - consistent with the platform posture.
     return (
-        f"testssl --quiet --protocols --server-defaults --vulnerable --severity LOW {ip_arg}{proxy}{bounty}"
+        f"testssl --quiet --protocols --server-defaults --vulnerable --severity LOW {starttls_arg}{ip_arg}{proxy}{bounty}"
         f"--jsonfile {out} {url} >/dev/null 2>&1; cat {out}; rm -f {out}"
     )
 
@@ -634,7 +722,8 @@ def _ffuf_command(target: str, args: dict) -> str:
         # threads - tightened to a bug-bounty program's configured max_rps
         # when stricter than our default, since the gateway/proxy per-call
         # rate check never sees inside this one authorized invocation.
-        "-rate", str(_bounty_rate_cap(args, 20)), "-t", "10", "-maxtime", "90", "-s", "-of", "json", "-o", out,
+        "-rate", str(_bounty_rate_cap(args, 20)), "-t", "10", "-maxtime", str(_inner_deadline_s(args, 90)),
+        "-s", "-of", "json", "-o", out,
     ]
     exts = args.get("extensions") or []
     if exts:
@@ -655,6 +744,193 @@ def _ffuf_command(target: str, args: dict) -> str:
 
     cmd = " ".join(shlex.quote(p) for p in parts)
     return f"{prefix}{cmd} >/dev/null 2>&1; cat {out}; rm -f {out}{cleanup_extra}"
+
+
+# --- Extended discovery (REQ-COVER-003/004/006, R4 approved 2026-09-29) ------
+# Every builder below runs through the egress proxy exactly like ffuf: the
+# proxy enforces scope and port window per request, the gateway has already
+# authorized the call, and each builder takes NO agent-influenced input except
+# the gateway-validated URL list of the nuclei endpoints pass.
+KATANA_MAX_LINES = 1000
+KATANA_CRAWL_S = 90
+NUCLEI_MODES_AS_COMMAND = ("endpoints", "oob", "select")
+NUCLEI_OOB_TIMEOUT_S = 270
+_SHELL_ENV_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,255}$")
+
+
+def _katana_command(target: str, args: dict) -> str:
+    """Bounded crawl of ONE origin: depth 2, 90s, host-only field scope, no
+    form filling (no POSTs), static assets filtered, output capped."""
+    base = target if "://" in target else f"https://{target}"
+    out = f"/tmp/katana-{uuid.uuid4().hex}.jsonl"
+    parts = [
+        "katana", "-u", base, "-d", "2", "-ct", f"{KATANA_CRAWL_S}s", "-fs", "fqdn", "-jc",
+        "-kf", "all", "-c", "5", "-p", "2", "-timeout", "10",
+        "-rl", str(_bounty_rate_cap(args, 10)),
+        "-ef", "png,jpg,jpeg,gif,svg,ico,webp,css,woff,woff2,ttf,eot,mp4,mp3,pdf,zip",
+        "-jsonl", "-silent", "-nc", "-or", "-ob", "-o", out,
+    ]
+    proxy_url = _proxy_url()
+    if proxy_url:
+        parts += ["-proxy", proxy_url]
+    ident_name, ident_value = args.get("_bounty_ident_header_name"), args.get("_bounty_ident_header_value")
+    if ident_name and ident_value:
+        parts += ["-H", f"{ident_name}: {ident_value}"]
+    ua_suffix = args.get("_bounty_ua_suffix")
+    if ua_suffix:
+        parts += ["-H", f"User-Agent: {ua_suffix}"]
+    cmd = " ".join(shlex.quote(p) for p in parts)
+    return (
+        f"timeout {_inner_deadline_s(args, 200)} {cmd} >/dev/null; "
+        f"[ -f {out} ] && head -n {KATANA_MAX_LINES} {out}; rm -f {out}; true"
+    )
+
+
+_SCREENSHOT_MAX_BYTES = 1_900_000
+
+
+def _screenshot_command(target: str, args: dict) -> str:
+    """One headless-Chromium screenshot of one origin THROUGH the egress proxy
+    (sub-resources on other hosts are refused there). Prints the PNG as one
+    base64 line; nothing is printed when the file is missing or too large."""
+    base = target if "://" in target else f"https://{target}"
+    tag = uuid.uuid4().hex
+    png, profile = f"/tmp/shot-{tag}.png", f"/tmp/chrome-{tag}"
+    parts = [
+        "timeout", "50", "chromium", "--headless=new", "--no-sandbox", "--disable-gpu",
+        "--disable-dev-shm-usage", "--disable-background-networking", "--disable-component-update",
+        "--disable-sync", "--no-first-run", "--no-default-browser-check", "--hide-scrollbars",
+        "--window-size=1280,800", "--virtual-time-budget=8000",
+        f"--user-data-dir={profile}", f"--screenshot={png}",
+    ]
+    proxy_url = _proxy_url()
+    if proxy_url:
+        parts.append(f"--proxy-server={proxy_url}")
+    parts.append(base)
+    cmd = " ".join(shlex.quote(p) for p in parts)
+    return (
+        f"{cmd} >/dev/null 2>&1; "
+        f"if [ -f {png} ] && [ \"$(stat -c%s {png})\" -le {_SCREENSHOT_MAX_BYTES} ]; then base64 -w0 {png}; fi; "
+        f"rm -rf {png} {profile}"
+    )
+
+
+_T = "/opt/nuclei-templates"
+_CVE_YEARS_RECENT = ("2023", "2024", "2025", "2026")
+_CVE_YEARS_LEGACY = ("2015", "2016", "2017", "2018", "2019", "2020", "2021", "2022")
+# The 361 blind-vulnerability templates need more requests than the egress
+# proxy's per-engagement rate allows inside HexStrike's hard 300s command limit
+# (live 2026-09-29: one pass timed out, exit 124), so they run as three
+# disjoint passes of ~120 templates each.
+_OOB_GENERIC_DIRS = (f"{_T}/dast", f"{_T}/http/vulnerabilities", f"{_T}/http/misconfiguration",
+                     f"{_T}/http/miscellaneous", f"{_T}/http/iot", f"{_T}/http/cnvd")
+# part: (template dirs, shard count, shard index). Shards take every k-th file of
+# the sorted template list, an exact partition of the dirs; one part alone
+# (~110 blind templates) exceeded the 300s executor cap in a live run.
+NUCLEI_OOB_PARTS: dict[str, tuple[tuple[str, ...], int, int]] = {
+    "generic_a": (_OOB_GENERIC_DIRS, 3, 0),
+    "generic_b": (_OOB_GENERIC_DIRS, 3, 1),
+    "generic_c": (_OOB_GENERIC_DIRS, 3, 2),
+    "cves_recent": (tuple(f"{_T}/http/cves/{y}" for y in _CVE_YEARS_RECENT), 1, 0),
+    "cves_legacy": (tuple(f"{_T}/http/cves/{y}" for y in _CVE_YEARS_LEGACY), 1, 0),
+}
+
+
+# REQ-PIPE-004: the template index and its selector live in the runner image.
+NUCLEI_INDEX_TOOL = "/opt/asm/nuclei_index.py"
+_SELECT_GROUPS = ("generic", "products", "all")
+_SELECT_SHARD_RE = re.compile(r"^([1-9][0-9]?)/([1-9][0-9]?)$")
+_SELECT_PRODUCT_RE = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,39}$")
+MAX_SELECT_PRODUCTS = 24
+
+
+def _index_selector_args(args: dict) -> str:
+    """`--group ... [--shard k/n] [--products a,b]`, validated. The same rules
+    the Scope Gateway applies (args_safety._select_args_safe) and the runner's
+    selector applies again - three independent checks on a value that only ever
+    picks among templates already baked into the image."""
+    group = args.get("group")
+    if group not in _SELECT_GROUPS:
+        raise ValueError("tool_runner_client: invalid nuclei selection group")
+    parts = ["--group", group]
+    shard = args.get("shard")
+    if shard is not None:
+        match = _SELECT_SHARD_RE.match(str(shard))
+        if not match or not 1 <= int(match.group(1)) <= int(match.group(2)) <= 64:
+            raise ValueError("tool_runner_client: invalid nuclei selection shard")
+        parts += ["--shard", str(shard)]
+    products = args.get("products")
+    if group == "products":
+        if not isinstance(products, (list, tuple)) or not 1 <= len(products) <= MAX_SELECT_PRODUCTS or not all(
+            isinstance(p, str) and _SELECT_PRODUCT_RE.match(p) for p in products
+        ):
+            raise ValueError("tool_runner_client: invalid nuclei selection products")
+        parts += ["--products", ",".join(products)]
+    elif products:
+        raise ValueError("tool_runner_client: products only apply to the products group")
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _nuclei_command(target: str, args: dict) -> str:
+    """Nuclei passes that need a shell: `endpoints` (DAST on crawled URLs that
+    carry parameters, list passed through a temp file) and `oob` (blind
+    templates confirmed through the self-hosted interaction server). The
+    interaction token is never in the command: it is read from the runner's own
+    environment ($OOB_TOKEN)."""
+    mode = args.get("mode")
+    proxy_url = _proxy_url()
+    proxy = f"-p {shlex.quote(proxy_url)} " if proxy_url else ""
+    rate_limit = _bounty_rate_cap(args, 50)
+    base = (
+        "-disable-update-check -j -silent -no-color "
+        f"-eid {','.join(REDUNDANT_NUCLEI_TEMPLATE_IDS)} "
+        f"{_bounty_h_flags(args)}"
+        "-severity info,low,medium,high,critical -etags intrusive,dos,fuzz,csp-bypass "
+        f"-rate-limit {rate_limit} -timeout 8 -retries 1 {proxy}"
+    )
+    if mode == "endpoints":
+        urls = [u for u in (args.get("urls") or []) if isinstance(u, str)]
+        if not urls:
+            raise ValueError("tool_runner_client: nuclei endpoints pass without urls")
+        lst = f"/tmp/nuclei-urls-{uuid.uuid4().hex}.txt"
+        write = "printf '%s\\n' " + " ".join(shlex.quote(u) for u in urls) + f" > {lst}; "
+        return (
+            f"{write}timeout {_inner_deadline_s(args, 280)} nuclei -l {lst} -dast -t {_T} {base}-no-interactsh; "
+            f"rm -f {lst}"
+        )
+    if mode == "select":
+        selector = _index_selector_args(args)
+        sel = f"/tmp/nuclei-sel-{uuid.uuid4().hex}.txt"
+        deadline = _inner_deadline_s(args, 880)
+        # Only constants and validated selector arguments are interpolated. An
+        # empty selection runs nothing (nuclei itself rejects an empty list).
+        return (
+            f"python3 {NUCLEI_INDEX_TOOL} select {selector} --out {sel} >/dev/null || exit 3; "
+            f"if [ ! -s {sel} ]; then rm -f {sel}; exit 0; fi; "
+            f"timeout {deadline} nuclei -u {shlex.quote(target)} -t {sel} -tags {_ALL_TAGS} {base}-no-interactsh; "
+            f"rc=$?; rm -f {sel}; exit $rc"
+        )
+    if mode == "oob":
+        server = str(args.get("_oob_server") or "")
+        if not _SHELL_ENV_RE.match(server):
+            raise ValueError("tool_runner_client: nuclei oob pass without a valid interaction server")
+        spec = NUCLEI_OOB_PARTS.get(str(args.get("part") or "generic_a"))
+        if spec is None:
+            raise ValueError("tool_runner_client: unknown nuclei oob part")
+        paths, shards, index = spec
+        dirs = " ".join(shlex.quote(p) for p in paths)
+        if shards == 1:
+            selection = " ".join(f"-t {shlex.quote(p)}" for p in paths)
+        else:
+            # Only constants are interpolated (dirs, ints) - never caller input.
+            selection = (f"-t \"$(find {dirs} -name '*.yaml' | sort | "
+                         f"awk 'NR%{shards}=={index}' | paste -sd, -)\"")
+        return (
+            f"timeout {_inner_deadline_s(args, NUCLEI_OOB_TIMEOUT_S)} nuclei -u {shlex.quote(target)} "
+            f"-tags oast {selection} {base}"
+            f'-iserver {shlex.quote(server)} -itoken "$OOB_TOKEN"'
+        )
+    raise ValueError(f"tool_runner_client: nuclei mode {mode!r} is not a command mode")
 
 
 # --- Curated raw-protocol probes (REQ-AGENT-025) ---------------------------
@@ -681,12 +957,12 @@ def _raw_tcp_probe_command(target: str, args: dict) -> str:
     try:
         port = int(args["port"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("tool_runner_client: raw tcp probe port fehlt/ungueltig") from exc
+        raise ValueError("tool_runner_client: raw tcp probe port missing/invalid") from exc
     if not 1 <= port <= 65535:
-        raise ValueError("tool_runner_client: raw tcp probe port ausserhalb des gueltigen Bereichs")
+        raise ValueError("tool_runner_client: raw tcp probe port outside the valid range")
     tool = str(args.get("_tool") or "")
     if tool not in _RAW_TCP_PROTOCOLS:
-        raise ValueError(f"tool_runner_client: unbekannte raw-tcp-Probe {tool!r}")
+        raise ValueError(f"tool_runner_client: unknown raw TCP probe {tool!r}")
     if tool == "activemq-openwire-probe":
         # Built server-side by dispatch.py from a fresh callback token
         # (worker/app/openwire_payload.py) - never a static registry value,
@@ -695,7 +971,7 @@ def _raw_tcp_probe_command(target: str, args: dict) -> str:
         # (args_safety._raw_tcp_probe_args_safe rejects any other argument).
         send_bytes = args.get("_send_bytes")
         if not isinstance(send_bytes, (bytes, bytearray)) or not send_bytes:
-            raise ValueError("tool_runner_client: activemq-openwire-probe braucht _send_bytes")
+            raise ValueError("tool_runner_client: activemq-openwire-probe needs _send_bytes")
         send_bytes = bytes(send_bytes)
     else:
         send_bytes = _RAW_TCP_PROTOCOLS[tool]
@@ -762,6 +1038,8 @@ _COMMANDS = {
     "http_request": _http_request_command,
     "ffuf": _ffuf_command,
     "wafw00f": _wafw00f_command,
+    "katana": _katana_command,
+    "screenshot": _screenshot_command,
     "redis-probe": _redis_probe_command,
     "activemq-banner": _activemq_banner_command,
     "activemq-openwire-probe": _activemq_openwire_probe_command,
@@ -835,6 +1113,20 @@ def _audit_invocation(builder, target: str, args: dict, *, endpoint: str | None 
         return None
 
 
+def _reached_own_deadline(tool: str, args: dict, duration_s) -> bool:
+    """True when a self-limiting tool ran for its whole internal deadline, i.e.
+    it stopped because time ran out, not because it finished."""
+    if not isinstance(duration_s, (int, float)):
+        return False
+    if tool == "ffuf":
+        deadline = _inner_deadline_s(args, 90)
+    elif tool == "katana":
+        deadline = KATANA_CRAWL_S
+    else:
+        return False
+    return duration_s >= deadline - 1
+
+
 class ToolRunnerClient:
     @staticmethod
     def raw_network_available() -> bool:
@@ -877,16 +1169,23 @@ class ToolRunnerClient:
             except Empty:
                 time.sleep(0.1)
 
-    def _post_cancellable(self, path: str, payload: dict, scan_run_id: str | None):
-        headers = {"X-ASM-Scan-Run-ID": scan_run_id} if scan_run_id else None
+    def _post_cancellable(self, path: str, payload: dict, scan_run_id: str | None, budget_s: int | None = None):
+        headers = {"X-ASM-Scan-Run-ID": scan_run_id} if scan_run_id else {}
+        # REQ-PIPE-007: the runner enforces the declared budget; the HTTP read
+        # timeout leaves it room to answer (result + kill + cleanup).
+        request_kwargs: dict = {}
+        if budget_s is not None:
+            headers[BUDGET_HEADER] = str(budget_s)
+            request_kwargs["timeout"] = float(budget_s) + 30.0
+        headers = headers or None
         if scan_run_id is None:
-            return self._client.post(path, json=payload, headers=headers)
+            return self._client.post(path, json=payload, headers=headers, **request_kwargs)
 
         result_queue: Queue = Queue(maxsize=1)
 
         def dispatch() -> None:
             try:
-                result_queue.put(("response", self._client.post(path, json=payload, headers=headers)))
+                result_queue.put(("response", self._client.post(path, json=payload, headers=headers, **request_kwargs)))
             except BaseException as exc:  # noqa: BLE001 - transferred to caller thread
                 result_queue.put(("error", exc))
 
@@ -915,15 +1214,43 @@ class ToolRunnerClient:
                 raise value
             return value
 
+    def _local_query(self, command: str, budget_s: int = 30) -> str:
+        """Run one fixed, read-only command in the runner that never contacts a
+        target (the template index queries). Not a scan tool call, so it does
+        not go through the Scope Gateway; the command is built only from
+        constants and validated selector arguments."""
+        resp = self._client.post(
+            "/api/command", json={"command": command, "use_cache": False},
+            headers={BUDGET_HEADER: str(budget_s)}, timeout=float(budget_s) + 30.0,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        if raw.get("return_code") not in (0, None) or not raw.get("success", False):
+            raise RuntimeError(f"runner local query failed: {str(raw.get('stderr') or '')[:200]}")
+        return str(raw.get("stdout") or "")
+
+    def nuclei_index_summary(self) -> dict:
+        """{templates_version, total, generic, bound, products} of the image's index."""
+        return json.loads(self._local_query(f"python3 {NUCLEI_INDEX_TOOL} summary"))
+
+    def nuclei_selection_count(self, selection: dict) -> int:
+        """How many templates one selection resolves to."""
+        out = self._local_query(f"python3 {NUCLEI_INDEX_TOOL} select {_index_selector_args(selection)} --out /dev/null")
+        return int(json.loads(out.strip().splitlines()[-1])["templates"])
+
     def run(
         self, tool: str, target: str, args: dict | None = None, *,
         scan_run_id: str | None = None, engagement_id: str | None = None,
+        budget_s: int | None = None,
     ) -> dict:
         """Execute one gateway-authorized tool with bounded in-flight cancel.
 
         A run-tagged request is polled against authoritative control-plane state.
         On stop (or unknown stop state), the matching HexStrike process group is
         terminated; unrelated runs in the shared runner are never targeted.
+
+        `budget_s` (REQ-PIPE-007) overrides the tool's declared time budget; either way
+        the runner clamps it to its hard maximum.
 
         `engagement_id`, when given, is used ONLY to look up whether this is a
         bug-bounty engagement needing self-identification injected into HTTP-
@@ -933,7 +1260,9 @@ class ToolRunnerClient:
         here, strictly after the Scope Gateway already authorized the caller's
         original args.
         """
-        args = args or {}
+        args = dict(args or {})
+        budget = check_budget_s(tool, args, budget_s)
+        args["_budget_s"] = budget
         if engagement_id and tool in _HTTP_PROXIED_TOOLS:
             ident = _bounty_ident_for(engagement_id)
             if ident:
@@ -944,20 +1273,25 @@ class ToolRunnerClient:
                     "_bounty_ua_suffix": ident.get("ua_suffix"),
                     "_bounty_max_rps": ident.get("max_rps"),
                 }
+        if tool == "nuclei" and args.get("mode") == "oob":
+            args = {**args, "_oob_server": OOB_SERVER_URL}
         if tool in ("nmap", "redis-probe", "activemq-banner", "activemq-openwire-probe") and not self.raw_network_available():
             return {
                 "stdout": "", "stderr": "raw network egress is not enabled for this deployment",
                 "exit_code": -1, "success": False, "error_reason": "raw_egress_unavailable",
             }
-        if tool in _COMMANDS:
-            command = _COMMANDS[tool](target, args)
+        builder = _COMMANDS.get(tool)
+        if tool == "nuclei" and args.get("mode") in NUCLEI_MODES_AS_COMMAND:
+            builder = _nuclei_command
+        if builder is not None:
+            command = builder(target, args)
             endpoint = "/api/command"
             payload = {"command": command, "use_cache": False}
-            audit_command = _audit_invocation(_COMMANDS[tool], target, args)
+            audit_command = _audit_invocation(builder, target, args)
         else:
             endpoint, body_fn = _ENDPOINTS.get(tool, (None, None))
             if endpoint is None:
-                raise ValueError(f"tool_runner_client: kein HexStrike-Endpunkt-Mapping fuer '{tool}'")
+                raise ValueError(f"tool_runner_client: no HexStrike endpoint mapping for '{tool}'")
             payload = body_fn(target, args)
             # No literal command exists for these - HexStrike builds the CLI
             # server-side from this body, so the body IS the invocation spec
@@ -966,7 +1300,7 @@ class ToolRunnerClient:
         if scan_run_id:
             _set_current_activity(scan_run_id, tool, target)
         try:
-            resp = self._post_cancellable(endpoint, payload, scan_run_id)
+            resp = self._post_cancellable(endpoint, payload, scan_run_id, budget)
             if isinstance(resp, dict):
                 # Cancelled mid-flight: the invocation still ran, so it is still
                 # what the operator needs to see (REQ-AUDIT-003).
@@ -986,10 +1320,24 @@ class ToolRunnerClient:
                 "success": bool(raw.get("success", False)),
                 "error_reason": None,
                 "command": audit_command,
+                "timed_out": bool(raw.get("timed_out")),
+                "duration_s": raw.get("execution_time"),
             }
             if result["exit_code"] not in (0, None):
                 result["success"] = False
-                result["error_reason"] = "nonzero_exit"
+                # REQ-PIPE-006: the runner's kill at the budget (timed_out) and a
+                # tool's own `timeout` (exit 124) both mean "stopped by its time
+                # budget": whatever was printed before is real, the check is
+                # partial, never a clean result.
+                result["error_reason"] = (
+                    BUDGET_REACHED if result["timed_out"] or result["exit_code"] == 124 else "nonzero_exit"
+                )
+            elif _reached_own_deadline(tool, args, result.get("duration_s")):
+                # A tool that limits itself (ffuf -maxtime, katana -ct) exits 0
+                # when it stops there, so the exit code cannot tell it apart
+                # from a finished run.
+                result["success"] = False
+                result["error_reason"] = BUDGET_REACHED
             evidence = f"{result['stdout']}\n{result['stderr']}".lower()
             proxy_failures = (
                 "audit_unavailable", "proxy_capacity_exhausted", "missing_engagement_id_header",

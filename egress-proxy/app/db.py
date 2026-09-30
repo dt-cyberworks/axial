@@ -10,7 +10,6 @@ strukturiertes Log an stdout, s. Deployment Kap. 6.1 "Audit").
 """
 
 import os
-from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, text
 
@@ -110,19 +109,3 @@ def bounty_program_for(engagement_id: str) -> dict | None:
             {"id": engagement_id},
         ).mappings().first()
     return dict(row) if row else None
-
-
-def recent_allowed_count(engagement_id: str, window_seconds: float = 1.0) -> int:
-    """Zaehlt vom Proxy selbst durchgelassene Requests (eigener In-Memory-Zaehler
-    waere praeziser, aber ueber Instanzen hinweg nicht konsistent - fuer M4+
-    durch Redis-basiertes Rate-Limiting ersetzen)."""
-    since = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                "SELECT count(*) FROM audit_log WHERE engagement_id = :id "
-                "AND actor = 'egress-proxy' AND decision = 'ALLOW' AND ts >= :since"
-            ),
-            {"id": engagement_id, "since": since},
-        ).first()
-    return row[0] if row else 0

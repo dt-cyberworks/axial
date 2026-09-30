@@ -69,6 +69,7 @@ async def _run_forward(monkeypatch, *, ident_header_value):
         "ident_header_name": "X-Bug-Bounty", "ident_header_value": ident_header_value, "ua_suffix": None,
     })
     monkeypatch.setattr(proxy, "_submit_audit_or_deny", fake_submit_audit_or_deny)
+    monkeypatch.setattr(proxy, "reserve_rate_slot", lambda eid: {"allowed": True, "reason": "allow"})  # GitHub issue #40
     monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
     monkeypatch.setattr(proxy, "_relay", fake_relay)
     proxy._concurrency_in_flight.clear()

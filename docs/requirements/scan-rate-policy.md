@@ -77,3 +77,38 @@ Acceptance criteria:
 - **NEGATIVE**: a lookup failure degrades to each tool's existing hardcoded
   rate, exactly like a non-`bug_bounty` engagement - it must never abort the
   scan or fail closed to a rate of zero.
+
+## REQ-RATE-005: A Rate Slot Is Reserved Before The Call Goes Ahead
+
+**Security review (REQ-RATE-005, R3):** approved by johannes (project/security owner) on
+2026-09-29, after the concurrent-caller tests and the advisory-lock mutation check.
+Live verification is owed at deploy time.
+
+GitHub issue #40: the gateway and the egress proxy each counted recent
+`ALLOW` rows in the audit log and then decided, with nothing reserved in
+between. Concurrent callers could all read the same count and all proceed, so
+the configured rate (`max_rps`) was not a limit but a suggestion under load.
+
+Acceptance criteria:
+
+- The gateway (per-call) and the egress proxy (per network request, bug-bounty
+  engagements) each reserve a slot in `rate_reservation` under a transaction
+  advisory lock per (engagement, path) before the call goes ahead. The audit
+  log records what happened; it is no longer the counter.
+- [Negative test] However many callers ask at the same moment, no more slots
+  are granted in a window than the limit allows, on both the gateway and the
+  proxy path.
+- The window follows issue #19: 1 second at `max_rps >= 1`, `ceil(1/max_rps)`
+  seconds with a threshold of 1 below that. Time comes from the database
+  clock, so every process agrees.
+- [Negative test] A call that does not go ahead after its slot was reserved
+  (budget exhausted, missing risk statement, approval pending, approval claim
+  failure) gives the slot back, so it does not consume rate.
+- The egress proxy stays read-only on the database: it reserves through
+  `POST /internal/engagements/{id}/rate-reservation`, which takes the limit
+  from the engagement's bounty program, never from the caller.
+- [Negative test] If the proxy cannot reach the control plane, or the
+  engagement has no bounty program, the request is refused (fail closed).
+- Reservations older than one hour are pruned, and deleting an engagement
+  deletes its reservations.
+

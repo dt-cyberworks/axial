@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 from secrets import compare_digest
+from urllib.parse import urlsplit
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -25,6 +26,7 @@ from app.config import get_settings
 from app.db.base import get_db
 from app.models.engagement import Engagement
 from app.models.user import User
+from app.rate_limit import _is_trusted_proxy
 
 # Non-persisted identity for the legacy shared-token path (REQ-IAM-002: kept
 # only outside production, for dev/test workflows that predate individual
@@ -44,6 +46,45 @@ def _raw_session_token(
     if authorization and authorization.lower().startswith("bearer "):
         return authorization[7:].strip()
     return session_cookie
+
+
+CSRF_HEADER = "x-requested-with"
+CSRF_HEADER_VALUE = "asm-console"
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _origin_host(value: str) -> str | None:
+    try:
+        return (urlsplit(value).netloc or None) if value and value != "null" else None
+    except ValueError:
+        return None
+
+
+def _allowed_hosts(request: Request) -> set[str]:
+    hosts = {request.headers.get("host", "").lower()}
+    forwarded = request.headers.get("x-forwarded-host")
+    if forwarded and request.client and _is_trusted_proxy(request.client.host):
+        hosts.add(forwarded.split(",")[0].strip().lower())
+    for origin in get_settings().csrf_trusted_origins.split(","):
+        host = _origin_host(origin.strip())
+        if host:
+            hosts.add(host.lower())
+    hosts.discard("")
+    return hosts
+
+
+def enforce_csrf(request: Request) -> None:
+    """REQ-IAM-019: a state-changing request that the browser authenticated by
+    itself (the session cookie) must prove it came from the console."""
+    if request.method.upper() in _SAFE_METHODS:
+        return
+    if request.headers.get(CSRF_HEADER, "").lower() != CSRF_HEADER_VALUE:
+        raise HTTPException(403, "missing anti-CSRF header")
+    claimed = request.headers.get("origin") or request.headers.get("referer")
+    if claimed is not None:
+        host = _origin_host(claimed)
+        if host is None or host.lower() not in _allowed_hosts(request):
+            raise HTTPException(403, "request origin not allowed")
 
 
 def require_operator(
@@ -66,6 +107,7 @@ def require_operator(
 
 
 def require_user(
+    request: Request,
     authorization: str | None = Header(default=None),
     session: str | None = Cookie(default=None),
     x_asm_operator_token: str | None = Header(default=None),
@@ -87,6 +129,8 @@ def require_user(
     if raw_token:
         user = auth_service.resolve_session(db, raw_token)
         if user is not None:
+            if not (authorization and authorization.lower().startswith("bearer ")):
+                enforce_csrf(request)  # only the ambient cookie credential needs it
             return user
 
     raise HTTPException(401, "authentication required", headers={"WWW-Authenticate": "Bearer"})

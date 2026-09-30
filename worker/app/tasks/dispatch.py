@@ -30,7 +30,8 @@ from app.nmap_parse import parse_nmap_grepable
 from app.nuclei_parse import parse_nuclei_jsonl
 from app.target_envelope import httpx_target, protocol_from_httpx_url, target_url
 from app.testssl_parse import parse_testssl_json
-from app.tool_runner_client import tool_runner
+from app.planner import resolve_products
+from app.tool_runner_client import nuclei_select_budget_s, tool_runner
 from app import tool_execution
 from app.wafw00f_parse import parse_wafw00f
 
@@ -118,7 +119,7 @@ def _egress_block_reason(result: dict | None) -> str | None:
 
 def _run(
     engagement_id: str, tool: str, target: str, args: dict, scan_run_id: str | None = None,
-    *, ip: str | None = None, port_range: str | None = None,
+    *, ip: str | None = None, port_range: str | None = None, budget_s: int | None = None,
 ) -> dict:
     """REQ-SCAN-014: every agent-dispatched call is recorded through the same
     tool_execution.record() telemetry the deterministic fingerprint phase
@@ -131,9 +132,10 @@ def _run(
     tested it - the exact failure mode REQ-SCAN-014 exists to catch, just not
     wired into this dispatch path."""
     try:
-        result = tool_runner.run(tool, target, args, scan_run_id=scan_run_id, engagement_id=engagement_id)
+        extra = {} if budget_s is None else {"budget_s": budget_s}
+        result = tool_runner.run(tool, target, args, scan_run_id=scan_run_id, engagement_id=engagement_id, **extra)
     except Exception as exc:  # noqa: BLE001 - Runner-Ausfall darf den Agent nicht abreissen
-        logger.warning("dispatch %s auf %s fehlgeschlagen: %s", tool, target, exc)
+        logger.warning("dispatch %s on %s failed: %s", tool, target, exc)
         result = tool_execution.failed_result("runner_dispatch_failed", exc)
         tool_execution.record(
             engagement_id, scan_run_id=scan_run_id, tool=tool, phase="agent",
@@ -181,7 +183,7 @@ def _dispatch_httpx(
         # so a NEXT run (or the same run's later iterations) knows this host
         # was already checked, not just that no data exists for it yet.
         client.record_http_probe(engagement_id, asset_id, live=False)
-        return Observation("httpx", target, "kein lebender HTTP-Dienst / keine Antwort")
+        return Observation("httpx", target, "no live HTTP service / no response")
     r = rows[0]
     client.add_service(
         engagement_id, asset_id=asset_id, port=r.get("port") or single_port or 443,
@@ -190,7 +192,7 @@ def _dispatch_httpx(
         tech_stack={"tech": r.get("tech", []), "title": r.get("title", ""), "status": r.get("status_code")},
     )
     client.record_http_probe(engagement_id, asset_id, live=True)
-    tech = ", ".join(r.get("tech", []) or []) or "keine Tech erkannt"
+    tech = ", ".join(r.get("tech", []) or []) or "no technology detected"
     return Observation(
         "httpx", target,
         f"live, status={r.get('status_code')}, server={r.get('webserver') or '?'}, tech=[{tech}]",
@@ -238,12 +240,12 @@ def _dispatch_nikto(
     if missing:
         client.add_finding(
             engagement_id, asset_id=asset_id, service_id=svc_resp["id"], category="misconfig",
-            title=f"Fehlende Security-Header: {', '.join(missing)}", confidence="validated",
+            title=f"Missing security headers: {', '.join(missing)}", confidence="validated",
             evidence={"missing_headers": missing, "port": port, "tool": "nikto"},
             exposure_factor=1.0, business_factor=0.4,
         )
-        return Observation("nikto", target, f"fehlende Header: {', '.join(missing)}", findings=1)
-    return Observation("nikto", target, "keine fehlenden Security-Header gemeldet")
+        return Observation("nikto", target, f"missing headers: {', '.join(missing)}", findings=1)
+    return Observation("nikto", target, "no missing security headers reported")
 
 
 def _dispatch_wafw00f(
@@ -257,12 +259,12 @@ def _dispatch_wafw00f(
     if waf:
         client.add_finding(
             engagement_id, asset_id=asset_id, category="exposure",
-            title=f"WAF erkannt: {waf}", confidence="validated",
+            title=f"WAF detected: {waf}", confidence="validated",
             evidence={"waf": waf, "tool": "wafw00f", "target": url},
             exposure_factor=0.2, business_factor=0.2,
         )
         return Observation("wafw00f", target, f"WAF: {waf}", findings=1)
-    return Observation("wafw00f", target, "kein WAF erkannt")
+    return Observation("wafw00f", target, "no WAF detected")
 
 
 def _dispatch_testssl(
@@ -278,9 +280,9 @@ def _dispatch_testssl(
     # polluted the benchmark's negative controls.
     if str(confirmed_protocol or "").lower() == "http":
         return Observation("testssl", target,
-                           "uebersprungen: httpx hat fuer diesen Port reines HTTP (kein TLS) bestaetigt")
+                           "skipped: httpx confirmed plain HTTP (no TLS) on this port")
     if ip is None:
-        return Observation("testssl", target, "uebersprungen: keine materialisierte IP")
+        return Observation("testssl", target, "skipped: no materialized IP")
     url = target_url(target, single_port, confirmed_protocol)
     result = _run(engagement_id, "testssl", url, {"ip": ip}, scan_run_id, ip=ip, port_range=str(single_port or 443))
     issues = parse_testssl_json(result.get("stdout", "")) if result.get("success") else []
@@ -293,8 +295,22 @@ def _dispatch_testssl(
         )
     if issues:
         top = ", ".join(f"{f['severity']}:{f['title']}" for f in issues[:4])
-        return Observation("testssl", target, f"TLS-Befunde ({len(issues)}): {top}", findings=len(issues))
-    return Observation("testssl", target, "keine nennenswerten TLS-Befunde")
+        return Observation("testssl", target, f"TLS findings ({len(issues)}): {top}", findings=len(issues))
+    return Observation("testssl", target, "no notable TLS findings")
+
+
+def _surface_profile(scan_run_id: str | None, target: str, port: int) -> list[str]:
+    """The technology profile the scan recorded for this host:port, or [] when
+    the run has no such surface (or the plan cannot be read)."""
+    if not scan_run_id:
+        return []
+    try:
+        for surface in client.get_scan_plan(scan_run_id).get("surfaces", []):
+            if str(surface.get("host", "")).lower() == target.lower() and int(surface.get("port", 0)) == port:
+                return list(surface.get("profile") or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scan plan unavailable for the agent's nuclei call: %s", exc)
+    return []
 
 
 def _dispatch_nuclei(
@@ -302,9 +318,29 @@ def _dispatch_nuclei(
     single_port: int | None = None,
     confirmed_protocol: str | None = None,
 ) -> Observation:
+    """The agent's nuclei call (REQ-PIPE-004): the templates bound to the products
+    the scan identified on this host. The generic templates already ran in this
+    run's fingerprint phase, so they are not repeated; a host with nothing
+    identified gets the fixed common-product list instead. Hits printed by a call
+    that ran into its budget are still real."""
     url = target_url(target, single_port, confirmed_protocol)
-    result = _run(engagement_id, "nuclei", url, {}, scan_run_id, ip=ip, port_range=str(single_port or 443))
-    hits = parse_nuclei_jsonl(result.get("stdout", "")) if result.get("success") else []
+    keys, reason = resolve_products(_surface_profile(scan_run_id, target, single_port or 443))
+    selection = {"mode": "select", "group": "products", "products": keys}
+    try:
+        count = tool_runner.nuclei_selection_count(selection)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nuclei selection unavailable for %s: %s", target, exc)
+        result = tool_execution.failed_result("selection_unavailable", exc)
+        tool_execution.record(
+            engagement_id, scan_run_id=scan_run_id, tool="nuclei", phase="agent",
+            authorized_target=target, resolved_target=ip, port_range=str(single_port or 443), result=result,
+        )
+        return Observation("nuclei", target, "template selection unavailable (tool runner)")
+    if count == 0:
+        return Observation("nuclei", target, f"no product-bound templates apply ({reason})")
+    result = _run(engagement_id, "nuclei", url, selection, scan_run_id, ip=ip, port_range=str(single_port or 443),
+                  budget_s=nuclei_select_budget_s(count))
+    hits = parse_nuclei_jsonl(result.get("stdout", "")) if tool_execution.usable_output(result) or result.get("error_reason") == "nonzero_exit" else []
     for f in hits:
         client.add_finding(
             engagement_id, asset_id=asset_id, category=f["category"],
@@ -315,8 +351,8 @@ def _dispatch_nuclei(
         )
     if hits:
         top = ", ".join(f"{f['severity']}:{f['title']}" for f in hits[:4])
-        return Observation("nuclei", target, f"Schwachstellen/Exposures ({len(hits)}): {top}", findings=len(hits))
-    return Observation("nuclei", target, "keine Template-Treffer")
+        return Observation("nuclei", target, f"vulnerabilities/exposures ({len(hits)}): {top}", findings=len(hits))
+    return Observation("nuclei", target, f"no template matches ({count} product-bound templates, {reason})")
 
 
 def _dispatch_http_request(
@@ -337,7 +373,7 @@ def _dispatch_http_request(
     # unveraendert an das LLM UND in den Audit-Trail, keine zweite Kopie.
     body = result.get("response") or ""
     if not body.strip():
-        return Observation("http_request", target, f"{method} {path} -> keine Antwort / Fehler")
+        return Observation("http_request", target, f"{method} {path} -> no response / error")
     # Die Rohantwort ist die Beobachtung (bereits auf 16 KB gedeckelt im Runner).
     return Observation("http_request", target, f"{method} {path} ->\n{body}")
 
@@ -359,15 +395,15 @@ def _dispatch_ffuf(
     if is_catch_all(hits):
         return Observation(
             "ffuf", target,
-            f"content-discovery: {len(hits)} Treffer verworfen - alle mit derselben "
-            f"Antwort (Catch-all/Wildcard, z. B. SPA-Fallback oder Blockseite). "
-            f"Keine echte Content-Discovery; behandle dieses Ziel als 'keine Treffer'.",
+            f"content-discovery: {len(hits)} hits discarded - all with the same "
+            f"response (catch-all/wildcard, e.g. an SPA fallback or a block page). "
+            f"No real content discovery; treat this target as 'no hits'.",
         )
     if not hits:
-        return Observation("ffuf", target, "content-discovery: keine Treffer")
+        return Observation("ffuf", target, "content-discovery: no hits")
     top = "; ".join(f"{h.get('status')} /{h.get('word')} ({h.get('length')}B)" for h in hits[:25])
-    more = f" (+{len(hits) - 25} weitere)" if len(hits) > 25 else ""
-    return Observation("ffuf", target, f"content-discovery: {len(hits)} Treffer: {top}{more}")
+    more = f" (+{len(hits) - 25} more)" if len(hits) > 25 else ""
+    return Observation("ffuf", target, f"content-discovery: {len(hits)} hits: {top}{more}")
 
 
 def _parse_raw_probe(result: dict | None) -> tuple[str, str]:
@@ -397,17 +433,17 @@ def _dispatch_redis_probe(
     inference. An auth-required error means the opposite: correctly
     protected, not a finding."""
     if ip is None:
-        return Observation("redis-probe", target, "uebersprungen: keine materialisierte IP")
+        return Observation("redis-probe", target, "skipped: no materialized IP")
     from app.raw_tcp_probe import execute_probe
 
     outcome = execute_probe(engagement_id, scan_run_id, "redis-probe", target, ip, single_port=single_port)
     result, port = outcome.result, outcome.port
     if not result.get("success"):
         reason = result.get("error_reason") or "unknown"
-        return Observation("redis-probe", target, f"nicht ausgefuehrt ({reason})")
+        return Observation("redis-probe", target, f"not run ({reason})")
     status, text = _parse_raw_probe(result)
     if status != "ok":
-        return Observation("redis-probe", target, f"kein Redis auf Port {port} erreichbar ({status})")
+        return Observation("redis-probe", target, f"no Redis reachable on port {port} ({status})")
     client.add_service(engagement_id, asset_id=asset_id, port=port, protocol="tcp", product="redis")
     if text.strip() == "+PONG":
         client.add_finding(
@@ -417,8 +453,8 @@ def _dispatch_redis_probe(
             evidence={"tool": "redis-probe", "port": port, "response": text},
             exposure_factor=1.0, business_factor=0.5,
         )
-        return Observation("redis-probe", target, f"Port {port}: PING beantwortet OHNE Auth (+PONG)", findings=1)
-    return Observation("redis-probe", target, f"Port {port}: Redis erreichbar, Auth erforderlich ({text[:80]!r})")
+        return Observation("redis-probe", target, f"Port {port}: PING answered WITHOUT authentication (+PONG)", findings=1)
+    return Observation("redis-probe", target, f"Port {port}: Redis reachable, authentication required ({text[:80]!r})")
 
 
 def _dispatch_activemq_banner(
@@ -432,17 +468,17 @@ def _dispatch_activemq_banner(
     unauthenticated, network-reachable message broker - a real, reportable
     exposure on its own, independent of any specific CVE."""
     if ip is None:
-        return Observation("activemq-banner", target, "uebersprungen: keine materialisierte IP")
+        return Observation("activemq-banner", target, "skipped: no materialized IP")
     from app.raw_tcp_probe import execute_probe
 
     outcome = execute_probe(engagement_id, scan_run_id, "activemq-banner", target, ip, single_port=single_port)
     result, port = outcome.result, outcome.port
     if not result.get("success"):
         reason = result.get("error_reason") or "unknown"
-        return Observation("activemq-banner", target, f"nicht ausgefuehrt ({reason})")
+        return Observation("activemq-banner", target, f"not run ({reason})")
     status, text = _parse_raw_probe(result)
     if status != "ok" or not text:
-        return Observation("activemq-banner", target, f"kein OpenWire-Broker auf Port {port} erreichbar ({status})")
+        return Observation("activemq-banner", target, f"no OpenWire broker reachable on port {port} ({status})")
     client.add_service(engagement_id, asset_id=asset_id, port=port, protocol="tcp", product="activemq")
     client.add_finding(
         engagement_id, asset_id=asset_id, category="exposure",
@@ -451,7 +487,7 @@ def _dispatch_activemq_banner(
         evidence={"tool": "activemq-banner", "port": port, "banner": text[:500]},
         exposure_factor=1.0, business_factor=0.5,
     )
-    return Observation("activemq-banner", target, f"Port {port}: OpenWire-Greeting gelesen: {text[:120]!r}", findings=1)
+    return Observation("activemq-banner", target, f"Port {port}: OpenWire greeting read: {text[:120]!r}", findings=1)
 
 
 _OPENWIRE_CALLBACK_WAIT_SECONDS = 8.0
@@ -473,7 +509,7 @@ def _dispatch_activemq_openwire_probe(
     (control-plane/app/gateway/authorize.py's state_changing check), not
     here - this function only executes an already-approved call."""
     if ip is None:
-        return Observation("activemq-openwire-probe", target, "uebersprungen: keine materialisierte IP")
+        return Observation("activemq-openwire-probe", target, "skipped: no materialized IP")
 
     from app import openwire_payload
     from app.raw_tcp_probe import execute_probe
@@ -490,14 +526,14 @@ def _dispatch_activemq_openwire_probe(
     result, port = outcome.result, outcome.port
     if not result.get("success"):
         reason = result.get("error_reason") or "unknown"
-        return Observation("activemq-openwire-probe", target, f"nicht ausgefuehrt ({reason})")
+        return Observation("activemq-openwire-probe", target, f"not run ({reason})")
     status, _text = _parse_raw_probe(result)
     if status not in ("ok", "recv_failed"):
         # A connect failure means the packet was never even sent - genuinely
         # not a finding, mirroring REQ-AGENT-025's "absence is not a finding"
         # discipline. recv_failed/timeout on the READ is expected and fine:
         # the proof is the callback, not this connection's own response.
-        return Observation("activemq-openwire-probe", target, f"Verbindung zu Port {port} fehlgeschlagen ({status})")
+        return Observation("activemq-openwire-probe", target, f"connection to port {port} failed ({status})")
 
     triggered = False
     deadline = time.monotonic() + _OPENWIRE_CALLBACK_WAIT_SECONDS
@@ -519,8 +555,8 @@ def _dispatch_activemq_openwire_probe(
         # REQ-DISCO work exists to prevent.
         return Observation(
             "activemq-openwire-probe", target,
-            f"Port {port}: Paket gesendet, kein Callback innerhalb {_OPENWIRE_CALLBACK_WAIT_SECONDS:.0f}s beobachtet - "
-            "kein Befund (moeglich: gepatcht, Egress-gefiltert, oder langsamer als das Wartefenster)",
+            f"Port {port}: packet sent, no callback observed within {_OPENWIRE_CALLBACK_WAIT_SECONDS:.0f}s - "
+            "no finding (possible: patched, egress-filtered, or slower than the wait window)",
         )
 
     client.add_service(engagement_id, asset_id=asset_id, port=port, protocol="tcp", product="activemq")
@@ -539,7 +575,7 @@ def _dispatch_activemq_openwire_probe(
     )
     return Observation(
         "activemq-openwire-probe", target,
-        f"Port {port}: OpenWire-Deserialisierung BESTAETIGT - Ziel hat Callback-URL abgerufen (CVE-2023-46604)",
+        f"Port {port}: OpenWire deserialization CONFIRMED - the target fetched the callback URL (CVE-2023-46604)",
         findings=1,
     )
 
@@ -587,7 +623,7 @@ def dispatch(engagement_id: str, asset_id: str, tool: str, target: str, ip: str 
                                   confirmed_protocol)
         fn = _DISPATCH.get(tool)
         if fn is None:
-            return Observation(tool, target, "kein Dispatch-Mapping (Tool nicht agent-faehig)")
+            return Observation(tool, target, "no dispatch mapping (tool not available to the agent)")
         return fn(engagement_id, asset_id, target, ip, scan_run_id, single_port, confirmed_protocol)
     except _EgressBlocked as blocked:
         # REQ-EGRESS-002: ehrlich als Block melden, nicht als 'keine Treffer'. So

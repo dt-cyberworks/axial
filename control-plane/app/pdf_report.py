@@ -204,6 +204,10 @@ def _executive_summary_flowables(model: ReportModel, styles: dict[str, Paragraph
         flowables.append(_p("None. No open findings require action.", styles["Body"]))
     for index, action in enumerate(summary.top_actions, start=1):
         flowables.append(_p(f"{index}. {action}", styles["Bullet"]))
+    if summary.coverage_note:
+        flowables.append(Spacer(1, 8))
+        flowables.append(Paragraph("Coverage of this run", styles["Warning"]))
+        flowables.append(_p(summary.coverage_note, styles["Body"]))
     return flowables
 
 
@@ -522,10 +526,49 @@ def _methodology_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]
         if scope.runs_truncated:
             flowables.append(_p(f"... and {scope.runs_truncated} more (see the console for the full list).", styles["Muted"]))
 
+    flowables.extend(_coverage_flowables(model, styles))
+
     if scope.degraded:
         flowables.append(Spacer(1, 10))
         flowables.append(Paragraph("IMPORTANT - reduced coverage", styles["Warning"]))
         flowables.append(_p(DEGRADED_WARNING, styles["Body"]))
+    return flowables
+
+
+def _coverage_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]) -> list:
+    """REQ-PIPE-011: per service, which checks ran completely, partially, failed
+    or were skipped, and why."""
+    coverage = model.coverage
+    if coverage is None or not coverage.rows:
+        return []
+    depth = "thorough (every template on every web service)" if coverage.scan_depth == "thorough" else \
+        "standard (checks chosen from what the scan found)"
+    flowables: list = [
+        Spacer(1, 8), Paragraph("Coverage of this run", styles["H2"]),
+        _p(f"Scan depth: {depth}. Each row shows how many checks ran completely, stopped at their time budget "
+           "(partial), failed, or were skipped on that service.", styles["Body"]),
+    ]
+    header = [_p(h, styles["CellHead"]) for h in ("Service", "Type", "Technologies", "Complete", "Partial", "Failed", "Skipped")]
+    rows = [header]
+    for row in coverage.rows:
+        rows.append([
+            _p(row.service, styles["Cell"]), _p(row.kind, styles["Cell"]), _p(row.technologies, styles["Cell"]),
+            _p(str(row.complete), styles["Cell"]), _p(str(row.partial), styles["Cell"]),
+            _p(str(row.failed), styles["Cell"]), _p(str(row.skipped), styles["Cell"]),
+        ])
+    flowables.append(_table(
+        rows,
+        [CONTENT_WIDTH * 0.24, CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.23] + [CONTENT_WIDTH * 0.1] * 4,
+        TableStyle(_HEADER_ROW_STYLE),
+    ))
+    notes = [(row.service, line) for row in coverage.rows for line in row.not_covered]
+    if notes:
+        flowables.append(Spacer(1, 6))
+        flowables.append(Paragraph("Not fully covered", styles["H2"]))
+        for service, line in notes[:60]:
+            flowables.append(_p(f"{service} - {line}", styles["Bullet"]))
+        if len(notes) > 60:
+            flowables.append(_p(f"... and {len(notes) - 60} more (see the Plan tab of the run in the console).", styles["Muted"]))
     return flowables
 
 

@@ -109,10 +109,14 @@ def test_http_probe_records_https_when_that_is_what_httpx_actually_used(monkeypa
 
 
 def test_run_fetches_envelope_and_threads_single_port_to_all_web_tools(monkeypatch):
+    from tests import plan_fakes
+
+    store = plan_fakes.install(monkeypatch, fingerprint.client)
     monkeypatch.setattr(fingerprint.client, "materialize_dns", lambda eid, scan_run_id=None: {
         "resolved": [{"hostname": "host.example.com", "ip_address": "192.0.2.10"}]})
     monkeypatch.setattr(fingerprint.client, "get_scan_envelope", lambda eid, host=None: {"tcp_port_from": 4280, "tcp_port_to": 4280})
     monkeypatch.setattr(fingerprint, "_nmap_scan", lambda *a, **k: ([], False))
+    monkeypatch.setattr(fingerprint.client, "is_cancel_requested", lambda run_id: False)
 
     seen_ports = {}
     # REQ-FIDELITY-009: also capture the confirmed protocol each web tool
@@ -125,50 +129,48 @@ def test_run_fetches_envelope_and_threads_single_port_to_all_web_tools(monkeypat
         # service on a non-standard port is exactly the case that used to break.
         return {"port": single_port, "asset_id": asset_id, "url": f"http://host:{single_port}"}
 
-    def fake_web_enum(engagement_id, asset_id, host, scan_run_id, single_port=None, confirmed_protocol=None):
-        seen_ports["web_enum"] = single_port
-        seen_protocols["web_enum"] = confirmed_protocol
+    def fake_header_findings(engagement_id, asset_id, host, live, single_port=None, confirmed_protocol=None):
+        seen_ports["header_findings"] = single_port
+        seen_protocols["header_findings"] = confirmed_protocol
 
     def fake_waf_detect(engagement_id, asset_id, host, scan_run_id, single_port=None, confirmed_protocol=None):
         seen_ports["waf_detect"] = single_port
         seen_protocols["waf_detect"] = confirmed_protocol
 
-    def fake_tls_scan(engagement_id, asset_id, host, ip, scan_run_id, single_port=None, confirmed_protocol=None):
-        seen_ports["tls_scan"] = single_port
-        seen_protocols["tls_scan"] = confirmed_protocol
-
-    def fake_nuclei_scan(engagement_id, asset_id, host, scan_run_id, single_port=None, confirmed_protocol=None):
-        seen_ports["nuclei_scan"] = single_port
-        seen_protocols["nuclei_scan"] = confirmed_protocol
+    def fake_nuclei_pass(engagement_id, asset_id, host, url, args, scan_run_id, single_port, budget_s=None):
+        seen_ports.setdefault("nuclei", set()).add(single_port)
+        seen_protocols.setdefault("nuclei", set()).add(url.split("://", 1)[0])
 
     def fake_content_discovery(engagement_id, asset_id, host, scan_run_id, single_port=None, confirmed_protocol=None):
         seen_ports["content_discovery"] = single_port
         seen_protocols["content_discovery"] = confirmed_protocol
 
     monkeypatch.setattr(fingerprint, "_http_probe", fake_http_probe)
-    monkeypatch.setattr(fingerprint, "_web_enum", fake_web_enum)
+    monkeypatch.setattr(fingerprint, "_header_findings", fake_header_findings)
     monkeypatch.setattr(fingerprint, "_waf_detect", fake_waf_detect)
-    monkeypatch.setattr(fingerprint, "_tls_scan", fake_tls_scan)
-    monkeypatch.setattr(fingerprint, "_nuclei_scan", fake_nuclei_scan)
+    monkeypatch.setattr(fingerprint, "_tls_scan", lambda *a, **k: pytest.fail("plain HTTP is never planned for testssl"))
+    monkeypatch.setattr(fingerprint, "_nuclei_pass", fake_nuclei_pass)
     monkeypatch.setattr(fingerprint, "_content_discovery", fake_content_discovery)
 
     fingerprint.run(
         "11111111-1111-1111-1111-111111111111",
         [{"asset_id": "asset-1", "value": "host.example.com"}],
-        scan_run_id="run-1",
+        scan_run_id="11111111-2222-3333-4444-555555555555",
     )
 
     assert seen_ports == {
-        "http_probe": 4280, "web_enum": 4280, "waf_detect": 4280,
-        "tls_scan": 4280, "nuclei_scan": 4280, "content_discovery": 4280,
+        "http_probe": 4280, "header_findings": 4280, "waf_detect": 4280,
+        "nuclei": {4280}, "content_discovery": 4280,
     }
     # REQ-FIDELITY-009: httpx confirmed plain HTTP above, so every web tool must
     # be told that - not left to the blanket https:// default that silently
     # produced zero results against such a target.
     assert seen_protocols == {
-        "web_enum": "http", "waf_detect": "http",
-        "tls_scan": "http", "nuclei_scan": "http", "content_discovery": "http",
+        "header_findings": "http", "waf_detect": "http", "nuclei": {"http"}, "content_discovery": "http",
     }
+    # ...and there is no TLS layer to be missing versions from: testssl is planned as skipped, not run.
+    assert store.check("host.example.com", "testssl") ["state"] == "skipped"
+    assert store.check("host.example.com", "testssl")["reason"] == "not_a_tls_service"
 
 
 def test_run_resolves_the_envelope_per_host_not_once_for_the_whole_engagement(monkeypatch):
@@ -176,10 +178,14 @@ def test_run_resolves_the_envelope_per_host_not_once_for_the_whole_engagement(mo
     different per-target port overrides - the single_port passed to each
     target's own web tools must reflect ITS range, not a value fetched once
     up front for the whole run."""
+    from tests import plan_fakes
+
+    plan_fakes.install(monkeypatch, fingerprint.client)
     monkeypatch.setattr(fingerprint.client, "materialize_dns", lambda eid, scan_run_id=None: {
         "resolved": [{"hostname": "a.example.com", "ip_address": "192.0.2.10"},
                      {"hostname": "b.example.com", "ip_address": "192.0.2.11"}]})
     monkeypatch.setattr(fingerprint, "_nmap_scan", lambda *a, **k: ([], False))
+    monkeypatch.setattr(fingerprint.client, "is_cancel_requested", lambda run_id: False)
 
     envelope_calls = []
 
@@ -196,14 +202,14 @@ def test_run_resolves_the_envelope_per_host_not_once_for_the_whole_engagement(mo
         seen_ports[host] = single_port
         return {"port": single_port, "asset_id": asset_id, "url": f"https://host:{single_port}"}
 
-    for name in ("_web_enum", "_waf_detect", "_tls_scan", "_nuclei_scan", "_content_discovery"):
+    for name in ("_header_findings", "_waf_detect", "_tls_scan", "_nuclei_pass", "_content_discovery"):
         monkeypatch.setattr(fingerprint, name, lambda *a, **k: None)
     monkeypatch.setattr(fingerprint, "_http_probe", fake_http_probe)
 
     fingerprint.run(
         "11111111-1111-1111-1111-111111111111",
         [{"asset_id": "asset-1", "value": "a.example.com"}, {"asset_id": "asset-2", "value": "b.example.com"}],
-        scan_run_id="run-1",
+        scan_run_id="11111111-2222-3333-4444-555555555555",
     )
 
     assert envelope_calls == ["a.example.com", "b.example.com"]
@@ -263,15 +269,24 @@ def test_tls_scan_still_runs_when_protocol_unknown(monkeypatch):
     assert len(calls) == 1
 
 
-def test_web_suite_threads_confirmed_protocol_into_tls_scan(monkeypatch):
+def test_the_confirmed_protocol_decides_whether_testssl_is_planned_and_reaches_it(monkeypatch):
+    from app.planner import IndexInfo, Options
+    from app.scan_executor import CheckRun
+
+    ctx = fingerprint._RunContext()
     monkeypatch.setattr(fingerprint, "_http_probe", lambda *a, **k: {"url": "http://host.example.com:18080/", "port": 18080})
-    monkeypatch.setattr(fingerprint, "_web_enum", lambda *a, **k: None)
-    monkeypatch.setattr(fingerprint, "_waf_detect", lambda *a, **k: None)
-    monkeypatch.setattr(fingerprint, "_nuclei_scan", lambda *a, **k: None)
-    monkeypatch.setattr(fingerprint, "_content_discovery", lambda *a, **k: None)
+    _, plain = fingerprint._probe_web_surface(ctx, "eid", "asset-1", "host.example.com", "1.2.3.4", "run-1", 18080, [])
+    monkeypatch.setattr(fingerprint, "_http_probe", lambda *a, **k: {"url": "https://host.example.com:8443/", "port": 8443,
+                                                                   "status_code": 200, "title": "t"})
+    _, tls = fingerprint._probe_web_surface(ctx, "eid", "asset-2", "host2.example.com", "1.2.3.5", "run-1", 8443, [])
+
+    assert plain["scheme"] == "http" and tls["scheme"] == "https"
+    plain_row, tls_row = fingerprint._plan_payload([plain, tls], Options(), IndexInfo())
+    assert {c["check_id"]: c["state"] for c in plain_row["checks"]}["testssl"] == "skipped"
+    assert {c["check_id"]: c["state"] for c in tls_row["checks"]}["testssl"] == "planned"
+
     seen = {}
     monkeypatch.setattr(fingerprint, "_tls_scan", lambda *a, confirmed_protocol=None, **k: seen.setdefault("protocol", confirmed_protocol))
-
-    fingerprint._web_suite(fingerprint._RunContext(), "11111111-1111-1111-1111-111111111111", "asset-1", "host.example.com", "1.2.3.4", "run-1", 18080)
-
-    assert seen["protocol"] == "http"
+    run = CheckRun("eid", "run-1", {**tls, "id": "s2"}, {"check_id": "testssl", "tool": "testssl", "args": {}}, {})
+    fingerprint.resolve_handler(run.check)(run)
+    assert seen["protocol"] == "https"
