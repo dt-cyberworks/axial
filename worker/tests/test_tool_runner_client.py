@@ -141,7 +141,7 @@ def test_raw_tcp_probe_command_requires_a_valid_port():
 def test_raw_tcp_probe_command_rejects_an_unsafe_target():
     import pytest
 
-    with pytest.raises(ValueError, match="unsicheres Ziel"):
+    with pytest.raises(ValueError, match="unsafe target"):
         trc._redis_probe_command("192.0.2.10; rm -rf /", {"port": 6379})
 
 

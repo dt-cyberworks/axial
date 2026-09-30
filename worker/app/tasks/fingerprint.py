@@ -2,41 +2,45 @@
 
 Sendet nach Gateway-Freigabe echte Tool-Calls an den tool-runner (die echte
 HexStrike-API, s. worker/app/tool_runner_client.py), schreibt Service-/
-Finding-Ergebnisse ueber die interne control-plane-API. Fuer erkannte HTTP-
-Dienste zusaetzlich ein nikto-Scan (misconfig/fehlende Security-Header,
-Kap. 5.1).
+Finding-Ergebnisse ueber die interne control-plane-API. Fehlende Security-
+Header (misconfig, Kap. 5.1) werden aus den Response-Headern abgeleitet, die
+der httpx-Aufruf ohnehin aufzeichnet (REQ-PIPE-013; nikto laeuft im
+automatischen Scan nicht mehr).
 
-Hinweis zum Header-Check: der worker selbst haengt NICHT im Lab-/Ziel-Netz
-(nur ctrl+egress) und kann Ziele nicht direkt erreichen - jeder aktive Call
-muss durch den tool-runner laufen, der als einziger Netzwerksicht auf die
-Ziele hat. HexStrikes httpx-Endpunkt exponiert keine rohen Response-Header
-ueber seine begrenzten Parameter; nikto (ebenfalls Tool-Allowlist Kap. 2.3)
-meldet fehlende Security-Header verlaesslich in seiner Klartextausgabe und
-wird stattdessen genutzt (s. nikto_parse.py).
+Hinweis: der worker selbst haengt NICHT im Lab-/Ziel-Netz (nur ctrl+egress)
+und kann Ziele nicht direkt erreichen - jeder aktive Call muss durch den
+tool-runner laufen, der als einziger Netzwerksicht auf die Ziele hat.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import ipaddress
+import json
 import logging
 import time
 import uuid
+from urllib.parse import urlsplit
 
 from app.control_plane_client import client
+from app.discovery_parse import nuclei_candidate_urls, parse_katana_jsonl
 from app.ffuf_parse import is_catch_all, parse_ffuf_json
 from app.httpx_parse import parse_httpx_json
 from app.known_vulns import lookup as lookup_known_vuln
 from app.lab_hosts import is_lab_host
-from app.nikto_parse import parse_nikto_missing_headers
 from app.nmap_parse import parse_nmap_grepable
-from app.nuclei_parse import parse_nuclei_jsonl
+from app.nuclei_parse import parse_nuclei_jsonl, parse_nuclei_tech
+from app.planner import IndexInfo, Options, SurfaceInput, plan_surface, resolve_products
+from app.scan_executor import CheckRun, Handler
 from app.raw_egress_client import raw_egress_gateway
 from app.raw_nmap import RawNmapOutcome, execute_configured_tcp_scan, execute_targeted_udp_scan
+from app.security_headers import missing_security_headers
+from app.surfaces import classify_open_port, redirect_alias_port
+from app.tech_profile import MAX_PROFILE_ENTRIES, build_profile
 from app.target_envelope import httpx_target, protocol_from_httpx_url, single_port_from_envelope, target_url
-from app.testssl_parse import parse_testssl_json
-from app.tool_runner_client import tool_runner
-from app import tool_execution
+from app.testssl_parse import parse_testssl_json, testssl_scan_problem
+from app.tool_runner_client import NUCLEI_OOB_PARTS, OOB_SERVER_URL, nuclei_select_budget_s, tool_runner
+from app import scan_executor, tool_execution
 from app.wafw00f_parse import parse_wafw00f
 
 logger = logging.getLogger(__name__)
@@ -75,6 +79,17 @@ class _RunContext:
     port_scans: dict[tuple[str, int | None, int | None], _PortScanResult] = dataclasses.field(default_factory=dict)
     # REQ-FPEFF-004: web-surface fingerprint -> the hostname already deep-scanned.
     web_surfaces: dict[tuple, str] = dataclasses.field(default_factory=dict)
+    # REQ-COVER-003/004/006: the engagement's optional-capability switches,
+    # fetched once per run (None until first use).
+    options: dict | None = None
+    # REQ-PIPE-001: host -> web ports httpx confirmed live in this run and that
+    # are not themselves aliases; a redirect-only port is an alias of one of them.
+    live_web_ports: dict[str, set[int]] = dataclasses.field(default_factory=dict)
+
+    def discovery_options(self, engagement_id: str) -> dict:
+        if self.options is None:
+            self.options = client.get_discovery_options(uuid.UUID(engagement_id))
+        return self.options
 
 
 def _port_scan_key(ip: str, envelope: dict) -> tuple[str, int | None, int | None]:
@@ -118,6 +133,13 @@ def _web_surface_key(ip: str | None, port: int | None, probe: dict) -> tuple | N
     )
 
 
+def _add_finding(*args, **kwargs):
+    """Store a finding and count it for the check that produced it."""
+    result = client.add_finding(*args, **kwargs)
+    tool_execution.note_finding()
+    return result
+
+
 def _propose(
     engagement_id: str, tool: str, category: str, target: str, args: dict,
     scan_run_id: str | None, phase: str = "fingerprint",
@@ -134,12 +156,14 @@ def _propose(
             return decision
         if decision.get("is_throttled") and decision.get("retry_after_seconds") is not None:
             delay = min(max(float(decision["retry_after_seconds"]), 0.1), 5.0)
-            logger.info("%s auf %s gedrosselt: warte %.2fs vor erneutem Gateway-Check", tool, target, delay)
+            logger.info("%s on %s throttled: waiting %.2fs before asking the gateway again", tool, target, delay)
             time.sleep(delay)
             continue
-        logger.info("%s auf %s abgelehnt: %s", tool, target, decision["reason"])
+        logger.info("%s on %s denied: %s", tool, target, decision["reason"])
+        tool_execution.note_denied(tool, decision["reason"])
         return None
-    logger.info("%s auf %s nach wiederholter Drosselung uebersprungen", tool, target)
+    logger.info("%s on %s skipped after repeated throttling", tool, target)
+    tool_execution.note_denied(tool, "throttled")
     return None
 
 
@@ -291,7 +315,7 @@ def _execute_port_scan(
         )
         if not outcome.result.get("success"):
             logger.warning(
-                "nmap %s fuer %s nicht vollstaendig erfolgreich: %s",
+                "nmap %s for %s not fully successful: %s",
                 outcome.protocol, target, outcome.result.get("error_reason"),
             )
         services.extend(outcome.services)
@@ -320,7 +344,7 @@ def _nmap_scan(
     cached = ctx.port_scans.get(key)
     if cached is not None:
         logger.info(
-            "nmap fuer %s uebersprungen: %s wurde in diesem Lauf bereits gescannt (durch %s)",
+            "nmap for %s skipped: %s was already scanned in this run (by %s)",
             target, ip, cached.scanned_by,
         )
         tool_execution.record(
@@ -346,58 +370,26 @@ def _nmap_scan(
     return services, succeeded
 
 
-def _web_enum(engagement_id: str, asset_id: str, target: str, scan_run_id: str | None, single_port: int | None = None,
-              confirmed_protocol: str | None = None) -> None:
-    """Web-Enumeration via nikto ueber den Egress-Proxy (HTTP(S) ist die primaere
-    externe ASM-Angriffsflaeche - laeuft unabhaengig von nmap). nikto ist ein
-    vuln-Tool (Allowlist Kap. 2.3) und braucht daher einen vuln-Grant.
+def _header_findings(engagement_id: str, asset_id: str, target: str, live: dict, single_port: int | None = None,
+                     confirmed_protocol: str | None = None) -> None:
+    """REQ-PIPE-013: missing security headers from the response headers httpx
+    already recorded for this surface - no request to the target. Replaces the
+    nikto run, which spent its whole 40 s budget (always truncated) to report
+    the same thing.
 
-    confirmed_protocol (REQ-FIDELITY-009): the scheme httpx actually reached
-    this host/port with. nikto needs an explicit scheme (it does not probe the
-    other one), so a plain-HTTP service scanned as https:// yields nothing."""
-    url = _target_url(target, single_port, confirmed_protocol)
+    confirmed_protocol (REQ-FIDELITY-009): HSTS is only judged over https."""
     port = single_port or 443
-    if _propose(engagement_id, "nikto", "vuln", target, {}, scan_run_id) is None:
-        return
-    # REQ-SCANQUAL-002: non-intrusive tuning categories relevant to ASM -
-    # interesting files (1), misconfiguration (2), information disclosure (3),
-    # software identification (b). Deliberately EXCLUDES injection (4), DoS (6),
-    # remote file retrieval (5,7), command execution (8), SQLi (9), file upload
-    # (0), auth bypass (a), remote source inclusion (c) to stay non-destructive.
-    # Missing-security-header findings surface from nikto's baseline analysis
-    # regardless of tuning (verified), and are still parsed below.
-    try:
-        result = tool_runner.run("nikto", url, {"additional_args": "-Tuning 123b -maxtime 40s"}, scan_run_id=scan_run_id, engagement_id=engagement_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("nikto-Enumeration fehlgeschlagen fuer %s: %s", target, exc)
-        result = tool_execution.failed_result("runner_dispatch_failed", exc)
-    stdout = result.get("stdout", "") if result.get("success") else ""
-    missing = parse_nikto_missing_headers(stdout)
-    tool_execution.record(
-        engagement_id, scan_run_id=scan_run_id, tool="nikto", phase="fingerprint",
-        authorized_target=target, resolved_target=None, port_range=str(port), result=result,
-        discovered_services=1 if result.get("success") else 0,
+    missing = missing_security_headers(
+        live.get("headers") or {}, scheme=confirmed_protocol or "https", status_code=live.get("status_code"),
     )
-    if not result.get("success"):
+    if not missing:  # None: a response that cannot be judged (redirect, no headers); []: nothing missing
         return
-    # REQ-FIDELITY-009: record the protocol httpx CONFIRMED, never a hardcoded
-    # "https". add_service has no upsert (control-plane/app/api/internal.py) -
-    # every call inserts - so a wrong literal here does not merely mislabel, it
-    # permanently adds a second, contradictory service row for a port that was
-    # already correctly identified. Measured before this fix:
-    # pentest-ground.com:4280 (a REAL engagement) carried https/http,
-    # https/nginx and tcp/nginx rows simultaneously, all of which are rendered
-    # into the agent's evidence block.
-    svc_resp = client.add_service(engagement_id, asset_id=asset_id, port=port,
-                                  protocol=confirmed_protocol or "https", product="http")
-    service_id = svc_resp["id"]
-    if missing:
-        client.add_finding(
-            engagement_id, asset_id=asset_id, service_id=service_id, category="misconfig",
-            title=f"Fehlende Security-Header: {', '.join(missing)}", confidence="validated",
-            evidence={"missing_headers": missing, "port": port, "tool": "nikto"},
-            exposure_factor=1.0, business_factor=0.4,
-        )
+    _add_finding(
+        engagement_id, asset_id=asset_id, service_id=live.get("service_id"), category="misconfig",
+        title=f"Missing security headers: {', '.join(missing)}", confidence="validated",
+        evidence={"missing_headers": missing, "port": port, "tool": "httpx"},
+        exposure_factor=1.0, business_factor=0.4,
+    )
 
 
 def _waf_detect(engagement_id: str, asset_id: str, target: str, scan_run_id: str | None, single_port: int | None = None,
@@ -406,7 +398,7 @@ def _waf_detect(engagement_id: str, asset_id: str, target: str, scan_run_id: str
     Allowlist Kap. 2.2). Ein erkannter WAF ist Recon-Kontext fuer den Operator
     (was schuetzt das Asset?) - bei Erkennung ein Info-Finding, sonst nichts.
 
-    confirmed_protocol: REQ-FIDELITY-009, same reason as _web_enum - wafw00f
+    confirmed_protocol: REQ-FIDELITY-009, same reason as the header check - wafw00f
     takes a URL and does not probe the other scheme."""
     url = _target_url(target, single_port, confirmed_protocol)
     if _propose(engagement_id, "wafw00f", "fingerprint", target, {}, scan_run_id) is None:
@@ -414,7 +406,7 @@ def _waf_detect(engagement_id: str, asset_id: str, target: str, scan_run_id: str
     try:
         result = tool_runner.run("wafw00f", url, {}, scan_run_id=scan_run_id, engagement_id=engagement_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("wafw00f fehlgeschlagen fuer %s: %s", target, exc)
+        logger.warning("wafw00f failed for %s: %s", target, exc)
         result = tool_execution.failed_result("runner_dispatch_failed", exc)
     waf = parse_wafw00f(result.get("stdout", "")) if result.get("success") else None
     tool_execution.record(
@@ -424,9 +416,9 @@ def _waf_detect(engagement_id: str, asset_id: str, target: str, scan_run_id: str
     if not result.get("success"):
         return
     if waf:
-        client.add_finding(
+        _add_finding(
             engagement_id, asset_id=asset_id, category="exposure",
-            title=f"WAF erkannt: {waf}", confidence="validated",
+            title=f"WAF detected: {waf}", confidence="validated",
             evidence={"waf": waf, "tool": "wafw00f", "target": url},
             exposure_factor=0.2, business_factor=0.2,  # rein informativ -> info
         )
@@ -447,7 +439,7 @@ def _http_probe(engagement_id: str, asset_id: str, target: str, scan_run_id: str
     try:
         result = tool_runner.run("httpx", url, {}, scan_run_id=scan_run_id, engagement_id=engagement_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("httpx fehlgeschlagen fuer %s: %s", target, exc)
+        logger.warning("httpx failed for %s: %s", target, exc)
         result = tool_execution.failed_result("runner_dispatch_failed", exc)
     rows = parse_httpx_json(result.get("stdout", "")) if result.get("success") else []
     tool_execution.record(
@@ -495,7 +487,7 @@ def _tls_scan(
     tool-runtime, for ANY target, not just this benchmark's."""
     port_range = str(single_port or 443)
     if confirmed_protocol == "http":
-        logger.info("testssl fuer %s uebersprungen: httpx hat bereits reines HTTP (kein TLS) bestaetigt", target)
+        logger.info("testssl for %s skipped: httpx already confirmed plain HTTP (no TLS)", target)
         tool_execution.record(
             engagement_id, scan_run_id=scan_run_id, tool="testssl", phase="fingerprint",
             authorized_target=target, resolved_target=ip, port_range=port_range,
@@ -503,7 +495,7 @@ def _tls_scan(
         )
         return
     if ip is None:
-        logger.info("testssl fuer %s uebersprungen: keine materialisierte IP", target)
+        logger.info("testssl for %s skipped: no materialized IP", target)
         tool_execution.record(
             engagement_id, scan_run_id=scan_run_id, tool="testssl", phase="fingerprint",
             authorized_target=target, resolved_target=None, port_range=port_range,
@@ -519,17 +511,17 @@ def _tls_scan(
     try:
         result = tool_runner.run("testssl", url, {"ip": ip}, scan_run_id=scan_run_id, engagement_id=engagement_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("testssl fehlgeschlagen fuer %s: %s", target, exc)
+        logger.warning("testssl failed for %s: %s", target, exc)
         result = tool_execution.failed_result("runner_dispatch_failed", exc)
-    issues = parse_testssl_json(result.get("stdout", "")) if result.get("success") else []
+    issues = parse_testssl_json(result.get("stdout", "")) if tool_execution.usable_output(result) else []
     tool_execution.record(
         engagement_id, scan_run_id=scan_run_id, tool="testssl", phase="fingerprint",
         authorized_target=target, resolved_target=ip, port_range=port_range, result=result,
     )
-    if not result.get("success"):
+    if not tool_execution.usable_output(result):
         return
     for f in issues:
-        client.add_finding(
+        _add_finding(
             engagement_id, asset_id=asset_id, category="misconfig",
             title=f["title"], confidence="validated", severity_override=f["severity"],
             evidence={"check": f["id"], "tool": "testssl"},
@@ -537,8 +529,52 @@ def _tls_scan(
         )
 
 
+def _tls_service_scan(
+    engagement_id: str, asset_id: str, target: str, ip: str | None, scan_run_id: str | None,
+    port: int, starttls: str | None, service_name: str | None = None,
+) -> None:
+    """REQ-PIPE-009: TLS hygiene of a non-web TLS service (mail, LDAP, ...):
+    directly for an implicit-TLS port, with --starttls where the protocol upgrades
+    to TLS. Every finding names the service and the port, so the same weakness on
+    two ports of one host stays two findings."""
+    port_range = str(port)
+    if ip is None:
+        tool_execution.record(
+            engagement_id, scan_run_id=scan_run_id, tool="testssl", phase="fingerprint",
+            authorized_target=target, resolved_target=None, port_range=port_range,
+            result=tool_execution.failed_result("materialized_ip_missing"),
+        )
+        return
+    gateway_args = {"starttls": starttls} if starttls else {}
+    if _propose(engagement_id, "testssl", "fingerprint", target, gateway_args, scan_run_id) is None:
+        return
+    try:
+        result = tool_runner.run("testssl", f"{target}:{port}", {"ip": ip, **gateway_args},
+                                 scan_run_id=scan_run_id, engagement_id=engagement_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("testssl failed for %s:%s: %s", target, port, exc)
+        result = tool_execution.failed_result("runner_dispatch_failed", exc)
+    problem = testssl_scan_problem(result.get("stdout", "")) if tool_execution.usable_output(result) else None
+    if problem is not None:
+        # testssl could not test the service: never a clean result.
+        result = tool_execution.failed_result(problem[0]) | {"stderr": problem[1], "command": result.get("command")}
+    issues = parse_testssl_json(result.get("stdout", "")) if tool_execution.usable_output(result) else []
+    tool_execution.record(
+        engagement_id, scan_run_id=scan_run_id, tool="testssl", phase="fingerprint",
+        authorized_target=target, resolved_target=ip, port_range=port_range, result=result,
+    )
+    label = service_name or starttls or "tls"
+    for f in issues:
+        _add_finding(
+            engagement_id, asset_id=asset_id, category="misconfig",
+            title=f"{f['title']} ({label} on port {port})"[:240], confidence="validated", severity_override=f["severity"],
+            evidence={"check": f["id"], "tool": "testssl", "port": port, "service": label, "starttls": starttls},
+            exposure_factor=1.0, business_factor=0.4,
+        )
+
+
 def _nuclei_pass(engagement_id: str, asset_id: str, target: str, url: str, args: dict,
-                 scan_run_id: str | None, single_port: int | None) -> None:
+                 scan_run_id: str | None, single_port: int | None, budget_s: int | None = None) -> None:
     """Ein einzelner nuclei-Aufruf (Haupt- ODER Headless-Pass, per args["mode"]).
     Beide gehen durch dasselbe Scope Gateway (Tool 'nuclei', Kategorie 'vuln')
     und HexStrikes /api/tools/nuclei; jeder Pass bleibt fuer sich unter dem
@@ -546,48 +582,27 @@ def _nuclei_pass(engagement_id: str, asset_id: str, target: str, url: str, args:
     if _propose(engagement_id, "nuclei", "vuln", target, args, scan_run_id) is None:
         return
     try:
-        result = tool_runner.run("nuclei", url, args, scan_run_id=scan_run_id, engagement_id=engagement_id)
+        extra = {} if budget_s is None else {"budget_s": budget_s}
+        result = tool_runner.run("nuclei", url, args, scan_run_id=scan_run_id, engagement_id=engagement_id, **extra)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("nuclei fehlgeschlagen fuer %s (mode=%s): %s", target, args.get("mode", "main"), exc)
+        logger.warning("nuclei failed for %s (mode=%s): %s", target, args.get("mode", "select"), exc)
         result = tool_execution.failed_result("runner_dispatch_failed", exc)
-    hits = parse_nuclei_jsonl(result.get("stdout", "")) if result.get("success") else []
+    # Matches printed before a timeout or a nonzero exit are real template hits;
+    # the pass is still recorded as failed (coverage degraded), never as clean.
+    salvage = tool_execution.usable_output(result) or result.get("error_reason") == "nonzero_exit"
+    hits = parse_nuclei_jsonl(result.get("stdout", "")) if salvage else []
     tool_execution.record(
         engagement_id, scan_run_id=scan_run_id, tool="nuclei", phase="fingerprint",
         authorized_target=target, resolved_target=None, port_range=str(single_port or 443), result=result,
     )
-    if not result.get("success"):
-        return
     for f in hits:
-        client.add_finding(
+        _add_finding(
             engagement_id, asset_id=asset_id, category=f["category"],
             title=f["title"], confidence="validated", severity_override=f["severity"],
             cve_ids=f["cve_ids"], cvss_base=f["cvss_base"],
             evidence={"template_id": f["template_id"], "matched_at": f["matched_at"], "tool": "nuclei"},
             exposure_factor=1.0, business_factor=0.5,
         )
-
-
-def _nuclei_scan(engagement_id: str, asset_id: str, target: str, scan_run_id: str | None, single_port: int | None = None,
-                 confirmed_protocol: str | None = None) -> None:
-    """nuclei: Template-basierte Schwachstellen-/Exposure-Erkennung (vuln,
-    ueber Egress-Proxy). Konservativ (nicht-intrusive Templates, s.
-    tool_runner_client). nuclei liefert eigene Severity + ggf. CVE/CVSS.
-
-    REQ-AGENT-018: zwei getrennte Passes, weil HexStrike jeden Aufruf hart bei
-    300s killt und der Headless-Modus zusammen mit dem vollen Tag-Satz diese
-    Grenze gegen ein echtes, proxied Ziel sprengt (live festgestellt). Der
-    Haupt-Pass (schnell, non-headless) und der Mini-Headless-Pass (nur domxss,
-    1 Template) bleiben jeder fuer sich unter 300s. phase bleibt 'fingerprint'
-    (deterministischer Pipeline-Call, KEIN Vector-Agent-Vorschlag).
-
-    confirmed_protocol (REQ-FIDELITY-009): verified live 2026-08-03 - nuclei
-    against a plain-HTTP service found 2 real template matches with http://,
-    and 0 with https:// (silently: "Scan completed. No results found."). A
-    schemeless target is not a fix either - nuclei's embedded httpx reported
-    "Found 0 URL from httpx" and also scored 0."""
-    url = _target_url(target, single_port, confirmed_protocol)
-    _nuclei_pass(engagement_id, asset_id, target, url, {}, scan_run_id, single_port)
-    _nuclei_pass(engagement_id, asset_id, target, url, {"mode": "headless"}, scan_run_id, single_port)
 
 
 # REQ-SCANQUAL-005: smallest of the 5 allowed SecLists keys - curated for
@@ -603,10 +618,10 @@ def _content_discovery(engagement_id: str, asset_id: str, target: str, scan_run_
 
     Previously ffuf only ran if the agent decided to call it mid-loop - the
     one web tool in the registry NOT part of the deterministic baseline,
-    unlike httpx/nikto/wafw00f/testssl/nuclei above. Judging whether a hit
+    unlike httpx/wafw00f/testssl/nuclei above. Judging whether a hit
     matters stays the agent's job (ffuf_parse.py's own docstring), so hits
     are reported as a single inferred-confidence Finding, not asserted as a
-    confirmed issue the way nikto's header check is."""
+    confirmed issue the way the header check is."""
     url = _target_url(target, single_port, confirmed_protocol)
     port = single_port or 443
     args = {"wordlist": _CONTENT_DISCOVERY_WORDLIST}
@@ -615,16 +630,16 @@ def _content_discovery(engagement_id: str, asset_id: str, target: str, scan_run_
     try:
         result = tool_runner.run("ffuf", url, args, scan_run_id=scan_run_id, engagement_id=engagement_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ffuf-Content-Discovery fehlgeschlagen fuer %s: %s", target, exc)
+        logger.warning("ffuf content discovery failed for %s: %s", target, exc)
         result = tool_execution.failed_result("runner_dispatch_failed", exc)
-    hits = parse_ffuf_json(result.get("stdout", "")) if result.get("success") else []
+    hits = parse_ffuf_json(result.get("stdout", "")) if tool_execution.usable_output(result) else []
     # REQ-DISCO-001: one response repeated is one observation, not N findings.
     # Recorded as a distinct outcome rather than dropped silently, so the
     # operator can see that discovery ran and why it produced nothing.
     if is_catch_all(hits):
         logger.info(
-            "ffuf fuer %s verworfen: %d Treffer, praktisch alle mit derselben "
-            "Antwort - Catch-all, keine Content-Discovery", target, len(hits),
+            "ffuf for %s discarded: %d hits, practically all with the same "
+            "response - catch-all, no content discovery", target, len(hits),
         )
         result = dict(result)
         result.update(
@@ -643,13 +658,84 @@ def _content_discovery(engagement_id: str, asset_id: str, target: str, scan_run_
     )
     if not hits:
         return
-    client.add_finding(
+    _add_finding(
         engagement_id, asset_id=asset_id, category="exposure",
         title=f"Content discovery: {len(hits)} path(s) found via ffuf ({_CONTENT_DISCOVERY_WORDLIST})",
         confidence="inferred",
         evidence={"hits": hits, "wordlist": _CONTENT_DISCOVERY_WORDLIST, "tool": "ffuf", "port": port},
         exposure_factor=1.0, business_factor=0.4,
     )
+
+
+def _crawl(engagement_id: str, asset_id: str, target: str, scan_run_id: str | None,
+           single_port: int | None, confirmed_protocol: str | None) -> list[str]:
+    """REQ-COVER-003 (R4, switch `crawling_enabled`): bounded katana crawl of
+    this one origin. Stores the endpoints (the control plane drops anything out
+    of scope) and returns the parameterized same-host URLs for the DAST pass."""
+    url = _target_url(target, single_port, confirmed_protocol)
+    port = single_port or 443
+    if _propose(engagement_id, "katana", "fingerprint", target, {}, scan_run_id) is None:
+        return []
+    try:
+        result = tool_runner.run("katana", url, {}, scan_run_id=scan_run_id, engagement_id=engagement_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("katana failed for %s: %s", target, exc)
+        result = tool_execution.failed_result("runner_dispatch_failed", exc)
+    endpoints = parse_katana_jsonl(result.get("stdout", "")) if tool_execution.usable_output(result) else []
+    tool_execution.record(
+        engagement_id, scan_run_id=scan_run_id, tool="katana", phase="fingerprint",
+        authorized_target=target, resolved_target=None, port_range=str(port), result=result,
+    )
+    if not endpoints:
+        return []
+    payload = [
+        {"url": e["url"], "method": e["method"], "source": e["source"], "param_names": e["param_names"]}
+        for e in endpoints
+    ]
+    try:
+        for i in range(0, len(payload), 500):
+            client.add_discovered_endpoints(uuid.UUID(engagement_id), scan_run_id, payload[i:i + 500])
+    except Exception as exc:  # noqa: BLE001 - a store failure must not fail the scan
+        logger.warning("storing crawled endpoints for %s failed: %s", target, exc)
+    host = target.lower()
+    return nuclei_candidate_urls([e for e in endpoints if (urlsplit(e["url"]).hostname or "").lower() == host])
+
+
+def _nuclei_endpoints_pass(engagement_id: str, asset_id: str, target: str, scan_run_id: str | None,
+                           single_port: int | None, confirmed_protocol: str | None, urls: list[str]) -> None:
+    if not urls:
+        return
+    url = _target_url(target, single_port, confirmed_protocol)
+    _nuclei_pass(engagement_id, asset_id, target, url, {"mode": "endpoints", "urls": urls}, scan_run_id, single_port)
+
+
+def _screenshot(engagement_id: str, asset_id: str, target: str, scan_run_id: str | None,
+                single_port: int | None, confirmed_protocol: str | None) -> None:
+    """REQ-COVER-006 (R4, switch `screenshots_enabled`): one PNG of the live
+    origin through the egress proxy, stored by the control plane."""
+    url = _target_url(target, single_port, confirmed_protocol)
+    port = single_port or 443
+    if _propose(engagement_id, "screenshot", "fingerprint", target, {}, scan_run_id) is None:
+        return
+    try:
+        result = tool_runner.run("screenshot", url, {}, scan_run_id=scan_run_id, engagement_id=engagement_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screenshot failed for %s: %s", target, exc)
+        result = tool_execution.failed_result("runner_dispatch_failed", exc)
+    png_b64 = (result.get("stdout") or "").strip() if result.get("success") else ""
+    if result.get("success") and not png_b64:
+        result = dict(result)
+        result.update(success=False, error_reason="screenshot_empty", stderr="no screenshot was produced")
+    tool_execution.record(
+        engagement_id, scan_run_id=scan_run_id, tool="screenshot", phase="fingerprint",
+        authorized_target=target, resolved_target=None, port_range=str(port), result=result,
+    )
+    if not png_b64:
+        return
+    try:
+        client.add_web_screenshot(uuid.UUID(engagement_id), scan_run_id, url, png_b64)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("storing screenshot for %s failed: %s", target, exc)
 
 
 # REQ-SCANQUAL-003: nmap-identified web services worth enumerating on non-443 ports.
@@ -687,98 +773,138 @@ def _web_candidate_ports(nmap_services: list[dict], scan_succeeded: bool = False
     return base + sorted(extra)[: max(0, _WEB_PORT_CAP - len(base))]
 
 
-def _record_deep_skip(engagement_id: str, target: str, ip: str | None, scan_run_id: str | None,
-                      port: int | None, covered_by: str) -> None:
-    """REQ-FPEFF-004: a skipped deep tool is recorded against the host that
-    skipped it, naming the host whose scan covered the same surface. The audit
-    trail must show why a tool did not run - a silent skip is indistinguishable
-    from a missed target."""
-    for tool in ("nikto", "ffuf", "nuclei"):
+def _record_missing_ip(engagement_id: str, host: str, scan_run_id: str | None, single_port: int | None) -> None:
+    """REQ-DISCO-004: DNS materialization already established whether this name
+    resolves at all. nmap honours that (materialized_ip_missing); the web tools
+    did not, so an NXDOMAIN host was probed by httpx/ffuf/nuclei and produced
+    ~33,000 proxy-denied requests plus fabricated findings.
+
+    This is audit hygiene and efficiency, NOT a security boundary: the egress
+    proxy remains the enforcement point and refuses these connections
+    regardless. It must never be relied on as the reason a connection does not
+    happen."""
+    logger.info("%s: no materialized IP - skipping web tools", host)
+    for tool in ("httpx", "wafw00f", "testssl", "ffuf", "nuclei"):
         tool_execution.record(
             engagement_id, scan_run_id=scan_run_id, tool=tool, phase="fingerprint",
-            authorized_target=target, resolved_target=ip, port_range=str(port or 443),
-            result={
-                "success": True, "exit_code": 0, "stdout": "",
-                "stderr": f"duplicate_vhost_of:{covered_by}",
-                "error_reason": None,
-                "outcome_summary": {"duplicate_vhost_of": covered_by},
-            },
+            authorized_target=host, resolved_target=None, port_range=str(single_port or 443),
+            result=tool_execution.failed_result("materialized_ip_missing"),
         )
 
 
-def _web_suite(ctx: _RunContext, engagement_id: str, aid: str, host: str, ip: str | None,
-               scan_run_id: str | None, single_port: int | None) -> list[dict]:
-    """httpx liveness first (skip dead ports), then the web tools on a live host.
-    single_port is the exact port to hit (None => 443).
+_SECRET_HEADERS = frozenset({"set-cookie", "cookie", "authorization", "proxy-authorization", "www-authenticate"})
 
-    REQ-FPEFF-005 order: cheapest and most informative first, so an aborted or
-    timed-out run still yields the cheap signal, and the ~5-minute nuclei pass
-    runs last. Every pre-existing gate is preserved.
+
+def _surface_fingerprint(live: dict, protocol: str | None) -> dict:
+    """What later checks need to know about a live web surface (REQ-PIPE-001)."""
+    keep = ("url", "status_code", "title", "webserver", "content_length")
+    fingerprint = {k: live.get(k) for k in keep if live.get(k) is not None}
+    # Session-bearing headers are never stored (the control plane drops them too).
+    headers = {}
+    for name, value in (live.get("headers") or {}).items():
+        key = str(name).strip().lower().replace("_", "-")
+        if key not in _SECRET_HEADERS:
+            headers[key] = value
+    fingerprint.update(
+        protocol=protocol, tech=list(live.get("tech") or []), headers=headers, service_id=live.get("service_id"),
+    )
+    return fingerprint
+
+
+def _nmap_product_for(nmap_services: list[dict], port: int) -> list[tuple[str, str | None]]:
+    out = []
+    for svc in nmap_services:
+        if svc.get("port") == port and str(svc.get("protocol") or "tcp").lower() in ("tcp", "http", "https", "ssl"):
+            name = svc.get("product_name") or svc.get("product")
+            if name and str(name).lower() not in ("unknown", "tcpwrapped"):
+                out.append((str(name), svc.get("version")))
+    return out
+
+
+def _probe_web_surface(
+    ctx: _RunContext, engagement_id: str, aid: str, host: str, ip: str | None, scan_run_id: str | None,
+    single_port: int | None, nmap_services: list[dict],
+) -> tuple[dict | None, dict | None]:
+    """Stage S4 for one candidate web port (REQ-PIPE-001/002): httpx confirms a
+    live HTTP(S) service (skip dead ports), and the port becomes a surface with
+    its class and technology profile.
+
+    Returns (probe result to hand on as a service, surface row for the plan), or
+    (None, None) when the port is not a live web service. single_port is the
+    exact port to hit (None => 443).
     """
-    services: list[dict] = []
-    # REQ-DISCO-004: DNS materialization already established whether this name
-    # resolves at all. nmap honours that (materialized_ip_missing); the web
-    # tools did not, so an NXDOMAIN host was probed by httpx/nikto/ffuf/nuclei
-    # and produced ~33,000 proxy-denied requests plus fabricated findings.
-    # `ip` is None only when the control plane could not materialize an
-    # address AND the host is not itself a literal IP (see run()).
-    #
-    # This is audit hygiene and efficiency, NOT a security boundary: the
-    # egress proxy remains the enforcement point and refuses these
-    # connections regardless. It must never be relied on as the reason a
-    # connection does not happen.
     if ip is None:
-        logger.info("%s: keine materialisierte IP - ueberspringe Web-Tools", host)
-        for tool in ("httpx", "nikto", "wafw00f", "testssl", "ffuf", "nuclei"):
-            tool_execution.record(
-                engagement_id, scan_run_id=scan_run_id, tool=tool, phase="fingerprint",
-                authorized_target=host, resolved_target=None,
-                port_range=str(single_port or 443),
-                result=tool_execution.failed_result("materialized_ip_missing"),
-            )
-        return services
+        _record_missing_ip(engagement_id, host, scan_run_id, single_port)
+        return None, None
     live = _http_probe(engagement_id, aid, host, scan_run_id, single_port)
     if live is None:
-        logger.info("%s:%s nicht als lebender HTTP-Dienst bestaetigt - ueberspringe Web-Tools", host, single_port or 443)
-        return services
-    services.append(live)
+        logger.info("%s:%s not confirmed as a live HTTP service - skipping web tools", host, single_port or 443)
+        return None, None
+    port = single_port or 443
     # REQ-FIDELITY-009: httpx has just reported the scheme it actually reached
-    # this host/port with. Every tool below needs an EXPLICIT scheme (none of
-    # them auto-probe), so hand them the confirmed one instead of the blanket
+    # this host/port with. Every tool needs an EXPLICIT scheme (none of them
+    # auto-probe), so hand them the confirmed one instead of the blanket
     # https:// default - against a plain-HTTP service the forced https:// made
     # nuclei/nikto silently return nothing at all.
-    confirmed_protocol = protocol_from_httpx_url(live.get("url", ""))
+    protocol = protocol_from_httpx_url(live.get("url", ""))
+    profile = build_profile(
+        httpx_tech=live.get("tech") or [], webserver=live.get("webserver"),
+        nmap_products=_nmap_product_for(nmap_services, port),
+    )
+    surface = {
+        "host": host, "ip": ip, "port": port, "scheme": protocol, "service_class": "web", "asset_id": aid,
+        "profile": profile, "fingerprint": _surface_fingerprint(live, protocol),
+    }
 
-    # Cheap and always per-name: a WAF verdict is context for reading every
-    # later result, and costs ~1s.
-    _waf_detect(engagement_id, aid, host, scan_run_id, single_port, confirmed_protocol=confirmed_protocol)
-    # Per-name by definition: the certificate presented for one hostname says
-    # nothing about another, so this is never deduplicated. Still skips a port
-    # httpx just confirmed is not TLS at all.
-    _tls_scan(engagement_id, aid, host, ip, scan_run_id, single_port, confirmed_protocol=confirmed_protocol)
+    # REQ-PIPE-001: a port that only redirects to another surface of this same
+    # host, live in this run, is an alias of it. It keeps its httpx result and
+    # gets no deep checks; the target surface gets them once.
+    live_ports = ctx.live_web_ports.setdefault(host.lower(), set())
+    alias_port = redirect_alias_port(live.get("status_code"), live.get("location"), host, port, live_ports)
+    if alias_port is not None:
+        logger.info("%s:%s only redirects to %s:%s - alias, skipping deep checks", host, port, host, alias_port)
+        surface.update(service_class="web_alias", alias_of=f"{host}:{alias_port}")
+        return live, surface
+    live_ports.add(port)
 
     # REQ-FPEFF-004: the expensive tools run once per distinct web SURFACE.
     # Virtual hosting means one IP:port serves different content per Host
     # header, so this is keyed on httpx's response fingerprint, never on the
     # address alone. An unknown fingerprint is never deduplicated.
-    surface = _web_surface_key(ip, single_port, live)
-    if surface is not None and surface in ctx.web_surfaces:
-        covered_by = ctx.web_surfaces[surface]
-        logger.info(
-            "%s:%s liefert dieselbe Web-Oberflaeche wie %s - ueberspringe nikto/ffuf/nuclei",
-            host, single_port or 443, covered_by,
-        )
-        _record_deep_skip(engagement_id, host, ip, scan_run_id, single_port, covered_by)
-        return services
-    if surface is not None:
-        ctx.web_surfaces[surface] = host
+    key = _web_surface_key(ip, single_port, live)
+    if key is not None and key in ctx.web_surfaces:
+        covered_by = ctx.web_surfaces[key]
+        logger.info("%s:%s serves the same web surface as %s - skipping the deep checks", host, port, covered_by)
+        surface["fingerprint"]["duplicate_of"] = covered_by
+    elif key is not None:
+        ctx.web_surfaces[key] = host
+    return live, surface
 
-    _web_enum(engagement_id, aid, host, scan_run_id, single_port, confirmed_protocol=confirmed_protocol)
-    _content_discovery(engagement_id, aid, host, scan_run_id, single_port, confirmed_protocol=confirmed_protocol)
-    # Most expensive by far (~4m37s observed) - last, so everything cheaper has
-    # already been recorded if the run is cut short.
-    _nuclei_scan(engagement_id, aid, host, scan_run_id, single_port, confirmed_protocol=confirmed_protocol)
-    return services
+
+def _non_web_surfaces(
+    aid: str, host: str, ip: str | None, nmap_services: list[dict], taken_ports: set[int],
+) -> list[dict]:
+    """One surface per open TCP port that is not a live web service (REQ-PIPE-001)."""
+    rows: list[dict] = []
+    seen: set[int] = set()
+    for svc in nmap_services:
+        try:
+            port = int(svc["port"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if port in taken_ports or port in seen or str(svc.get("protocol") or "tcp").lower() != "tcp":
+            continue
+        seen.add(port)
+        service_class, starttls = classify_open_port(port, svc.get("service_name"), svc.get("product"))
+        fingerprint = {"service_name": svc.get("service_name"), "product": svc.get("product"), "version": svc.get("version")}
+        if starttls:
+            fingerprint["starttls"] = starttls
+        rows.append({
+            "host": host, "ip": ip, "port": port, "scheme": None, "service_class": service_class, "asset_id": aid,
+            "profile": build_profile(nmap_products=_nmap_product_for(nmap_services, port)),
+            "fingerprint": {k: v for k, v in fingerprint.items() if v},
+        })
+    return rows
 
 
 def _materialize(engagement_id: str, scan_run_id: str | None) -> dict[str, str]:
@@ -794,8 +920,21 @@ def _materialize(engagement_id: str, scan_run_id: str | None) -> dict[str, str]:
     return ip_by_host
 
 
-def run(engagement_id: str, discovered: list[dict], scan_run_id: str | None = None) -> list[dict]:
-    """discovered: Ergebnis von discovery.run() - [{"value": ..., "asset_id": ...}]."""
+def _index_info() -> IndexInfo:
+    """Template counts of the runner image's index, for sizing the nuclei calls.
+    When the runner cannot answer, the plan uses the last measured counts and
+    each call re-resolves its own count when it runs."""
+    try:
+        summary = tool_runner.nuclei_index_summary()
+        return IndexInfo(generic=int(summary["generic"]), total=int(summary["total"]), known=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nuclei template index summary unavailable: %s", exc)
+        return IndexInfo()
+
+
+def _discover_surfaces(engagement_id: str, discovered: list[dict], scan_run_id: str | None) -> tuple[list[dict], list[dict]]:
+    """Stages S3 and S4 for every approved asset: port scan (once per IP), then
+    classify each open port as a surface. Returns (services, surface rows)."""
     # DNS-Materialisierung (auditiert): liefert Namen->IP fuer Tools, die DNS
     # lokal aufloesen (testssl) und speist zugleich die Egress-Proxy-IP-
     # Freigabe (resolved_host).
@@ -803,18 +942,19 @@ def run(engagement_id: str, discovered: list[dict], scan_run_id: str | None = No
     try:
         ip_by_host = _materialize(engagement_id, scan_run_id)
     except Exception as exc:  # noqa: BLE001 - Materialisierung ist best effort
-        logger.warning("DNS-Materialisierung fehlgeschlagen: %s", exc)
+        logger.warning("DNS materialization failed: %s", exc)
 
     ctx = _RunContext()
     all_services: list[dict] = []
+    surfaces: list[dict] = []
     for asset in discovered:
         aid, host = asset["asset_id"], asset["value"]
         # REQ-FIDELITY-003/REQ-PORTSCOPE-004: bei einem einzelnen, autorisierten
-        # Nicht-Standard-Port (z. B. 4280) zielen httpx/nikto/wafw00f/testssl/
-        # nuclei auf DIESEN Port statt implizit auf 443 - sonst wird der
-        # autorisierte Dienst nie getestet. Per-Host aufgeloest (nicht einmal
-        # vorab fuer das ganze Engagement), da verschiedene Ziele im selben
-        # Auftrag unterschiedliche Portbereiche haben koennen.
+        # Nicht-Standard-Port (z. B. 4280) zielen die Web-Tools auf DIESEN Port
+        # statt implizit auf 443 - sonst wird der autorisierte Dienst nie
+        # getestet. Per-Host aufgeloest (nicht einmal vorab fuer das ganze
+        # Engagement), da verschiedene Ziele im selben Auftrag unterschiedliche
+        # Portbereiche haben koennen.
         envelope = client.get_scan_envelope(uuid.UUID(engagement_id), host=host)
         single_port = _single_port_from_envelope(envelope)
         ip = ip_by_host.get(host.lower())
@@ -839,7 +979,7 @@ def run(engagement_id: str, discovered: list[dict], scan_run_id: str | None = No
                 # Do not scan against a snapshot known to be stale: the lease
                 # would deny it anyway, and proceeding would be scanning an IP
                 # the control plane has not just re-confirmed.
-                logger.warning("DNS-Neumaterialisierung fuer %s fehlgeschlagen: %s", host, exc)
+                logger.warning("DNS re-materialization for %s failed: %s", host, exc)
                 tool_execution.record(
                     engagement_id, scan_run_id=scan_run_id, tool="nmap", phase="fingerprint",
                     authorized_target=host, resolved_target=ip, port_range="configured_tcp",
@@ -863,8 +1003,211 @@ def run(engagement_id: str, discovered: list[dict], scan_run_id: str | None = No
         else:
             web_ports = _web_candidate_ports(nmap_services, scan_succeeded=scan_succeeded)
 
+        web_taken: set[int] = set()
         for port in web_ports:
             # None => https default (443); an explicit port => https://host:port.
             probe_port = None if port == 443 else port
-            all_services.extend(_web_suite(ctx, engagement_id, aid, host, ip, scan_run_id, probe_port))
-    return all_services
+            live, surface = _probe_web_surface(ctx, engagement_id, aid, host, ip, scan_run_id, probe_port, nmap_services)
+            if live is not None and surface is not None:
+                all_services.append({**live, "service_id": live.get("service_id"), "asset_id": aid, "target": host})
+                surfaces.append(surface)
+                web_taken.add(port)
+        surfaces.extend(_non_web_surfaces(aid, host, ip, nmap_services, web_taken))
+    return all_services, surfaces
+
+
+def _plan_payload(surfaces: list[dict], options: Options, index: IndexInfo) -> list[dict]:
+    """The API shape of a plan: each surface row with its planned/skipped checks."""
+    payload = []
+    for row in surfaces:
+        fingerprint = row.get("fingerprint") or {}
+        surface_input = SurfaceInput(
+            host=row["host"], port=row["port"], service_class=row["service_class"], scheme=row.get("scheme"),
+            profile=tuple(row.get("profile") or ()), alias_of=row.get("alias_of"),
+            duplicate_of=fingerprint.get("duplicate_of"), starttls=fingerprint.get("starttls"),
+        )
+        checks = plan_surface(surface_input, options, index)
+        payload.append({**row, "checks": [
+            {"check_id": c.check_id, "tool": c.tool, "state": c.state, "reason": c.reason, "args": c.args,
+             "depends_on": c.depends_on, "budget_s": c.budget_s}
+            for c in checks
+        ]})
+    return payload
+
+
+# --- Check handlers: one function per planned check (REQ-PIPE-003) ---------------------
+
+def _live_from_surface(r: CheckRun) -> dict:
+    fp = r.fingerprint
+    return {"status_code": fp.get("status_code"), "headers": fp.get("headers") or {}, "service_id": fp.get("service_id")}
+
+
+def _h_header_findings(r: CheckRun) -> None:
+    _header_findings(r.engagement_id, r.asset_id, r.host, _live_from_surface(r), r.single_port, confirmed_protocol=r.protocol)
+
+
+def _h_waf(r: CheckRun) -> None:
+    _waf_detect(r.engagement_id, r.asset_id, r.host, r.scan_run_id, r.single_port, confirmed_protocol=r.protocol)
+
+
+def _h_testssl(r: CheckRun) -> None:
+    if r.surface.get("service_class") == "tls_service":
+        fp = r.fingerprint
+        _tls_service_scan(r.engagement_id, r.asset_id, r.host, r.surface.get("ip"), r.scan_run_id, r.port,
+                          (r.check.get("args") or {}).get("starttls") or fp.get("starttls"), fp.get("service_name"))
+        return
+    _tls_scan(r.engagement_id, r.asset_id, r.host, r.surface.get("ip"), r.scan_run_id, r.single_port,
+              confirmed_protocol=r.protocol)
+
+
+def _h_ffuf(r: CheckRun) -> None:
+    _content_discovery(r.engagement_id, r.asset_id, r.host, r.scan_run_id, r.single_port,
+                       confirmed_protocol=r.protocol)
+
+
+def _h_screenshot(r: CheckRun) -> None:
+    _screenshot(r.engagement_id, r.asset_id, r.host, r.scan_run_id, r.single_port, r.protocol)
+
+
+def _h_katana(r: CheckRun) -> None:
+    urls = _crawl(r.engagement_id, r.asset_id, r.host, r.scan_run_id, r.single_port, r.protocol)
+    r.outcome_summary["candidate_urls"] = urls[:50]
+    r.outcome_summary["candidate_url_count"] = len(urls)
+
+
+def _h_nuclei_endpoints(r: CheckRun) -> None:
+    urls = list(((r.dependencies.get("katana") or {}).get("outcome_summary") or {}).get("candidate_urls") or [])
+    if not urls:
+        r.skip("no_endpoints")
+        return
+    r.args = {**(r.check.get("args") or {}), "urls": urls}
+    _nuclei_endpoints_pass(r.engagement_id, r.asset_id, r.host, r.scan_run_id, r.single_port, r.protocol, urls)
+
+
+def _h_nuclei_fixed(r: CheckRun) -> None:
+    mode = (r.check.get("args") or {}).get("mode")
+    url = _target_url(r.host, r.single_port, r.protocol)
+    _nuclei_pass(r.engagement_id, r.asset_id, r.host, url, {"mode": mode}, r.scan_run_id, r.single_port)
+
+
+def _h_nuclei_oob(r: CheckRun) -> None:
+    args = r.check.get("args") or {}
+    url = _target_url(r.host, r.single_port, r.protocol)
+    _nuclei_pass(r.engagement_id, r.asset_id, r.host, url, {"mode": "oob", "part": args.get("part")},
+                 r.scan_run_id, r.single_port)
+
+
+def _h_nuclei_tech(r: CheckRun) -> None:
+    """REQ-PIPE-002: nuclei's technology-detection templates enrich the surface's
+    profile, so the product-bound templates that follow match what is really there."""
+    url = _target_url(r.host, r.single_port, r.protocol)
+    args = {"mode": "tech"}
+    if _propose(r.engagement_id, "nuclei", "vuln", r.host, args, r.scan_run_id) is None:
+        return
+    try:
+        result = tool_runner.run("nuclei", url, args, scan_run_id=r.scan_run_id, engagement_id=r.engagement_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nuclei technology detection failed for %s: %s", r.host, exc)
+        result = tool_execution.failed_result("runner_dispatch_failed", exc)
+    names = parse_nuclei_tech(result.get("stdout", "")) if tool_execution.usable_output(result) else []
+    tool_execution.record(
+        r.engagement_id, scan_run_id=r.scan_run_id, tool="nuclei", phase="fingerprint",
+        authorized_target=r.host, resolved_target=None, port_range=str(r.port), result=result,
+    )
+    if not names:
+        return
+    merged = build_profile(extra=names, nmap_products=[], httpx_tech=[])
+    known = list(r.surface.get("profile") or [])
+    profile = list(dict.fromkeys([*known, *merged]))[:MAX_PROFILE_ENTRIES]
+    client.update_scan_surface(r.scan_run_id, r.surface["id"], profile=profile)
+    r.surface["profile"] = profile
+    r.outcome_summary["detected"] = names[:20]
+
+
+def _h_nuclei_select(r: CheckRun) -> None:
+    """One selection of the template index (REQ-PIPE-004): resolve what it holds
+    now (a product selection follows the surface's profile as the technology
+    check left it), size the call's budget from the template count, run it."""
+    args = dict(r.check.get("args") or {})
+    if args.pop("from_profile", False):
+        keys, reason = resolve_products(r.surface.get("profile") or [])
+        args["products"] = keys
+        r.reason = reason
+    selection = {k: v for k, v in args.items() if k in ("mode", "group", "shard", "products")}
+    r.args = {**selection, **({"from_profile": True} if (r.check.get("args") or {}).get("from_profile") else {})}
+    try:
+        count = tool_runner.nuclei_selection_count(selection)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nuclei selection could not be resolved for %s: %s", r.host, exc)
+        tool_execution.record(
+            r.engagement_id, scan_run_id=r.scan_run_id, tool="nuclei", phase="fingerprint",
+            authorized_target=r.host, resolved_target=None, port_range=str(r.port),
+            result=tool_execution.failed_result("selection_unavailable", exc),
+        )
+        return
+    r.outcome_summary["templates"] = count
+    if count == 0:
+        r.skip("no_matching_templates")
+        return
+    r.budget_s = nuclei_select_budget_s(count)
+    url = _target_url(r.host, r.single_port, r.protocol)
+    _nuclei_pass(r.engagement_id, r.asset_id, r.host, url, selection, r.scan_run_id, r.single_port, budget_s=r.budget_s)
+
+
+def resolve_handler(check: dict) -> Handler | None:
+    """The handler for one check row, chosen from its tool and mode only."""
+    tool, check_id = check.get("tool"), check.get("check_id")
+    mode = (check.get("args") or {}).get("mode")
+    if check_id == "header_findings":
+        return _h_header_findings
+    simple = {"wafw00f": _h_waf, "testssl": _h_testssl, "ffuf": _h_ffuf, "screenshot": _h_screenshot, "katana": _h_katana}
+    if tool in simple:
+        return simple[tool]
+    if tool == "nuclei":
+        return {
+            "select": _h_nuclei_select, "tech": _h_nuclei_tech, "headless": _h_nuclei_fixed,
+            "takeover": _h_nuclei_fixed, "endpoints": _h_nuclei_endpoints, "oob": _h_nuclei_oob,
+        }.get(mode)
+    return None
+
+
+def run(
+    engagement_id: str, discovered: list[dict], scan_run_id: str | None = None,
+    resume_services: list[dict] | None = None,
+) -> list[dict]:
+    """discovered: Ergebnis von discovery.run() - [{"value": ..., "asset_id": ...}].
+
+    Stages S3-S6 of the scan pipeline: discover and classify the surfaces, plan
+    the checks, execute them. A resumed run (resume_services holds what the first
+    attempt found) reads its stored plan and continues with the checks that were
+    not finished (REQ-PIPE-008)."""
+    settings = client.get_scan_settings(uuid.UUID(engagement_id))
+    plan_exists = False
+    if scan_run_id is not None and resume_services is not None:
+        try:
+            plan_exists = bool(client.get_scan_plan(scan_run_id).get("surfaces"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("stored scan plan could not be read, discovering again: %s", exc)
+    if plan_exists:
+        logger.info("scan_run %s resumed: continuing the stored plan", scan_run_id)
+        services = list(resume_services or [])
+    else:
+        services, surfaces = _discover_surfaces(engagement_id, discovered, scan_run_id)
+        if scan_run_id is None:
+            return services
+        options_raw = _RunContext().discovery_options(engagement_id)
+        options = Options(
+            crawling=bool(options_raw.get("crawling")), screenshots=bool(options_raw.get("screenshots")),
+            oob=bool(options_raw.get("oob")), oob_available=bool(OOB_SERVER_URL),
+            scan_profile=settings["scan_profile"], disabled_tools=frozenset(settings.get("disabled_tools") or ()),
+        )
+        client.store_scan_plan(scan_run_id, _plan_payload(surfaces, options, _index_info()))
+        client.update_scan_run(scan_run_id, checkpoint={"fp_services": json.loads(json.dumps(services, default=str))})
+    if scan_run_id is None:
+        return services
+    scan_executor.execute_plan(
+        client=client, scan_run_id=scan_run_id, engagement_id=engagement_id, resolve_handler=resolve_handler,
+        max_parallel=settings["max_parallel_checks"],
+        is_cancelled=lambda: client.is_cancel_requested(scan_run_id),
+    )
+    return services

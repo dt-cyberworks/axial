@@ -162,31 +162,28 @@ POST /admin/users/{id}/reset-mfa   (admin only)
   -> account_audit_log: action=mfa_reset, actor=admin, payload={target_user_id}
 ```
 
-## 4. Session transport (keeps today's dual-channel shape)
+## 4. Session transport (cookie-only since GitHub issue #41)
 
-The current frontend already uses two channels for a reason: `fetch()` calls
-carry a `Bearer` token from `sessionStorage` (immune to CSRF — cross-site
-requests can't set custom headers), while `EventSource` (SSE) cannot send
-custom headers at all and instead relies on a cookie
-(`bootstrapBrowserSession` in `api/client.ts`). This design keeps that exact
-shape, just backed by a real per-user session instead of the shared token:
+The session lives only in an `HttpOnly` cookie. Earlier versions also returned
+the raw token in the response body and kept it in `sessionStorage`, where any
+script in the page could read it; that copy is gone (REQ-IAM-018,
+[`../requirements/cookie-only-sessions.md`](../requirements/cookie-only-sessions.md)).
 
-- `POST /auth/login/mfa` (and the enrollment-confirm equivalent) returns the
-  raw session token once in the JSON body. The frontend stores it in
-  `sessionStorage` (as `asm_session_token`, replacing today's
-  `asm_operator_token`) and sends it as `Authorization: Bearer <token>` on
-  every API call — unchanged mechanism in `api/client.ts`, new value.
-- The same request also sets a `session` cookie
-  (`HttpOnly; Secure (prod); SameSite=Strict`) carrying the same raw token,
-  scoped narrowly to SSE (`GET /engagements/{id}/stream`) — mirrors today's
-  `bootstrapBrowserSession`/`asm_operator_session` exactly, just derived
-  from the real session instead of the shared secret.
-- Every authenticated request resolves the presented raw token by hashing it
-  and looking up `user_session.token_hash` — never compares raw tokens,
-  never stores one. Expired/revoked sessions fail closed (401).
-- `require_user` (replaces `require_operator` as the dependency on
-  `public_router`) does this resolution and attaches the `User` to request
-  state; `require_admin` additionally checks `role == "admin"`.
+- `POST /auth/login/mfa` (and the enrollment-confirm, change-password and
+  MFA re-enrollment equivalents) sets the `session` cookie
+  (`HttpOnly; Secure (prod); SameSite=Strict; Path=/`) and returns no token.
+- The console sends `credentials: "include"` on every `fetch()`, file download
+  and the `EventSource` stream; the browser attaches the cookie. Rotation on
+  password change / MFA re-enrollment replaces the cookie in the same response.
+- A cookie is an ambient credential, so state-changing requests
+  (`POST/PUT/PATCH/DELETE`) that rely on it must carry
+  `X-Requested-With: asm-console` and, when the browser sends `Origin` (or
+  `Referer`), that origin's host must be the request's own host or a
+  configured trusted origin (`CSRF_TRUSTED_ORIGINS`). Enforced in
+  `security.enforce_csrf`, called from `require_user` (REQ-IAM-019).
+- Non-browser clients (the UAT harness) may send the same session as
+  `Authorization: Bearer`; that header is never attached by a browser on its
+  own, so those requests are exempt from the CSRF check.
 
 ## 5. Per-engagement ownership enforcement (REQ-IAM-007)
 
@@ -270,8 +267,8 @@ is additive (a new profile), not a rework of the dev path.
 |---|---|
 | Credential stuffing against exposed login | Argon2id hashing, progressive per-account lockout (REQ-IAM-006), generic error responses |
 | Stolen DB dump | Passwords/backup codes/session tokens are hashed, never stored raw; TOTP secrets are encrypted with a key that is not in the database |
-| Session token theft (XSS) | Same residual risk as today's Bearer-token-in-sessionStorage model — out of scope for this pass; mitigated in depth by short idle expiry (12h) and full revocability (REQ-IAM-005), not by this change alone |
-| CSRF | Bearer-header auth for all state-changing calls is not automatically attachable cross-site; the SSE cookie is `SameSite=Strict` and read-only (`GET`) |
+| Session token theft (XSS) | The token is `HttpOnly` and never in a response body or web storage (REQ-IAM-018); an injected script can still act as the user while the page is open, but cannot exfiltrate a reusable session. Also limited by short idle expiry (12h) and full revocability (REQ-IAM-005), and the CSP (REQ-WEBSEC) |
+| CSRF | Cookie is `SameSite=Strict`; in addition every cookie-authenticated state-changing request needs the `X-Requested-With: asm-console` header and a matching `Origin`/`Referer` (REQ-IAM-019) |
 | One compromised account seeing all data | Per-user ownership (REQ-IAM-007) bounds the blast radius to that user's own engagements unless the compromised account is itself an admin |
 | Lost phone / lost admin access | Backup codes (self-service) + admin-forced MFA reset (REQ-IAM-004); first-admin bootstrap is infra-level, not an app code path (REQ-IAM-008) |
 | Public route to `/internal/*` | Unchanged: `require_internal_token` plus, in production, the edge proxy simply never routes there |

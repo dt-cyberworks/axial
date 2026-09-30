@@ -77,29 +77,9 @@ def test_osint_source_survives_http_error(monkeypatch):
     assert discovery._query_hackertarget("example.com") == set()
 
 
-# --- REQ-SCANQUAL-002: nikto broad non-intrusive tuning --------------------
-
-def test_nikto_uses_non_intrusive_broad_tuning(monkeypatch):
-    captured = {}
-
-    def fake_run(tool, target, args, scan_run_id=None, engagement_id=None):
-        captured["tool"], captured["args"] = tool, args
-        return {"success": True, "stdout": ""}
-
-    monkeypatch.setattr(fingerprint.tool_runner, "run", fake_run)
-    monkeypatch.setattr(fingerprint, "_propose", lambda *a, **k: {"allowed": True})
-    monkeypatch.setattr(fingerprint.tool_execution, "record", lambda *a, **k: None)
-    monkeypatch.setattr(fingerprint.client, "add_service", lambda *a, **k: {"id": "svc"})
-    monkeypatch.setattr(fingerprint, "parse_nikto_missing_headers", lambda s: [])
-
-    fingerprint._web_enum(EID, "aid", "host.example.com", "run-1", single_port=None)
-
-    assert captured["tool"] == "nikto"
-    tuning = captured["args"]["additional_args"]
-    assert "-Tuning 123b" in tuning
-    # intrusive/destructive categories must NOT be requested
-    for bad in ("4", "5", "6", "7", "8", "9", "0", "a", "c"):
-        assert f"-Tuning {bad}" not in tuning
+# --- REQ-SCANQUAL-002 (superseded by REQ-PIPE-013, johannes 2026-09-29) ------
+# The automatic pipeline no longer runs nikto; its removal and the header
+# findings that replace it are tested in test_scan_pipeline_v2.py.
 
 
 # --- REQ-SCANQUAL-003: web tools cover nmap-discovered ports ----------------
@@ -130,8 +110,8 @@ def test_run_web_enumerates_each_nmap_web_port_when_window_is_broad(monkeypatch)
                                           {"port": 8080, "product": "nginx", "protocol": "tcp"}], True))
 
     suite_ports = []
-    monkeypatch.setattr(fingerprint, "_web_suite",
-                        lambda ctx, eid, aid, host, ip, run, single_port: suite_ports.append(single_port) or [])
+    monkeypatch.setattr(fingerprint, "_probe_web_surface",
+                        lambda ctx, eid, aid, host, ip, run, single_port, nmap_services: suite_ports.append(single_port) or (None, None))
 
     fingerprint.run(EID, [{"asset_id": "asset-1", "value": "host.example.com"}], scan_run_id="run-1")
 
@@ -146,8 +126,8 @@ def test_run_single_port_still_pins_all_web_tools_to_that_port(monkeypatch):
                         lambda *a, **k: ([{"port": 8080, "product": "nginx", "protocol": "tcp"}], True))
 
     suite_ports = []
-    monkeypatch.setattr(fingerprint, "_web_suite",
-                        lambda ctx, eid, aid, host, ip, run, single_port: suite_ports.append(single_port) or [])
+    monkeypatch.setattr(fingerprint, "_probe_web_surface",
+                        lambda ctx, eid, aid, host, ip, run, single_port, nmap_services: suite_ports.append(single_port) or (None, None))
 
     fingerprint.run(EID, [{"asset_id": "asset-1", "value": "host.example.com"}], scan_run_id="run-1")
 

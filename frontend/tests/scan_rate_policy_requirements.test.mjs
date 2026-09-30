@@ -47,7 +47,7 @@ test("REQ-RATE-001 exposes configurable rate limit in Settings", () => {
 test("REQ-RATE-002 auto slow down produces throttle retry path without bypass", () => {
   requirement("REQ-RATE-002");
   contains(settingsPage, "Automatically slow down and retry rate-limited tool calls", "Settings must expose auto slow down toggle");
-  contains(gateway, 'THROTTLE("rate_limited_wait", retry_after)', "Gateway must return soft throttle when enabled");
+  contains(gateway, 'THROTTLE("rate_limited_wait", reservation.retry_after_seconds)', "Gateway must return soft throttle when enabled");
   contains(gateway, 'audit_decision = "PENDING" if decision.is_pending else ("THROTTLE"', "Gateway audit must record THROTTLE distinctly");
   contains(gateway, 'payload["retry_after_seconds"]', "Gateway audit payload must include retry delay");
   contains(internalSchema, "is_throttled: bool = False", "Internal schema must expose throttled flag");

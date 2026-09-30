@@ -16,6 +16,10 @@ sends each user's IP address to a third party (a German court held this
 unlawful under the GDPR in 2022, LG München I, 3 O 17493/20) and would
 have forced foreign origins into the CSP.
 
+(Update, GitHub issue #41 / REQ-IAM-018: the session token no longer lives in
+`sessionStorage`; it is an `HttpOnly` cookie. The CSP remains the control that
+limits what an injected script can do.)
+
 **Risk class: R3** (edge configuration of the public entrypoint). Needs
 human security review and a live check after deployment.
 

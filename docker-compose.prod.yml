@@ -59,6 +59,35 @@ services:
   tool-runner:
     environment:
       ENVIRONMENT: production
+      # REQ-COVER-004: the dev default token is public in this repo.
+      OOB_TOKEN: ${OOB_TOKEN:?set OOB_TOKEN to a real secret - the dev default is public in this repo}
+
+  # REQ-COVER-004: the interaction server needs a real domain (delegated to
+  # this host) and the same token in production.
+  interactsh:
+    command:
+      - -domain
+      - ${OOB_DOMAIN:-oob.invalid}
+      - -token
+      - ${OOB_TOKEN:?set OOB_TOKEN to a real secret - the dev default is public in this repo}
+      - -http-port
+      - "8080"
+      - -https-port
+      - "8443"
+      - -dns-port
+      - "5353"
+      - -smtp-port
+      - "2525"
+      - -smtps-port
+      - "2587"
+      - -smtp-autotls-port
+      - "2465"
+      - -ldap-port
+      - "2389"
+      - -skip-acme
+      - -disable-update-check
+      - -eviction
+      - "${OOB_RETENTION_DAYS:-7}"
 
   minio:
     environment:
@@ -78,6 +107,13 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # REQ-HARDEN-003: see docker-compose.edge.yml. Still root: REQ-HARDEN-004.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     volumes:
       - caddy_data:/data
       - caddy_config:/config

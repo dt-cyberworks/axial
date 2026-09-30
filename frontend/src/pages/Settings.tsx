@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, LlmConfig, NvdConfig, ToolPolicyEntry } from "../api/client";
+import SubfinderKeys from "../components/SubfinderKeys";
 
 const SOURCE_LABEL: Record<LlmConfig["source"], string> = {
   db: "configured in console",
@@ -249,6 +250,8 @@ export default function Settings() {
           {nvdMutation.isSuccess && <div className="success-block">Saved.</div>}
         </form>
       </section>
+
+      <SubfinderKeys />
 
       <section className="form-panel settings-panel">
         <h2>Tool policy (global defaults)</h2>

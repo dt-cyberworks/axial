@@ -9,6 +9,8 @@ Schluessel unveraendert bleiben soll.
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -22,6 +24,7 @@ from app.settings_store import (
     MIN_AGENT_MAX_ITERATIONS,
     MIN_AGENT_MAX_TOKENS,
     MIN_APPROVAL_TIMEOUT_SECONDS,
+    SUBFINDER_PROVIDERS,
     SettingsCipherUnavailable,
     get_global_agent_max_iterations,
     get_global_agent_max_tokens,
@@ -38,6 +41,8 @@ from app.settings_store import (
     set_llm_config,
     set_nvd_config,
     set_scan_policy,
+    set_subfinder_keys,
+    subfinder_providers_with_key,
 )
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -119,6 +124,40 @@ def update_nvd_config(body: NvdConfigIn, db: Session = Depends(get_db)):
     except SettingsCipherUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
     return NvdConfigOut(api_key_set=bool(cfg.api_key), source=cfg.source)
+
+
+class SubfinderKeysOut(BaseModel):
+    providers: list[dict]  # [{"name": str, "key_set": bool}] - the keys themselves are never returned
+
+
+class SubfinderKeysIn(BaseModel):
+    # provider -> key. Omitted = unchanged, "" = remove. Unknown providers are rejected.
+    keys: dict[str, str | None] = Field(default_factory=dict)
+
+
+def _subfinder_out(configured: list[str]) -> SubfinderKeysOut:
+    return SubfinderKeysOut(providers=[{"name": n, "key_set": n in configured} for n in SUBFINDER_PROVIDERS])
+
+
+@router.get("/subfinder", response_model=SubfinderKeysOut)
+def read_subfinder_keys(db: Session = Depends(get_db)):
+    return _subfinder_out(subfinder_providers_with_key(db))
+
+
+@router.put("/subfinder", response_model=SubfinderKeysOut)
+def update_subfinder_keys(body: SubfinderKeysIn, db: Session = Depends(get_db)):
+    for name, value in body.keys.items():
+        if name not in SUBFINDER_PROVIDERS:
+            raise HTTPException(422, f"unknown subfinder provider: {name}")
+        # The worker writes these into subfinder's provider file, so only plain
+        # token characters are accepted (no YAML syntax, no whitespace).
+        if value is not None and value.strip() and not re.fullmatch(r"[A-Za-z0-9._:-]{1,256}", value.strip()):
+            raise HTTPException(422, f"invalid key format for {name}")
+    try:
+        configured = set_subfinder_keys(db, body.keys)
+    except SettingsCipherUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return _subfinder_out(configured)
 
 
 @router.get("/scan-policy", response_model=ScanPolicyOut)

@@ -7,7 +7,7 @@ from app.config import get_settings
 settings = get_settings()
 app = FastAPI(
     title="ASM Control Plane",
-    description="Orchestrator + Scope Gateway. Siehe docs/spec/ fuer die volle Architektur-Spezifikation.",
+    description="Orchestrator + Scope Gateway. See docs/spec/ for the full architecture specification.",
     version="0.1.0",
     docs_url=None if settings.environment.lower() == "production" else "/docs",
     redoc_url=None if settings.environment.lower() == "production" else "/redoc",

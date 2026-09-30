@@ -17,3 +17,20 @@ os.environ.setdefault("MFA_ENCRYPTION_KEY", Fernet.generate_key().decode())
 # DISTINCT generated key - tests that set/read an LLM or NVD provider API
 # key need a valid SETTINGS_ENCRYPTION_KEY.
 os.environ.setdefault("SETTINGS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_login_rate_limit(monkeypatch):
+    """REQ-IAM-016: many tests sign in from the same test client address. Each
+    test starts with empty windows, and never counts against a Redis that
+    happens to run on this machine (test_login_rate_limit.py tests the Redis
+    path against its own throwaway Redis)."""
+    from app import rate_limit
+
+    rate_limit.reset_for_tests()
+    monkeypatch.setattr(rate_limit, "_redis_skip_until", float("inf"))
+    yield
+    rate_limit.reset_for_tests()

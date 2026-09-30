@@ -116,6 +116,8 @@ def build_env(
         "SCOPE_SIGNING_SECRET": _token(32),
         "RAW_EGRESS_SIGNING_SECRET": _token(32),
         "RUNNER_API_TOKEN": _token(32),
+        "RAW_EGRESS_API_TOKEN": _token(32),  # docker-compose.prod.yml requires it (issue #22)
+        "OOB_TOKEN": _token(32),  # REQ-COVER-004: interaction-server token (prod overlay requires it)
         "MFA_ENCRYPTION_KEY": _fernet_key(),
         # --- bounded operational values (must stay within the gate's ranges) ---
         "RAW_EGRESS_LEASE_TTL_SECONDS": "900",

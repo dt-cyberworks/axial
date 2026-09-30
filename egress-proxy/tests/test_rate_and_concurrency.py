@@ -1,4 +1,5 @@
-"""GitHub issues #19 (fractional max_rps + widened-window flooring), #30
+"""GitHub issues #40 (max_rps reserved atomically before forwarding; #19's
+fractional-rate window now lives in the control plane's reservation), #30
 (BountyProgram.max_concurrency enforcement), #28 (event-loop-blocking DB
 calls, header read deadlines/size limits, CONNECT-relay idle/max duration)."""
 
@@ -42,54 +43,113 @@ def _in_scope_host(monkeypatch):
     proxy._concurrency_in_flight.clear()
 
 
-# --- REQ-CIDRDISC n/a - GitHub issue #19: fractional max_rps -----------------
+# --- GitHub issue #40: reserve a rate slot before forwarding ------------------
 
-@pytest.mark.parametrize("max_rps,expected_window", [
-    (0.2, 5), (0.5, 2), (1.0, 1.0), (1.5, 1.0), (2.5, 1.0),
-])
-def test_effective_rate_window_widens_only_below_one(max_rps, expected_window):
-    assert proxy._effective_rate_window(max_rps) == expected_window
-
-
-def test_negative_sub_one_max_rps_is_not_over_permissive(monkeypatch):
-    """The old code compared a raw count against a FIXED 1-second window
-    regardless of max_rps, so max_rps=0.5 permitted 1 req/s (2x over) and
-    max_rps=0.2 permitted 1 req/s (5x over). One ALLOW must now be enough to
-    deny the next call for the full widened window, not just 1 second."""
+def test_evaluate_no_longer_decides_the_rate(monkeypatch):
+    """The read-then-decide count is gone from evaluate(); the slot is reserved
+    atomically after every other check (see the forwarding tests below)."""
     monkeypatch.setattr(proxy, "load_engagement", lambda eid: _eng())
     monkeypatch.setattr(proxy, "bounty_program_for", lambda eid: _prog(max_rps=0.2, max_concurrency=99))
-
-    calls = {"window_seconds": None}
-
-    def fake_recent(eid, window_seconds=1.0):
-        calls["window_seconds"] = window_seconds
-        return 1  # one call already recorded
-
-    monkeypatch.setattr(proxy, "recent_allowed_count", fake_recent)
-
-    allowed, reason = asyncio.run(proxy.evaluate("E1", "host.example.com", "/", 443))
-
-    assert (allowed, reason) == (False, "rate_limited")
-    assert calls["window_seconds"] == 5  # ceil(1/0.2)
+    assert not hasattr(proxy, "recent_allowed_count")
+    assert asyncio.run(proxy.evaluate("E1", "host.example.com", "/", 443)) == (True, "allow")
 
 
-def test_zero_recent_calls_is_allowed_even_at_a_fractional_rate(monkeypatch):
+def _plain_http(monkeypatch, *, reserve, source="bug_bounty"):
+    audited, connected = [], []
+
+    async def fake_evaluate(eid, host, path, port):
+        return True, "allow"
+
+    async def fake_submit(_writer, _eid, decision, reason, payload):
+        audited.append((decision, reason))
+        return True
+
+    async def fake_open_connection(host, port):
+        connected.append((host, port))
+        return _Reader(), _Writer()
+
+    async def fake_relay(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(proxy, "evaluate", fake_evaluate)
+    monkeypatch.setattr(proxy, "vet_target_host", lambda host, port: host)
+    monkeypatch.setattr(proxy, "load_engagement", lambda eid: _eng(source=source))
+    monkeypatch.setattr(proxy, "bounty_program_for", lambda eid: _prog(max_rps=1, max_concurrency=5))
+    monkeypatch.setattr(proxy, "reserve_rate_slot", reserve)
+    monkeypatch.setattr(proxy, "_submit_audit_or_deny", fake_submit)
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    monkeypatch.setattr(proxy, "_relay", fake_relay)
+    writer = _Writer()
+    asyncio.run(proxy._forward_plain_http(
+        _Reader(), writer, "GET", "http://host.example.com/", {"host": "host.example.com"}, "E1"))
+    return audited, connected, writer
+
+
+def test_negative_no_reserved_slot_means_no_forwarding(monkeypatch):
+    audited, connected, writer = _plain_http(
+        monkeypatch, reserve=lambda eid: {"allowed": False, "reason": "rate_limited", "retry_after_seconds": 1.0})
+    assert audited == [("DENY", "rate_limited")]
+    assert connected == []
+    assert b"HTTP/1.1 403" in writer.data
+    assert "E1" not in proxy._concurrency_in_flight  # the concurrency slot was given back
+
+
+def test_negative_an_unreachable_control_plane_fails_closed(monkeypatch):
+    def down(eid):
+        raise OSError("control plane down")
+
+    audited, connected, _writer = _plain_http(monkeypatch, reserve=down)
+    assert audited == [("DENY", "rate_reservation_unavailable")]
+    assert connected == []
+
+
+def test_a_reserved_slot_forwards(monkeypatch):
+    calls = []
+    audited, connected, _writer = _plain_http(
+        monkeypatch, reserve=lambda eid: calls.append(eid) or {"allowed": True, "reason": "allow"})
+    assert calls == ["E1"]
+    assert audited == [("ALLOW", "allow")]
+    assert connected == [("host.example.com", 80)]
+
+
+def test_non_bug_bounty_requests_never_ask_for_a_slot(monkeypatch):
+    calls = []
+    audited, connected, _writer = _plain_http(
+        monkeypatch, source="own_domain", reserve=lambda eid: calls.append(eid) or {"allowed": False})
+    assert calls == []
+    assert audited == [("ALLOW", "allow")]
+    assert connected
+
+
+def test_negative_connect_without_a_reserved_slot_opens_no_tunnel(monkeypatch):
+    audited, connected = [], []
+
+    async def fake_evaluate(eid, host, path, port):
+        return True, "allow"
+
+    async def fake_submit(_writer, _eid, decision, reason, payload):
+        audited.append((decision, reason))
+        return True
+
+    async def fake_open_connection(host, port):
+        connected.append((host, port))
+        return _Reader(), _Writer()
+
+    monkeypatch.setattr(proxy, "evaluate", fake_evaluate)
+    monkeypatch.setattr(proxy, "vet_target_host", lambda host, port: host)
     monkeypatch.setattr(proxy, "load_engagement", lambda eid: _eng())
-    monkeypatch.setattr(proxy, "bounty_program_for", lambda eid: _prog(max_rps=0.2, max_concurrency=99))
-    monkeypatch.setattr(proxy, "recent_allowed_count", lambda eid, window_seconds=1.0: 0)
-
-    allowed, reason = asyncio.run(proxy.evaluate("E1", "host.example.com", "/", 443))
-    assert (allowed, reason) == (True, "allow")
-
-
-def test_rates_at_or_above_one_are_unaffected(monkeypatch):
-    monkeypatch.setattr(proxy, "load_engagement", lambda eid: _eng())
-    monkeypatch.setattr(proxy, "bounty_program_for", lambda eid: _prog(max_rps=2.5, max_concurrency=99))
-    monkeypatch.setattr(proxy, "recent_allowed_count", lambda eid, window_seconds=1.0: 2)
-
-    allowed, reason = asyncio.run(proxy.evaluate("E1", "host.example.com", "/", 443))
-    # threshold = int(2.5) = 2, count=2 >= 2 -> denied, same as pre-fix behavior
-    assert (allowed, reason) == (False, "rate_limited")
+    monkeypatch.setattr(proxy, "bounty_program_for", lambda eid: _prog(max_rps=1, max_concurrency=5))
+    monkeypatch.setattr(proxy, "reserve_rate_slot", lambda eid: {"allowed": False, "reason": "rate_limited"})
+    monkeypatch.setattr(proxy, "_submit_audit_or_deny", fake_submit)
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    engagement_id = "019649b8-0000-7000-8000-000000000001"
+    reader = _LineReader([b"CONNECT host.example.com:443 HTTP/1.1\r\n",
+                          f"X-ASM-Engagement-Id: {engagement_id}\r\n".encode(), b"\r\n"])
+    writer = _Writer()
+    asyncio.run(proxy._handle_client(reader, writer))
+    assert audited == [("DENY", "rate_limited")]
+    assert connected == []
+    assert engagement_id not in proxy._concurrency_in_flight
 
 
 # --- GitHub issue #30: max_concurrency enforcement --------------------------
@@ -114,7 +174,6 @@ def test_release_without_a_prior_acquire_is_a_safe_noop():
 def test_evaluate_denies_when_at_the_configured_concurrency_limit(monkeypatch):
     monkeypatch.setattr(proxy, "load_engagement", lambda eid: _eng())
     monkeypatch.setattr(proxy, "bounty_program_for", lambda eid: _prog(max_rps=99, max_concurrency=1))
-    monkeypatch.setattr(proxy, "recent_allowed_count", lambda eid, window_seconds=1.0: 0)
     proxy._concurrency_in_flight["E1"] = 1  # already at the configured max
 
     allowed, reason = asyncio.run(proxy.evaluate("E1", "host.example.com", "/", 443))
@@ -124,7 +183,6 @@ def test_evaluate_denies_when_at_the_configured_concurrency_limit(monkeypatch):
 def test_evaluate_allows_below_the_concurrency_limit(monkeypatch):
     monkeypatch.setattr(proxy, "load_engagement", lambda eid: _eng())
     monkeypatch.setattr(proxy, "bounty_program_for", lambda eid: _prog(max_rps=99, max_concurrency=2))
-    monkeypatch.setattr(proxy, "recent_allowed_count", lambda eid, window_seconds=1.0: 0)
     proxy._concurrency_in_flight["E1"] = 1
 
     allowed, reason = asyncio.run(proxy.evaluate("E1", "host.example.com", "/", 443))
@@ -180,6 +238,7 @@ def test_forward_plain_http_releases_the_concurrency_slot_even_on_relay_failure(
     monkeypatch.setattr(proxy, "load_engagement", lambda eid: _eng())
     monkeypatch.setattr(proxy, "bounty_program_for", lambda eid: _prog(max_rps=99, max_concurrency=1))
     monkeypatch.setattr(proxy, "_submit_audit_or_deny", fake_submit_audit_or_deny)
+    monkeypatch.setattr(proxy, "reserve_rate_slot", lambda eid: {"allowed": True, "reason": "allow"})
     monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
     monkeypatch.setattr(proxy, "_relay", failing_relay)
 

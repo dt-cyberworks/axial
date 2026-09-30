@@ -19,6 +19,9 @@ class RecordingClient:
         self.tool_executions = []
         self.leases_requested = []
 
+    def get_discovery_options(self, engagement_id):
+        return {"subfinder": False, "crawling": False, "oob": False, "screenshots": False}
+
     def list_scope_assets(self, engagement_id):
         return self._scope_assets
 
@@ -290,7 +293,7 @@ def test_a_deny_exactly_matching_the_whole_cidr_sweeps_nothing(monkeypatch):
 
 def test_domain_results_still_carry_asset_type_domain(monkeypatch):
     rec = _setup(monkeypatch, [
-        {"rule": "allow", "asset_type": "domain", "value": "example.com"},
+        {"rule": "allow", "asset_type": "domain", "value": "example.com", "active_allowed": True},
     ], known=[{"id": "d1", "value": "example.com", "in_scope": True}])
 
     out = discovery.run(ENGAGEMENT_ID, scan_run_id=SCAN_RUN_ID)

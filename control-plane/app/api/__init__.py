@@ -3,10 +3,12 @@ from fastapi import APIRouter, Depends
 from app.api.admin import router as admin_router
 from app.api.approvals import router as approvals_router
 from app.api.auth import router as auth_router
+from app.api.discovery_artifacts import router as discovery_artifacts_router
 from app.api.engagements import router as engagements_router
 from app.api.findings import router as findings_router
 from app.api.internal import router as internal_router
 from app.api.openwire_callback import router as openwire_callback_router
+from app.api.portfolio import router as portfolio_router
 from app.api.settings import router as settings_router
 from app.api.stream import router as stream_router
 from app.api.tools import router as tools_router
@@ -22,6 +24,10 @@ public_router = APIRouter(dependencies=[Depends(require_user), Depends(enforce_e
 public_router.include_router(engagements_router)
 public_router.include_router(approvals_router)
 public_router.include_router(findings_router)
+public_router.include_router(discovery_artifacts_router)
+# REQ-PORTFOLIO-001: no engagement_id in its path, so the ownership check above
+# does not apply - the handler filters by owner in its own queries.
+public_router.include_router(portfolio_router)
 public_router.include_router(stream_router)
 public_router.include_router(tools_router)
 api_router.include_router(public_router)

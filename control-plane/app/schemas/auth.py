@@ -39,7 +39,6 @@ class MfaVerifyIn(BaseModel):
 
 
 class SessionOut(BaseModel):
-    session_token: str
     user: "UserOut"
     backup_codes: list[str] | None = None
 
@@ -73,10 +72,6 @@ class MfaReenrollConfirmIn(BaseModel):
 
 class MfaReenrollConfirmOut(BaseModel):
     backup_codes: list[str]
-    # GitHub issue #26: re-enrolling revokes every other session (see
-    # auth_service.confirm_mfa_reenrollment) - the caller's own session is
-    # rotated too, so it needs this to stay logged in.
-    session_token: str
 
 
 class SessionInfoOut(BaseModel):

@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { NavLink, Navigate, Route, Routes, useParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { NavLink, Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 
 import { api } from "./api/client";
 import NotFound from "./pages/NotFound";
 import Dashboard from "./pages/Dashboard";
+import AllFindings from "./pages/AllFindings";
 import EngagementWizard from "./pages/EngagementWizard";
 import EngagementEdit from "./pages/EngagementEdit";
 import EngagementDetail from "./pages/EngagementDetail";
@@ -21,6 +23,60 @@ import { useLogout } from "./lib/useLogout";
 function RedirectToEngagement() {
   const { id } = useParams();
   return <Navigate to={`/engagements/${id}`} replace />;
+}
+
+/**
+ * REQ-CONSOLE-014: the drawer that replaces the sidebar on small screens.
+ * Closes on navigation, Escape, and a backdrop click; while open, focus stays
+ * inside it and returns to the menu button when it closes.
+ */
+function useMobileNavigation() {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const openRef = useRef(open);
+  openRef.current = open;
+  const location = useLocation();
+
+  const close = useCallback(() => {
+    setOpen(false);
+    buttonRef.current?.focus();
+  }, []);
+  const toggle = useCallback(() => (openRef.current ? close() : setOpen(true)), [close]);
+
+  useEffect(() => {
+    if (openRef.current) close();
+  }, [location.pathname, close]);
+
+  useEffect(() => {
+    if (!open) return;
+    const drawer = drawerRef.current;
+    const drawerItems = () => [...(drawer?.querySelectorAll<HTMLElement>("a[href], button") ?? [])];
+    drawerItems()[0]?.focus();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        close();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      // The menu button stays in the cycle: it is how touch and keyboard users close the drawer.
+      const items = [buttonRef.current, ...drawerItems()].filter((item): item is HTMLElement => item !== null);
+      const first = items[0];
+      const last = items[items.length - 1];
+      const inside = items.includes(document.activeElement as HTMLElement);
+      if (event.shiftKey && (document.activeElement === first || !inside)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !inside)) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, close]);
+
+  return { open, toggle, close, buttonRef, drawerRef };
 }
 
 // REQ-IAM-002: gates the console behind a resolved session before rendering
@@ -45,6 +101,7 @@ function AuthenticatedShell() {
   });
   // Hooks run unconditionally, before the early returns below.
   const logout = useLogout();
+  const nav = useMobileNavigation();
 
   if (isLoading) return null;
   if (isError) {
@@ -60,15 +117,25 @@ function AuthenticatedShell() {
   if (!me) return null; // request() is already redirecting to /login
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${nav.open ? "nav-open" : ""}`}>
       {/* REQ-APPROVALUI-001: pending approvals surface on any page, not only Run detail. */}
       <GlobalApprovalWatcher />
-      <aside className="sidebar">
+      {/* REQ-CONSOLE-014: on small screens the sidebar becomes a drawer behind this bar (CSS only shows it there). */}
+      <header className="mobile-topbar">
+        <Logo size={28} withWordmark />
+        <button ref={nav.buttonRef} className="menu-button" aria-expanded={nav.open} aria-controls="primary-navigation"
+          aria-label={nav.open ? "Close navigation" : "Open navigation"} onClick={nav.toggle}>
+          <span aria-hidden="true">☰</span>
+        </button>
+      </header>
+      {nav.open && <div className="nav-backdrop" onClick={nav.close} />}
+      <aside className="sidebar" id="primary-navigation" ref={nav.drawerRef}>
         <div className="brand-block">
           <Logo size={34} withWordmark />
         </div>
         <nav className="side-nav" aria-label="Primary">
           <NavLink to="/" end>Overview</NavLink>
+          <NavLink to="/findings">Findings</NavLink>
           <NavLink to="/new">New engagement</NavLink>
           <NavLink to="/docs">Documentation</NavLink>
           {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
@@ -87,6 +154,7 @@ function AuthenticatedShell() {
       <main className="workspace">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/findings" element={<AllFindings />} />
           <Route path="/new" element={<EngagementWizard />} />
           <Route path="/docs" element={<Documentation />} />
           <Route path="/account" element={<Account />} />

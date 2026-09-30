@@ -163,13 +163,23 @@ class NftPolicyManager:
     """
     def __init__(
         self, runner: Callable[[str, bool], None] = _subprocess_nft, *, proxy_addresses=None, proxy_port=3128,
-        num_slots: int = 1,
+        num_slots: int = 1, oob_addresses=None, oob_port: int = 8080,
     ):
         self._run = runner
         self._proxy_addresses = [str(ipaddress.ip_address(value)) for value in (proxy_addresses or [])]
         self._proxy_port = int(proxy_port)
         if not 1 <= self._proxy_port <= 65535:
             raise ValueError("proxy_port_invalid")
+        # REQ-COVER-004: the self-hosted interaction server's own address(es),
+        # reachable on ONE tcp port only, and only when configured. Never a
+        # target address; the address set is fixed at start-up like the proxy.
+        self._oob_addresses = [
+            str(ipaddress.ip_address(value)) for value in (oob_addresses or [])
+            if ipaddress.ip_address(value).version == 4
+        ]
+        self._oob_port = int(oob_port)
+        if self._oob_addresses and not 1 <= self._oob_port <= 65535:
+            raise ValueError("oob_port_invalid")
         self.num_slots = int(num_slots)
         if self.num_slots < 1:
             raise ValueError("num_slots_invalid")
@@ -192,6 +202,12 @@ class NftPolicyManager:
         # still adds an exact /32-/128, functionally identical to a plain
         # address element (interval sets accept a bare host as a one-address
         # interval) - unchanged behavior for every pre-existing caller.
+        if self._oob_addresses:
+            elements.append(f"add element inet {TABLE} oob_v4 {{ {', '.join(self._oob_addresses)} }}")
+        oob_set = f"    set oob_v4 {{ type ipv4_addr; }}\n" if self._oob_addresses else ""
+        oob_rule = (
+            f"        ip daddr @oob_v4 tcp dport {self._oob_port} accept\n" if self._oob_addresses else ""
+        )
         slot_sets = "\n".join(
             f"    set allowed_v4_{i} {{ type ipv4_addr; flags interval, timeout; timeout 30m; }}\n"
             f"    set allowed_v6_{i} {{ type ipv6_addr; flags interval, timeout; timeout 30m; }}\n"
@@ -222,14 +238,14 @@ table inet {TABLE} {{
 {slot_sets}
     set proxy_v4 {{ type ipv4_addr; }}
     set proxy_v6 {{ type ipv6_addr; }}
-{slot_chains}
+{oob_set}{slot_chains}
     chain output {{
         type filter hook output priority 0; policy drop;
         oifname "lo" accept
         ct state established,related accept
         ip daddr @proxy_v4 tcp dport {self._proxy_port} accept
         ip6 daddr @proxy_v6 tcp dport {self._proxy_port} accept
-{slot_jumps}
+{oob_rule}{slot_jumps}
     }}
 }}
 {chr(10).join(elements)}

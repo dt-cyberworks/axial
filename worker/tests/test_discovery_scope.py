@@ -13,6 +13,9 @@ class RecordingClient:
         self._known = known or []
         self.discovered_assets = []
 
+    def get_discovery_options(self, engagement_id):
+        return {"subfinder": False, "crawling": False, "oob": False, "screenshots": False}
+
     def list_scope_assets(self, engagement_id):
         return self._scope_assets
 

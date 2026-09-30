@@ -577,3 +577,28 @@ def test_truly_abandoned_reservation_still_gets_pruned():
 
     clk["t"] += RESERVATION_IDLE_SECONDS + 10
     assert gateway.reserve(str(run_b))["status"] == "granted"  # A wurde geprunt
+
+
+# --- REQ-COVER-004: self-hosted interaction server reachable on ONE port ---
+
+def test_nft_policy_allows_the_oob_server_on_its_single_port_only():
+    scripts = []
+    policy = NftPolicyManager(
+        lambda script, check: scripts.append(script), proxy_addresses=["172.30.0.8"], proxy_port=3128,
+        num_slots=1, oob_addresses=["172.31.0.5"], oob_port=8080,
+    )
+    policy.initialize()
+    rendered = scripts[1]
+    assert "ip daddr @oob_v4 tcp dport 8080 accept" in rendered
+    assert "add element inet asm_raw oob_v4 { 172.31.0.5 }" in rendered
+    assert rendered.count("@oob_v4") == 1
+    assert "policy drop" in rendered
+
+
+def test_nft_policy_has_no_oob_rule_when_not_configured():
+    scripts = []
+    policy = NftPolicyManager(
+        lambda script, check: scripts.append(script), proxy_addresses=["172.30.0.8"], proxy_port=3128, num_slots=1,
+    )
+    policy.initialize()
+    assert "oob" not in scripts[1]

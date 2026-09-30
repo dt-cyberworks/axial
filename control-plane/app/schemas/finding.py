@@ -63,6 +63,7 @@ class DnsRecordOut(BaseModel):
 
 
 FINDING_STATUSES = ("open", "accepted_risk", "false_positive", "resolved")
+SEVERITIES = ("critical", "high", "medium", "low", "info")
 # A decision that makes a finding disappear from the open list must say why.
 NOTE_REQUIRED_STATUSES = ("accepted_risk", "false_positive")
 
@@ -101,3 +102,21 @@ class FindingExplanationOut(BaseModel):
     # max_tokens (finish_reason == "length"), not because it finished the
     # answer - the explanation is real but incomplete.
     truncated: bool = False
+
+
+class PortfolioFindingOut(FindingOut):
+    """REQ-PORTFOLIO-001: a finding in the cross-engagement list."""
+
+    engagement_title: str
+
+
+class FindingPage(BaseModel):
+    """REQ-PORTFOLIO-001: one page of GET /findings. `total` and the counts
+    cover every match the caller may see, not only this page."""
+
+    items: list[PortfolioFindingOut]
+    total: int
+    limit: int
+    offset: int
+    counts_by_status: dict[str, int]
+    counts_by_severity: dict[str, int]

@@ -162,11 +162,11 @@ def materialize(db: Session, engagement_id: uuid.UUID, scan_run_id: uuid.UUID | 
 
     warnings = []
     if unresolved:
-        warnings.append(f"{len(unresolved)} Name(n) ohne A/AAAA-Record - nicht materialisiert")
+        warnings.append(f"{len(unresolved)} name(s) without an A/AAAA record - not materialized")
     if denied_ips:
-        warnings.append(f"{len(denied_ips)} aufgeloeste IP(s) durch deny-Vorrang verworfen")
+        warnings.append(f"{len(denied_ips)} resolved IP(s) dropped by deny precedence")
     if not resolved:
-        warnings.append("keine IPs materialisiert - raw egress bleibt fuer Namen fail-closed")
+        warnings.append("no IPs materialized - raw egress stays fail-closed for these names")
 
     # Audit: die Materialisierung ist eine sicherheitsrelevante Handlung.
     # scan_run_id (wenn vorhanden) taggt den Eintrag fuer die Run-Activity-

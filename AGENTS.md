@@ -59,10 +59,11 @@ The Scope Gateway in `control-plane/app/gateway/authorize.py` is the core safety
 - Frontend uses React 18, TypeScript, React Router, TanStack Query, and Vite.
 - Migrations are SQL files in `control-plane/migrations/`. Keep models, schemas, and migrations aligned when changing persistence.
 - API contracts are described in `docs/api.md`; update docs when changing external behavior.
-- The scan state machine lives in `worker/app/tasks/pipeline.py`: `discovery -> fingerprint -> correlate -> agent -> validate -> score -> report`.
+- The scan state machine lives in `worker/app/tasks/pipeline.py`: `discovery -> fingerprint -> correlate -> agent -> score -> report`.
+- The fingerprint phase (`worker/app/tasks/fingerprint.py`) is discover -> plan -> execute (REQ-PIPE, `docs/design/scan-pipeline-architecture.md`): open ports become surfaces (`surfaces.py`, `tech_profile.py`), the pure planner (`planner.py`) turns them into a stored plan of `scan_check` rows, and `scan_executor.py` runs it (two checks at a time, resumable per check). nuclei templates are selected from an index baked into the tool-runner image (`tool-runner/nuclei_index.py`), never by path; every check is still one gateway-authorized call.
 - Tool argument safety is enforced in `control-plane/app/gateway/args_safety.py`; update tests when widening accepted arguments.
 - Known lab vulnerability inference is intentionally local/reproducible in `worker/app/known_vulns.py`.
-- The UI and many docs are German-facing. Preserve existing German copy/comment style unless there is a clear reason to change it.
+- Everything is English: UI, docs, API errors, agent messages, log lines, and code comments (REQ-TEXT-001). `scripts/tests/test_english_runtime_text.py` fails on German text in runtime strings. Many older modules still have German comments: write new comments in English, and when you change a module, translate the German comments of the code you touch - in a separate commit, never mixed with a behavior change.
 
 ## Common Commands
 

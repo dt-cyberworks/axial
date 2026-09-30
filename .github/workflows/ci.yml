@@ -104,3 +104,55 @@ jobs:
         run: docker build -t asm/raw-egress-gateway:ci raw-egress-gateway
       - name: Build edge image
         run: docker build -f edge/Dockerfile -t asm/edge:ci .
+      # GitHub issue #43: one CycloneDX SBOM per image, so an incident can be
+      # tied to the exact package set that was built. Kept as a workflow
+      # artifact (90 days by default); it does not gate the build.
+      - name: Create SBOM directory
+        run: mkdir -p sbom
+      - name: SBOM control-plane
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: asm/control-plane:ci
+          format: cyclonedx
+          output: sbom/control-plane.cdx.json
+      - name: SBOM worker
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: asm/worker:ci
+          format: cyclonedx
+          output: sbom/worker.cdx.json
+      - name: SBOM egress-proxy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: asm/egress-proxy:ci
+          format: cyclonedx
+          output: sbom/egress-proxy.cdx.json
+      - name: SBOM tool-runner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: asm/tool-runner:ci
+          format: cyclonedx
+          output: sbom/tool-runner.cdx.json
+      - name: SBOM raw-egress-gateway
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: asm/raw-egress-gateway:ci
+          format: cyclonedx
+          output: sbom/raw-egress-gateway.cdx.json
+      - name: SBOM edge
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: asm/edge:ci
+          format: cyclonedx
+          output: sbom/edge.cdx.json
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/

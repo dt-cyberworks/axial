@@ -34,3 +34,19 @@ def submit_audit(engagement_id: str, decision: str, reason: str, payload: dict) 
         if response.status != 201:
             raise RuntimeError(f"audit ingestion returned {response.status}")
 
+
+
+def reserve_rate_slot(engagement_id: str) -> dict:
+    """GitHub issue #40: reserve one slot of the program's max_rps before
+    forwarding (reserve first, then act). Raises on any failure; the caller
+    denies (fail closed), exactly like a failed audit submission."""
+    request = urllib.request.Request(
+        f"{CONTROL_PLANE_URL}/internal/engagements/{engagement_id}/rate-reservation",
+        data=b"{}",
+        method="POST",
+        headers={"Content-Type": "application/json", "X-ASM-Internal-Token": INTERNAL_API_TOKEN},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310 - fixed internal base URL
+        if response.status != 200:
+            raise RuntimeError(f"rate reservation returned {response.status}")
+        return json.loads(response.read().decode("utf-8"))

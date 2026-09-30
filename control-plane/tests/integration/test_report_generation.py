@@ -487,3 +487,108 @@ def test_negative_credential_check_still_holds_against_the_reportlab_renderer(db
         assert secret not in text, f"credential leaked into report text: {secret}"
         assert secret.encode("latin-1") not in content, f"credential leaked into report bytes: {secret}"
     assert "Formatting regression probe" in text
+
+
+# --- REQ-PIPE-011: the report states coverage ------------------------------
+
+def _plan(db, eng, run, surfaces):
+    """surfaces: [(host, port, class, profile, [(check_id, state, reason, detail)])]"""
+    from app.models.scan_plan import ScanCheck, ScanSurface
+
+    seq = 1
+    for host, port, cls, profile, checks in surfaces:
+        surface = ScanSurface(scan_run_id=run.id, engagement_id=eng.id, host=host, port=port, service_class=cls,
+                              profile=profile, fingerprint={})
+        db.add(surface)
+        db.flush()
+        for check_id, state, reason, detail in checks:
+            db.add(ScanCheck(scan_run_id=run.id, engagement_id=eng.id, surface_id=surface.id, seq=seq, check_id=check_id,
+                             tool=check_id.split(":")[0], state=state, reason=reason,
+                             outcome_summary={"detail": detail} if detail else {}))
+            seq += 1
+    db.commit()
+
+
+def _report_text(db, eng):
+    result = request_report(eng.id, db, _Caller())
+    return _pdf_text(bytes(db.get(Report, uuid.UUID(result["report_id"])).content))
+
+
+def test_req_pipe_011_the_report_lists_each_service_and_how_completely_it_was_checked(db):
+    eng = _engagement(db)
+    _scope(db, eng, "allow", "target.example")
+    run = _run(db, eng)
+    run.scan_profile = "standard"
+    db.commit()
+    _plan(db, eng, run, [
+        ("target.example", 443, "web", ["nginx", "php"], [
+            ("wafw00f", "complete", "web", None), ("ffuf", "complete", "web", None),
+            ("nuclei:generic:1of5", "partial", "generic_web", None), ("nuclei:products", "failed", "product:nginx", "nonzero_exit"),
+            ("screenshot", "skipped", "switch_off", None),
+        ]),
+        ("target.example", 80, "web_alias", [], [("nuclei", "skipped", "web_alias_of:target.example:443", None)]),
+        ("target.example", 25, "tls_service", [], [("testssl", "complete", "tls_service", None)]),
+    ])
+    text = _report_text(db, eng)
+    assert "Coverage of this run" in text
+    assert _has_phrase(text, "standard (checks chosen from what the scan found)")
+    assert "target.example:443" in text and "nginx, php" in text
+    assert _has_phrase(text, "Web (redirect only)") and _has_phrase(text, "TLS service")
+    assert _has_phrase(text, "nuclei:generic:1of5: stopped at its time budget")
+    assert _has_phrase(text, "nuclei:products: failed (nonzero exit)")
+    assert _has_phrase(text, "only redirects to target.example:443, which is checked there")
+    assert "screenshot: skipped" not in text, "a switched-off check is configuration, not a coverage gap"
+
+
+def test_req_pipe_011_a_partial_or_failed_check_is_stated_in_the_executive_summary(db):
+    eng = _engagement(db)
+    _scope(db, eng, "allow", "target.example")
+    run = _run(db, eng)
+    _plan(db, eng, run, [("target.example", 443, "web", [], [
+        ("nuclei:generic:1of5", "partial", "generic_web", None), ("ffuf", "partial", "web", None),
+        ("nuclei:products", "failed", "x", "nonzero_exit"), ("wafw00f", "complete", "web", None)])])
+    text = _report_text(db, eng)
+    summary = text.split("2. Risk overview")[0]
+    assert _has_phrase(summary, "2 check(s) stopped at their time budget and 1 failed during this run")
+    assert _has_phrase(summary, "does NOT mean")
+
+
+def test_negative_req_pipe_011_a_fully_covered_run_carries_no_warning(db):
+    eng = _engagement(db)
+    _scope(db, eng, "allow", "target.example")
+    run = _run(db, eng)
+    _plan(db, eng, run, [("target.example", 443, "web", ["nginx"], [
+        ("wafw00f", "complete", "web", None), ("screenshot", "skipped", "switch_off", None)])])
+    text = _report_text(db, eng)
+    assert "Coverage of this run" in text
+    assert "check(s) stopped at their time budget" not in text and "Not fully covered" not in text
+
+
+def test_negative_req_pipe_011_a_run_without_a_plan_still_produces_a_report(db):
+    eng = _engagement(db)
+    _scope(db, eng, "allow", "target.example")
+    _run(db, eng)
+    text = _report_text(db, eng)
+    assert "Methodology" in text and "Coverage of this run" not in text
+
+
+def test_req_pipe_011_thorough_depth_is_named_in_the_coverage_section(db):
+    eng = _engagement(db)
+    _scope(db, eng, "allow", "target.example")
+    run = _run(db, eng)
+    run.scan_profile = "thorough"
+    db.commit()
+    _plan(db, eng, run, [("target.example", 443, "web", [], [("wafw00f", "complete", "web", None)])])
+    assert _has_phrase(_report_text(db, eng), "thorough (every template on every web service)")
+
+
+def test_req_pipe_011_the_plan_of_an_older_run_is_not_mixed_into_the_report_run(db):
+    eng = _engagement(db)
+    _scope(db, eng, "allow", "target.example")
+    old = _run(db, eng, started=dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1))
+    _plan(db, eng, old, [("old.example", 443, "web", [], [("ffuf", "failed", "web", "nonzero_exit")])])
+    new = _run(db, eng)
+    _plan(db, eng, new, [("target.example", 443, "web", [], [("ffuf", "complete", "web", None)])])
+    text = _report_text(db, eng)
+    assert "target.example:443" in text and "old.example" not in text
+    assert "check(s) stopped at their time budget" not in text and "failed (nonzero exit)" not in text

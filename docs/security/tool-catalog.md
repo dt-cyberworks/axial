@@ -29,7 +29,7 @@ Every tool call on this platform is authorized once by the Scope Gateway
 
 | Path | Who picks the target | Who picks the arguments | Tools |
 |---|---|---|---|
-| **Deterministic pipeline** | The pipeline (every in-scope asset, every run) | The worker — fixed, hardcoded per call site, never influenced by the LLM | `nmap`, `httpx`, `nikto`, `wafw00f`, `testssl`, `nuclei` (both passes) |
+| **Deterministic pipeline** | The pipeline (every in-scope asset, every run) | The worker — fixed, hardcoded per call site, never influenced by the LLM | `nmap`, `httpx` (its recorded headers also yield the missing-security-header findings, REQ-PIPE-013), `wafw00f`, `testssl`, `ffuf`, `nuclei` (eight main parts, headless, takeover) |
 | **Vector Agent proposal** | The LLM, constrained to the in-scope host list | The LLM, but only through a narrow, gateway-validated envelope (never raw flags) | `http_request` (curl), `ffuf` (content discovery), `redis-probe`/`activemq-banner`/`activemq-openwire-probe` (curated raw-protocol probes — the agent picks the tool and target only, never the bytes sent, §3.4), plus a same-envelope re-run of the pipeline's `run_check` tools (`httpx`, `nikto`, `wafw00f`, `testssl`, `nuclei` — **not** `nmap`) |
 
 The Vector Agent never writes a shell command or a tool flag. It calls one of
@@ -54,8 +54,10 @@ pipeline work the agent can read the results of but never repeat or widen.
 These run once per in-scope asset in the `fingerprint` phase
 (`worker/app/tasks/fingerprint.py`), in this order: `nmap` first (so
 discovered web ports can steer the web tools), then for each candidate web
-port: `httpx` (liveness gate) → `nikto` → `wafw00f` → `testssl` → `nuclei`
-(main pass) → `nuclei` (headless pass). If `httpx` finds no live HTTP service
+port: `httpx` (liveness gate) → header findings from httpx's headers →
+`wafw00f` → `testssl` → `ffuf` → `nuclei` (main parts, headless, takeover). A
+port that only redirects to another live surface of the same host (REQ-PIPE-001)
+keeps its `httpx` result and skips the rest, each skip recorded with its reason. If `httpx` finds no live HTTP service
 on a port, the remaining web tools are skipped for that port
 (`worker/app/tasks/fingerprint.py:422-436`).
 
@@ -150,7 +152,7 @@ httpx -u <url> -json -silent -disable-update-check -tech-detect -status-code -ti
 | `-silent` | Suppresses banner/progress noise that would otherwise pollute stdout. |
 | `-disable-update-check` | The runner image is isolated (no general internet egress); httpx must never try to phone home for updates. |
 | `-tech-detect` | Fingerprint the technology stack (Wappalyzer-style signatures) — the actual purpose of this call; feeds `service.tech_stack`. |
-| `-status-code -title -web-server` | Minimal liveness/metadata signals used to decide whether the host is "live" (gates whether nikto/wafw00f/testssl/nuclei even run) and to populate service metadata. |
+| `-status-code -title -web-server` | Minimal liveness/metadata signals used to decide whether the host is "live" (gates whether wafw00f/testssl/ffuf/nuclei even run) and to populate service metadata. |
 | `-timeout 10` | Bounded per-request timeout so one slow/hanging host cannot stall the whole fingerprint phase. |
 | `-no-color` | Clean, ANSI-escape-free text for downstream parsing. |
 | `-proxy <url>` (if configured) | httpx does **not** honor `HTTP_PROXY`/`HTTPS_PROXY` environment variables, so the egress proxy must be passed explicitly — this is what forces httpx traffic through the second, independent scope re-check (§6), instead of reaching the target directly from the runner's network path. |
@@ -159,7 +161,15 @@ This deterministic call always passes an empty argument dict; the only method
 `args_safety._httpx_args_safe` (`args_safety.py:102-104`) would ever permit for
 a hypothetical future non-empty call is `GET`/`HEAD`/`OPTIONS`.
 
-### 2.3 nikto — web misconfiguration / missing-header scan
+### 2.3 nikto — web misconfiguration / missing-header scan (retired from the automatic scan)
+
+> **REQ-PIPE-013 (2026-09-29):** the automatic fingerprint pass no longer runs
+> nikto; it always stopped at its 40 s budget and its useful checks overlap
+> nuclei's generic templates. Missing security headers are now derived from the
+> response headers httpx already records (`worker/app/security_headers.py`),
+> with no extra request to the target. nikto remains installed and available on
+> demand to the Vector Agent (`-Tuning b -maxtime 40s`). The description below
+> is the historical automatic invocation.
 
 Source: `worker/app/tasks/fingerprint.py:208-234` (`_web_enum`), dispatched to
 HexStrike's `/api/tools/nikto` endpoint with the egress proxy injected by
@@ -240,13 +250,30 @@ target exceeded 300s in live testing and returned only partial results
 independently-bounded passes fixed this; each pass alone measured
 comfortably under 300s.
 
-**Main pass** (non-headless):
+**Main pass** (non-headless) - a *selection* from the template index (`REQ-PIPE-004`), no longer a fixed directory
+split. The index is built into the tool-runner image from the baked templates (`tool-runner/nuclei_index.py`, stdlib
+only) and holds exactly the templates the former single pass would have run: one of the tags below, none of the
+excluded tags or ids, outside the port-bound `network/` and `javascript/` directories that never apply to a web
+surface. Measured with `nuclei -tl` using the same flags: 5,883 templates, an exact match (1,980 generic, 3,903
+bound to a product/vendor by their own metadata). The worker never sends a template path: it names a `group`
+(`generic`, `products`, `all`), a `shard k/n` of about 400 templates and, for `products`, up to 24 product keys, and
+the runner resolves that against the index into a temporary list passed as `nuclei -t <file>`. The Scope Gateway
+accepts only that typed shape (`args_safety._select_args_safe`; wrongly typed values are refused, not crashed on),
+the worker builder validates it again and the selector a third time. A `standard` scan runs the generic shards and
+only the product templates for what the technology check identified (or, when nothing was identified, the fixed
+common-product list); `thorough` runs every shard. Each call has its own declared time budget (120 s plus 3 s per
+template, at most 1800 s, enforced by the runner: `REQ-PIPE-007`). Output printed by a call that ran into its budget
+or exited non-zero is still parsed into findings; the check is recorded `partial` or `failed`. The blind
+(out-of-band) pass is unchanged: `generic_a/b/c` are three shards (every third file of the sorted template list) of
+the 111 generic templates, plus `cves_recent` and `cves_legacy`. Two runner-local queries (`nuclei_index.py summary`
+and `select ... --out /dev/null`, only to size a plan and a call) are fixed read-only commands that never contact a
+target and are not tool calls, so they do not pass the gateway. The flags below apply to every selection:
 ```
 -tags cve,misconfig,exposure,exposures,default-login,waf,dast -severity info,low,medium,high,critical -etags intrusive,dos,fuzz,csp-bypass -rate-limit 50 -timeout 8 -retries 1 [-p <egress-proxy-url>]
 ```
 | Flag | Why |
 |---|---|
-| `-tags cve,misconfig,exposure,exposures,default-login,waf,dast` | Only run templates in these categories. `dast` (`REQ-AGENT-016`) is nuclei's bucket of generic vulnerability-class templates — XSS, SQLi (including blind/time-based), open redirect, LFI, RFI, command injection, SSRF, SSTI, XXE, CRLF injection — each capped at `max-request:1` and *not* tagged `fuzz`, so it is not excluded by `-etags` below. |
+| `-tags cve,misconfig,exposure,exposures,default-login,waf,dast` | Only run templates in these categories. (`takeover`, `REQ-COVER-002`, runs as its own pass, `-tags takeover` with the same severity/exclusion/rate flags: ~73 one-request HTTP templates that fingerprint dangling third-party services (a CNAME to a de-provisioned bucket/app), complementing the DNS-level check. It is separate because the main pass plus this tag exceeded the 300s command limit live on 2026-09-29.) `dast` (`REQ-AGENT-016`) is nuclei's bucket of generic vulnerability-class templates — XSS, SQLi (including blind/time-based), open redirect, LFI, RFI, command injection, SSRF, SSTI, XXE, CRLF injection — each capped at `max-request:1` and *not* tagged `fuzz`, so it is not excluded by `-etags` below. |
 | `-severity info,low,medium,high,critical` | All severities included; filtering happens by tag/exclude-tag, not by severity, at this stage. |
 | `-etags intrusive,dos,fuzz,csp-bypass` | Explicitly excludes nuclei's own intrusive, denial-of-service, and fuzzing template categories. `csp-bypass` is excluded separately because it requires headless mode and pulls in ~192 vendor-specific templates — measured at ~530s for that directory alone against one target, disproportionate for a generic ASM baseline. |
 | `-rate-limit 50` | Caps requests/sec so the scan cannot overwhelm the target or resemble a DoS. |
@@ -512,8 +539,8 @@ intent:
   variables. The egress proxy performs an independent, second scope
   re-check and attaches the required identification header per request —
   documented in [`security-model.md`](../security-model.md#defense-in-depth-zwei-unabhängige-scope-prüfungen).
-- **`passive`** (crt.sh, Cert Spotter, HackerTarget, and the registry-declared
-  but not-yet-orchestrated `subfinder`/`amass`): queries a third-party data
+- **`passive`** (crt.sh, Cert Spotter, HackerTarget, Wayback/CommonCrawl URL history and
+  `subfinder`; `amass` is retired): queries a third-party data
   source, never the target; not authorized by the gateway because there is
   no active call to authorize.
 
@@ -527,7 +554,7 @@ Generated from `registry.capability_matrix()` — run `python -c "from app.tools
 | `httpx` | fingerprint | http_proxy | yes | yes | **yes** | Via generic `/api/command` (§2.2); also agent-proposable via `run_check`. |
 | `nikto` | vuln | http_proxy | yes | yes | **yes** | §2.3; also agent-proposable via `run_check`. |
 | `wafw00f` | fingerprint | http_proxy | yes | yes | **yes** | §2.4; also agent-proposable via `run_check`. |
-| `sslscan` | fingerprint | raw_network | yes | yes | no | Installed and whitelisted, but not wired into the worker client — not currently executed by any phase. |
+| `sslscan` | fingerprint | raw_network | yes | no | no | Retired (`REQ-COVER-005`): not enabled; `testssl` covers TLS hygiene. |
 | `testssl` | fingerprint | http_proxy | yes | yes | **yes** | §2.5; also agent-proposable via `run_check`. |
 | `nuclei` | vuln | http_proxy | yes | yes | **yes** | §2.6, two passes; also agent-proposable via `run_check` (single pass). |
 | `http_request` | vuln | http_proxy | yes | yes | **yes** | Agent-only (§3.2); not part of the deterministic pipeline. |
@@ -535,10 +562,12 @@ Generated from `registry.capability_matrix()` — run `python -c "from app.tools
 | `redis-probe` | fingerprint | raw_network | yes | yes | **yes** | §3.4; agent-only, passive (sends one fixed `PING\r\n`). |
 | `activemq-banner` | fingerprint | raw_network | yes | yes | **yes** | §3.4; agent-only, purely passive (sends nothing). |
 | `activemq-openwire-probe` | vuln | raw_network | yes | yes | **yes** | §3.4; agent-only, R4 — the one tool that actively exercises a vulnerability (CVE-2023-46604); mandatory per-call human approval. |
-| `default-cred-check` | cred | http_proxy | yes | yes | no | Argument policy exists (max 3 attempts, default wordlist only) but no tool binary is wired up yet — pure placeholder. |
-| `subfinder` | recon | passive | yes | yes | no | Worker-mapped to a HexStrike endpoint, but no scan phase currently calls it — passive subdomain discovery today goes through the direct OSINT sources in §4 instead. |
-| `amass` | recon | passive | yes | yes | no | Same status as `subfinder`. |
-| `whatweb` | fingerprint | http_proxy | yes | yes | no | Installed and whitelisted, not wired into the worker client. |
+| `default-cred-check` | cred | http_proxy | yes | no | no | Retired (`REQ-COVER-005`): not enabled; nuclei's `default-login` templates cover the common cases. The argument policy is kept for a future decision. |
+| `subfinder` | recon | passive | worker image | yes | **yes** | `REQ-COVER-001`: runs as a pinned binary in the **worker** image (not the runner), passive only, hard timeout, provider keys in a private temp file. Pipeline-only (`agent_callable=False`), behind the per-engagement `subfinder_enabled` switch (default on). |
+| `katana` | fingerprint | http_proxy | yes | yes | **yes** | `REQ-COVER-003`: crawler, one run per live web service, depth/page/time caps, no headless mode, through the egress proxy. Pipeline-only; per-engagement `crawling_enabled` (default off). |
+| `screenshot` | fingerprint | http_proxy | yes | yes | **yes** | `REQ-COVER-006`: one Chromium page load per live web service through the egress proxy, PNG capped at 2 MB. Pipeline-only; per-engagement `screenshots_enabled` (default off); denied for bug-bounty engagements that require an identification header. |
+| `amass` | recon | passive | yes | no | no | Retired (`REQ-COVER-005`): not enabled; slow, overlaps with the passive discovery sources. |
+| `whatweb` | fingerprint | http_proxy | yes | no | no | Retired (`REQ-COVER-005`): not enabled; `httpx` already fingerprints technologies. |
 | `dnsx` | recon | passive | **no** | no | no | Whitelisted in policy but **not actually present** in the runner image (the Dockerfile installs `dnsutils`, not ProjectDiscovery's `dnsx`). |
 | `tlsx` | recon | passive | **no** | no | no | Same status as `dnsx`. |
 | *(exploit category)* | exploit | — | — | — | — | Intentionally empty — no exploitation tooling is offered in the current capability set. |
@@ -572,3 +601,22 @@ If a security review needs to confirm that no flag has silently drifted from
 what is documented here, diff the command-construction functions cited above
 against the tables in §2/§3 — every flag in this document is a direct
 transcription, not a summary.
+
+## 8. Extended discovery (`REQ-COVER-001/003/004/006/007`, R4)
+
+Authorized by johannes on 2026-09-29. Four per-engagement switches, all enforced
+by the gateway (step 5c of the chain in `authorize.py`), never only by the worker:
+
+| Switch (default) | Tools | Gateway denial reasons |
+|---|---|---|
+| `subfinder_enabled` (on) | `subfinder` | `subfinder_not_enabled` |
+| `crawling_enabled` (off) | `katana`, nuclei `mode=endpoints` | `crawling_not_enabled`, `endpoint_out_of_scope` |
+| `oob_enabled` (off) | nuclei `mode=oob` | `oob_not_enabled` |
+| `screenshots_enabled` (off) | `screenshot` | `screenshots_not_enabled`, `screenshots_not_permitted_for_bounty` |
+
+`katana`, `screenshot` and `subfinder` are pipeline-only: the gateway denies them
+for the agent (`tool_not_agent_callable`). The nuclei `endpoints` pass validates
+every URL against scope, deny rules and the port window. The `oob` pass uses the
+platform's own interactsh server (compose profile `oob`, internal network, one
+nftables accept rule in the raw-egress gateway); the token reaches the runner
+only through its environment. Design: [`extended-discovery-architecture.md`](../design/extended-discovery-architecture.md).

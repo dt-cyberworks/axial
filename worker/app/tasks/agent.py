@@ -124,9 +124,9 @@ def _resolve_provider() -> tuple[str, str, str]:
         cfg = client.get_llm_config()
         if cfg.get("is_usable"):
             return cfg["base_url"], cfg["api_key"], cfg["model"]
-        logger.info("agent phase: LLM-Provider nicht vollstaendig konfiguriert (source=%s)", cfg.get("source"))
+        logger.info("agent phase: LLM provider not fully configured (source=%s)", cfg.get("source"))
     except Exception as exc:  # noqa: BLE001 - Fallback auf lokale Env
-        logger.warning("agent: LLM-Config von control-plane nicht ladbar (%s) - nutze Env-Fallback", exc)
+        logger.warning("agent: LLM config not loadable from the control plane (%s) - using the environment fallback", exc)
     return (
         os.environ.get("LLM_BASE_URL", ""),
         os.environ.get("LLM_API_KEY", ""),
@@ -161,9 +161,9 @@ _TOOLS = [
         "function": {
             "name": "run_check",
             "description": (
-                "Fordert EINE Sicherheitspruefung gegen einen In-Scope-Host an. Der "
-                "Vorschlag durchlaeuft das Scope Gateway; das Ergebnis (oder ein "
-                "DENIED/REJECTED) kommt als Beobachtung zurueck. Most tools here run "
+                "Requests ONE security check against an in-scope host. The proposal "
+                "goes through the Scope Gateway; the result (or DENIED/REJECTED) "
+                "comes back as an observation. Most tools here run "
                 "autonomously. activemq-openwire-probe is the one exception: it sends a "
                 "crafted packet that deliberately triggers OpenWire deserialization RCE "
                 "(CVE-2023-46604) and requires the target to fetch a URL we host - it is "
@@ -175,8 +175,8 @@ _TOOLS = [
                 "type": "object",
                 "properties": {
                     "tool": {"type": "string", "enum": ALLOWED_TOOLS},
-                    "target": {"type": "string", "description": "Hostname aus der In-Scope-Liste"},
-                    "rationale": {"type": "string", "description": "Kurze Begruendung, warum jetzt dieser Check"},
+                    "target": {"type": "string", "description": "Hostname from the in-scope list"},
+                    "rationale": {"type": "string", "description": "Short reason why this check, now"},
                     "risk_level": {
                         "type": "string", "enum": ["low", "medium", "high"],
                         "description": "Required for activemq-openwire-probe; ignored by autonomous tools.",
@@ -366,7 +366,7 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "finish",
-            "description": "Beende die Untersuchung, wenn keine sinnvolle weitere Pruefung bleibt.",
+            "description": "End the investigation when no useful check is left.",
             "parameters": {
                 "type": "object",
                 "properties": {"summary": {"type": "string"}},
@@ -425,14 +425,14 @@ def _load_scope(engagement_id: str, scan_run_id: str | None = None) -> tuple[dic
         for a in client.list_discovered_assets(uuid.UUID(engagement_id), in_scope=True):
             asset_by_host[a["value"].lower()] = str(a["id"])
     except Exception as exc:  # noqa: BLE001
-        logger.warning("agent: In-Scope-Assets nicht ladbar: %s", exc)
+        logger.warning("agent: in-scope assets not loadable: %s", exc)
 
     ip_by_host: dict[str, str] = {}
     try:
         for r in client.materialize_dns(uuid.UUID(engagement_id), scan_run_id=scan_run_id).get("resolved", []):
             ip_by_host.setdefault(r["hostname"].lower(), r["ip_address"])
     except Exception as exc:  # noqa: BLE001
-        logger.warning("agent: DNS-Materialisierung fehlgeschlagen: %s", exc)
+        logger.warning("agent: DNS materialization failed: %s", exc)
     return asset_by_host, ip_by_host
 
 
@@ -482,7 +482,7 @@ def _handle_run_check(
     if asset_id is None:
         context.record_denied(proposal, "not_in_scope_list")
         _audit_agent_event(engagement_id, "proposal_rejected", scan_run_id=context.scan_run_id, decision="DENY", reason="not_in_scope_list", proposal=proposal)
-        return f"REJECTED: {target!r} ist nicht in der In-Scope-Liste. Waehle ein gelistetes Ziel."
+        return f"REJECTED: {target!r} is not in the in-scope list. Choose a listed target."
 
     decision_payload = {
         "tool": tool, "category": dispatch.TOOL_CATEGORY[tool], "mode": "active",
@@ -513,7 +513,7 @@ def _handle_run_check(
         reason = decision.get("reason", "denied")
         context.record_denied(proposal, reason)
         _audit_agent_event(engagement_id, "proposal_denied", scan_run_id=context.scan_run_id, decision="DENY", reason=reason, proposal=proposal)
-        return f"DENIED vom Scope Gateway: {reason}."
+        return f"DENIED by the Scope Gateway: {reason}."
 
     _audit_agent_event(engagement_id, "proposal_allowed", scan_run_id=context.scan_run_id, decision="ALLOW", reason="gateway_allowed", proposal=proposal)
     obs = dispatch.dispatch(engagement_id, asset_id, tool, target, ip_by_host.get(host), scan_run_id=context.scan_run_id, single_port=context.single_port,
@@ -550,7 +550,7 @@ def _handle_http_request(
     if asset_id is None:
         context.record_denied(proposal, "not_in_scope_list")
         _audit_agent_event(engagement_id, "proposal_rejected", scan_run_id=context.scan_run_id, decision="DENY", reason="not_in_scope_list", proposal=proposal)
-        return f"REJECTED: {target!r} ist nicht in der In-Scope-Liste. Waehle ein gelistetes Ziel."
+        return f"REJECTED: {target!r} is not in the in-scope list. Choose a listed target."
 
     # REQ-AGENT-022/023: attach this run's session for THIS host AND THIS
     # identity, if one was established. Deliberately merged BEFORE authorize()
@@ -587,7 +587,7 @@ def _handle_http_request(
         _audit_agent_event(engagement_id, "proposal_denied", scan_run_id=context.scan_run_id, decision="DENY", reason=reason, proposal=proposal)
         if reason == "risk_statement_required":
             return "DENIED: state-changing requests need a risk assessment. Re-propose with risk_level and risk."
-        return f"DENIED vom Scope Gateway: {reason}."
+        return f"DENIED by the Scope Gateway: {reason}."
 
     _audit_agent_event(engagement_id, "proposal_allowed", scan_run_id=context.scan_run_id, decision="ALLOW", reason="gateway_allowed", proposal=proposal)
     obs = dispatch.dispatch(engagement_id, asset_id, "http_request", target, ip_by_host.get(host), args=args, scan_run_id=context.scan_run_id, single_port=context.single_port,
@@ -643,7 +643,7 @@ def _handle_register_test_identity(
     if asset_id is None:
         context.record_denied(proposal, "not_in_scope_list")
         _audit_agent_event(engagement_id, "proposal_rejected", scan_run_id=context.scan_run_id, decision="DENY", reason="not_in_scope_list", proposal=proposal)
-        return f"REJECTED: {target!r} ist nicht in der In-Scope-Liste. Waehle ein gelistetes Ziel."
+        return f"REJECTED: {target!r} is not in the in-scope list. Choose a listed target."
 
     args = {"method": method, "path": path, "headers": headers, "body": body}
     payload = {
@@ -666,7 +666,7 @@ def _handle_register_test_identity(
         _audit_agent_event(engagement_id, "proposal_denied", scan_run_id=context.scan_run_id, decision="DENY", reason=reason, proposal=proposal)
         if reason == "risk_statement_required":
             return "DENIED: registration needs a risk assessment. Re-propose with risk_level and risk."
-        return f"DENIED vom Scope Gateway: {reason}."
+        return f"DENIED by the Scope Gateway: {reason}."
 
     _audit_agent_event(engagement_id, "proposal_allowed", scan_run_id=context.scan_run_id, decision="ALLOW", reason="gateway_allowed", proposal=proposal)
     obs = dispatch.dispatch(engagement_id, asset_id, "http_request", target, ip_by_host.get(host), args=args, scan_run_id=context.scan_run_id, single_port=context.single_port,
@@ -728,7 +728,7 @@ def _await_approval(engagement_id, approval_id, asset_id, target, args, ip, prop
         try:
             client.update_scan_run(uuid.UUID(run_id), state="waiting_approval")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("waiting_approval-State nicht setzbar: %s", exc)
+            logger.warning("could not set the waiting_approval state: %s", exc)
 
     waited = 0
     decision_state = "expired"
@@ -836,7 +836,7 @@ def _handle_ffuf(
     if asset_id is None:
         context.record_denied(proposal, "not_in_scope_list")
         _audit_agent_event(engagement_id, "proposal_rejected", scan_run_id=context.scan_run_id, decision="DENY", reason="not_in_scope_list", proposal=proposal)
-        return f"REJECTED: {target!r} ist nicht in der In-Scope-Liste. Waehle ein gelistetes Ziel."
+        return f"REJECTED: {target!r} is not in the in-scope list. Choose a listed target."
 
     args = {"wordlist": wordlist, "path": path, "extensions": extensions, "extra_candidates": extra_candidates}
     payload = {
@@ -848,12 +848,12 @@ def _handle_ffuf(
     if decision.get("is_pending"):
         context.record_denied(proposal, "pending_approval")
         _audit_agent_event(engagement_id, "proposal_pending_approval", scan_run_id=context.scan_run_id, decision="PENDING", reason="pending_approval", proposal=proposal)
-        return "PENDING: erfordert manuelle Freigabe - hier uebersprungen."
+        return "PENDING: needs manual approval - skipped here."
     if not decision.get("allowed"):
         reason = decision.get("reason", "denied")
         context.record_denied(proposal, reason)
         _audit_agent_event(engagement_id, "proposal_denied", scan_run_id=context.scan_run_id, decision="DENY", reason=reason, proposal=proposal)
-        return f"DENIED vom Scope Gateway: {reason}."
+        return f"DENIED by the Scope Gateway: {reason}."
 
     _audit_agent_event(engagement_id, "proposal_allowed", scan_run_id=context.scan_run_id, decision="ALLOW", reason="gateway_allowed", proposal=proposal)
     obs = dispatch.dispatch(engagement_id, asset_id, "ffuf", target, ip_by_host.get(host), args=args, scan_run_id=context.scan_run_id, single_port=context.single_port,
@@ -894,9 +894,9 @@ def _handle_report_finding(engagement_id: str, tool_input: dict, asset_by_host: 
 
     asset_id = asset_by_host.get(target.lower())
     if asset_id is None:
-        return f"REJECTED: {target!r} ist nicht in der In-Scope-Liste."
+        return f"REJECTED: {target!r} is not in the in-scope list."
     if not title:
-        return "REJECTED: 'title' fehlt."
+        return "REJECTED: 'title' is missing."
     if severity not in {"info", "low", "medium", "high", "critical"}:
         severity = "info"
     if category not in {"cve", "misconfig", "exposure", "logic"}:
@@ -925,8 +925,8 @@ def _handle_report_finding(engagement_id: str, tool_input: dict, asset_by_host: 
             exposure_factor=1.0, business_factor=0.5,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("report_finding fehlgeschlagen: %s", exc)
-        return f"ERROR: Finding konnte nicht gespeichert werden ({exc})."
+        logger.warning("report_finding failed: %s", exc)
+        return f"ERROR: the finding could not be saved ({exc})."
 
     context.reported.append({"target": target, "title": title, "severity": severity, "category": category,
                              "evidence_basis": evidence_basis})
@@ -952,7 +952,7 @@ def _safe_agent_context(engagement_id: str) -> dict:
     try:
         return client.get_agent_context(uuid.UUID(engagement_id))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("agent: Evidenz-Kontext nicht ladbar (%s) - nur Hostliste", exc)
+        logger.warning("agent: evidence context not loadable (%s) - host list only", exc)
         return {"hosts": [], "graph": {"nodes": [], "edges": []}}
 
 
@@ -1179,13 +1179,13 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
     try:
         from openai import OpenAI
     except ImportError:
-        logger.info("agent phase: openai SDK nicht verfuegbar - No-Op")
+        logger.info("agent phase: openai SDK not available - no-op")
         _audit_agent_event(engagement_id, "skipped", scan_run_id=scan_run_id, decision="DENY", reason="openai_sdk_missing")
         return context
 
     base_url, api_key, model = _resolve_provider()
     if not (base_url and api_key and model):
-        logger.info("agent phase: kein LLM-Provider konfiguriert - No-Op (deterministische Phasen haben geliefert)")
+        logger.info("agent phase: no LLM provider configured - no-op (the deterministic phases have delivered)")
         _audit_agent_event(engagement_id, "skipped", scan_run_id=scan_run_id, decision="DENY", reason="llm_provider_missing", base_url_set=bool(base_url), api_key_set=bool(api_key), model_set=bool(model))
         return context
 
@@ -1196,7 +1196,7 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
 
     asset_by_host, ip_by_host = _load_scope(engagement_id, scan_run_id)
     if not asset_by_host:
-        logger.info("agent phase: keine In-Scope-Assets - No-Op")
+        logger.info("agent phase: no in-scope assets - no-op")
         _audit_agent_event(engagement_id, "skipped", scan_run_id=scan_run_id, decision="DENY", reason="no_in_scope_assets")
         return context
 
@@ -1222,7 +1222,7 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
         if cfg.get("agent_max_tokens") is not None:
             max_tokens = max(AGENT_MIN_MAX_TOKENS, min(int(cfg["agent_max_tokens"]), AGENT_MAX_MAX_TOKENS))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("agent: effektive Config nicht ladbar (%s) - eingebauter Prompt", exc)
+        logger.warning("agent: effective config not loadable (%s) - using the built-in prompt", exc)
     # The length-retry ceiling must never sit below the configured cap, or a
     # raised max_tokens would be silently clamped back down on every retry.
     # Found live: with the module-level AGENT_RETRY_MAX_TOKENS defaulting to
@@ -1259,7 +1259,7 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
     while context.iterations < budget_max_iterations and not context.exhausted:
         # Kooperativer Stopp (REQ-RUN-001): vor jedem (teuren) LLM-Aufruf pruefen.
         if scan_run_id and client.is_cancel_requested(uuid.UUID(scan_run_id)):
-            logger.info("agent phase: durch Operator gestoppt")
+            logger.info("agent phase: stopped by the operator")
             _audit_agent_event(engagement_id, "cancelled", scan_run_id=scan_run_id, decision="DENY", reason="cancelled_by_operator")
             break
 
@@ -1279,7 +1279,7 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
                     tools=_TOOLS, tool_choice="auto",
                 )
             except Exception as exc:  # noqa: BLE001 - LLM-Ausfall beendet die Phase sauber
-                logger.warning("agent phase: LLM-Aufruf fehlgeschlagen: %s", exc)
+                logger.warning("agent phase: LLM call failed: %s", exc)
                 _audit_agent_event(engagement_id, "llm_call_failed", scan_run_id=scan_run_id, decision="DENY", reason="llm_call_failed",
                     error=_safe_error(exc), base_url=_safe_url(normalized_base_url),
                     original_base_url=_safe_url(base_url), model=model, normalization=normalization,
@@ -1363,7 +1363,7 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
                 context.exhausted = True
                 context.conclusion = str(arguments.get("summary", ""))
                 _audit_agent_event(engagement_id, "finish_requested", scan_run_id=scan_run_id, decision="ALLOW", reason="llm_finish", summary=context.conclusion)
-                observation = "ok, beendet."
+                observation = "ok, finished."
             elif name == "run_check":
                 _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_tool", proposal=arguments)
                 observation = _handle_run_check(engagement_id, arguments, asset_by_host, ip_by_host, context)
@@ -1392,14 +1392,14 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
                                     reason="llm_proposed_tool_as_function_name", proposal=tool_input)
                 observation = _handle_run_check(engagement_id, tool_input, asset_by_host, ip_by_host, context)
             else:
-                observation = f"REJECTED: unbekanntes Werkzeug {name!r}."
+                observation = f"REJECTED: unknown tool {name!r}."
 
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": observation})
 
     logger.info(
-        "agent phase beendet: %d Iterationen, %d Beobachtungen, %d abgelehnt%s",
+        "agent phase finished: %d iterations, %d observations, %d denied%s",
         context.iterations, len(context.observations), len(context.denied),
-        f", Fazit: {context.conclusion}" if context.conclusion else "",
+        f", conclusion: {context.conclusion}" if context.conclusion else "",
     )
     _audit_agent_event(engagement_id, "finished", scan_run_id=scan_run_id, decision="ALLOW", reason="agent_phase_finished",
         iterations=context.iterations, observations=len(context.observations), denied=len(context.denied), conclusion=context.conclusion, exhausted=context.exhausted,

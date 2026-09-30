@@ -112,7 +112,7 @@ def _network_names(config: dict) -> set[str]:
 
 def test_prod_and_int_use_disjoint_internal_network_names(rendered):
     """REQ-MULTIENV-004 negative test. Found live 2026-08-09: both environments'
-    internal networks (ctrl/runner/control/egress/edge) were hardcoded to the
+    internal networks (ctrl/runner/control/egress/edge/oob) were hardcoded to the
     same literal names, so `docker network inspect asm_ctrl` showed both
     asm_int-postgres-1 and asm_prod-postgres-1 attached to the identical
     network - Docker's embedded DNS then resolved the 'postgres' hostname to
@@ -121,7 +121,7 @@ def test_prod_and_int_use_disjoint_internal_network_names(rendered):
     prod_cfg, int_cfg = rendered
     prod_nets = _network_names(prod_cfg)
     int_nets = _network_names(int_cfg)
-    assert len(prod_nets) == 5 and len(int_nets) == 5, (prod_nets, int_nets)
+    assert len(prod_nets) == 6 and len(int_nets) == 6, (prod_nets, int_nets)
     overlap = prod_nets & int_nets
     assert not overlap, f"prod and int share internal Docker network name(s): {overlap}"
 

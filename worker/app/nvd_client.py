@@ -145,7 +145,7 @@ def fetch_nvd_candidates(product_key: str, api_key: str | None = None) -> list[d
         resp.raise_for_status()
         data = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("NVD-Lookup fuer %s fehlgeschlagen: %s", product_key, exc)
+        logger.warning("NVD lookup for %s failed: %s", product_key, exc)
         return None
 
     candidates: list[dict] = []
@@ -190,7 +190,7 @@ def fetch_epss_scores(cve_ids: list[str]) -> dict[str, float] | None:
             resp.raise_for_status()
             data = resp.json()
         except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("EPSS-Abfrage fuer %d CVEs fehlgeschlagen: %s", len(chunk), exc)
+            logger.warning("EPSS query for %d CVEs failed: %s", len(chunk), exc)
             failures += 1
             continue
         for row in data.get("data", []) if isinstance(data, dict) else []:
@@ -213,7 +213,7 @@ def fetch_kev_catalog() -> tuple[list[str], str | None] | None:
         resp.raise_for_status()
         data = resp.json()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("CISA-KEV-Katalog nicht abrufbar: %s", exc)
+        logger.warning("CISA KEV catalog not retrievable: %s", exc)
         return None
     vulns = data.get("vulnerabilities", []) if isinstance(data, dict) else []
     cve_ids = [v.get("cveID") for v in vulns if isinstance(v, dict) and v.get("cveID")]

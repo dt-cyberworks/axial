@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 
-import { api, type ScopeAsset, type ToolCapability } from "../api/client";
+import { api, type ScanProfile, type ScopeAsset, type ToolCapability } from "../api/client";
+import DiscoverySwitches, { DEFAULT_DISCOVERY_FLAGS, discoveryFlagSummary, type DiscoveryFlags } from "../components/DiscoverySwitches";
+import ScanDepth, { scanDepthLabel } from "../components/ScanDepth";
 
 
 const TOOL_CATEGORIES = ["recon", "fingerprint", "vuln", "cred", "exploit"] as const;
@@ -43,6 +45,8 @@ export default function EngagementWizard() {
   const [tcpPortTo, setTcpPortTo] = useState("65535");
   const [udpDiscoveryEnabled, setUdpDiscoveryEnabled] = useState(false);
   const [assetReviewEnabled, setAssetReviewEnabled] = useState(false);
+  const [discoveryFlags, setDiscoveryFlags] = useState<DiscoveryFlags>(DEFAULT_DISCOVERY_FLAGS);
+  const [scanProfile, setScanProfile] = useState<ScanProfile>("standard");
 
   const [assets, setAssets] = useState<Partial<ScopeAsset>[]>([
     { rule: "allow", asset_type: "domain", value: "", active_allowed: true, authorization_verified: false },
@@ -145,6 +149,8 @@ export default function EngagementWizard() {
         tcp_port_to: lastPort,
         udp_discovery_enabled: udpDiscoveryEnabled,
         asset_review_enabled: assetReviewEnabled,
+        ...discoveryFlags,
+        scan_profile: scanProfile,
       } as any);
       setEngagementId(eng.id);
       setStep(2);
@@ -293,7 +299,11 @@ export default function EngagementWizard() {
             <p className="muted-line">Default: all TCP ports (1-65535). Use the same start and end value to authorize one port only. This is a ceiling for the whole engagement - individual targets can narrow it further in the next step (Scope assets), but never widen it.</p>
             {/* REQ-CONSOLE-011: expert switches are optional and folded away; all default to off. */}
             <details className="advanced-options">
-            <summary>Advanced options (UDP discovery, Vector Agent, asset review)</summary>
+            <summary>Advanced options (discovery extras, UDP discovery, Vector Agent, asset review)</summary>
+            <p className="muted-line">Discovery extras. Each one only ever works inside your scope and tool grants.</p>
+            <DiscoverySwitches flags={discoveryFlags} onChange={setDiscoveryFlags} />
+            <p className="muted-line">Scan depth. It only changes how many checks run on each web service.</p>
+            <ScanDepth value={scanProfile} onChange={setScanProfile} />
             <label className="toggle-row">
               <input type="checkbox" checked={udpDiscoveryEnabled} onChange={(e) => setUdpDiscoveryEnabled(e.target.checked)} />
               <span>Enable bounded UDP discovery (53, 123, 161, 443, 500, 1900, 4500, 5060, 5353)</span>
@@ -507,6 +517,8 @@ export default function EngagementWizard() {
               <dt>TCP discovery</dt><dd>{tcpPortFrom === tcpPortTo ? `port ${tcpPortFrom}` : `ports ${tcpPortFrom}-${tcpPortTo}`}</dd>
               <dt>UDP discovery</dt><dd>{udpDiscoveryEnabled ? "bounded profile enabled" : "disabled"}</dd>
               <dt>Asset review pause</dt><dd>{assetReviewEnabled ? "enabled (pauses after discovery)" : "disabled"}</dd>
+              <dt>Discovery extras</dt><dd>{discoveryFlagSummary(discoveryFlags)}</dd>
+              <dt>Scan depth</dt><dd>{scanDepthLabel(scanProfile)}</dd>
               <dt>Default posture</dt><dd>Bug-bounty style: non-destructive, scoped, budgeted checks</dd>
               <dt>Manual approvals</dt><dd>{manualToolCount()} explicit tools require approval</dd>
             </dl>
@@ -522,6 +534,8 @@ export default function EngagementWizard() {
               <dt>Agent proposals</dt><dd>{aiTestingAllowed ? "enabled" : "disabled"}</dd>
               <dt>TCP discovery</dt><dd>{tcpPortFrom === tcpPortTo ? `port ${tcpPortFrom}` : `ports ${tcpPortFrom}-${tcpPortTo}`}</dd>
               <dt>UDP discovery</dt><dd>{udpDiscoveryEnabled ? "enabled (fixed bounded profile)" : "disabled"}</dd>
+              <dt>Discovery extras</dt><dd>{discoveryFlagSummary(discoveryFlags)}</dd>
+              <dt>Scan depth</dt><dd>{scanDepthLabel(scanProfile)}</dd>
               <dt>Allow scope assets</dt><dd>{allowAssets.length}</dd>
               <dt>Active allow assets</dt><dd>{activeAllowAssets.length}</dd>
               <dt>Manual approvals</dt><dd>{manualToolCount()} explicit tools</dd>

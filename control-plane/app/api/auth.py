@@ -12,10 +12,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import auth_service, sessions
+from app.rate_limit import client_ip, enforce_login_rate_limit
 from app.config import get_settings
 from app.db.base import get_db
 from app.models.user import UserSession
-from app.security import require_user
+from app.security import enforce_csrf, require_user
 from app.models.user import User
 from app.schemas.auth import (
     ChangePasswordIn,
@@ -41,9 +42,13 @@ SESSION_COOKIE = "session"
 
 
 def _client_info(request: Request) -> tuple[str | None, str | None]:
-    forwarded = request.headers.get("x-forwarded-for")
-    ip = (forwarded.split(",")[0].strip() if forwarded else None) or (request.client.host if request.client else None)
-    return ip, request.headers.get("user-agent")
+    # REQ-IAM-017: X-Forwarded-For only from a trusted proxy (see rate_limit.client_ip).
+    return client_ip(request), request.headers.get("user-agent")
+
+
+# GitHub issue #31 (REQ-IAM-016): every unauthenticated step that checks a
+# credential or a challenge counts against the source address's limit.
+_login_rate_limit = [Depends(enforce_login_rate_limit)]
 
 
 def _set_session_cookie(response: Response, raw_token: str) -> None:
@@ -55,7 +60,7 @@ def _set_session_cookie(response: Response, raw_token: str) -> None:
     )
 
 
-@router.post("/login", response_model=LoginChallengeOut)
+@router.post("/login", response_model=LoginChallengeOut, dependencies=_login_rate_limit)
 def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     ip, ua = _client_info(request)
     try:
@@ -66,7 +71,7 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     return LoginChallengeOut(status=status, challenge_id=challenge.id)
 
 
-@router.post("/password/set-first", response_model=LoginChallengeOut)
+@router.post("/password/set-first", response_model=LoginChallengeOut, dependencies=_login_rate_limit)
 def set_first_password(body: SetFirstPasswordIn, request: Request, db: Session = Depends(get_db)):
     ip, ua = _client_info(request)
     try:
@@ -78,7 +83,7 @@ def set_first_password(body: SetFirstPasswordIn, request: Request, db: Session =
     return LoginChallengeOut(status=next_status, challenge_id=challenge.id)
 
 
-@router.post("/mfa/enroll", response_model=MfaEnrollOut)
+@router.post("/mfa/enroll", response_model=MfaEnrollOut, dependencies=_login_rate_limit)
 def mfa_enroll(body: MfaEnrollIn, db: Session = Depends(get_db)):
     try:
         user, raw_secret, uri = auth_service.begin_mfa_enrollment(db, body.challenge_id)
@@ -87,7 +92,7 @@ def mfa_enroll(body: MfaEnrollIn, db: Session = Depends(get_db)):
     return MfaEnrollOut(challenge_id=body.challenge_id, secret=raw_secret, otpauth_uri=uri)
 
 
-@router.post("/mfa/enroll/confirm", response_model=SessionOut)
+@router.post("/mfa/enroll/confirm", response_model=SessionOut, dependencies=_login_rate_limit)
 def mfa_enroll_confirm(body: MfaConfirmIn, request: Request, response: Response, db: Session = Depends(get_db)):
     ip, ua = _client_info(request)
     try:
@@ -97,10 +102,10 @@ def mfa_enroll_confirm(body: MfaConfirmIn, request: Request, response: Response,
     except auth_service.AuthError:
         raise HTTPException(401, "invalid code")
     _set_session_cookie(response, raw_token)
-    return SessionOut(session_token=raw_token, user=UserOut.model_validate(user), backup_codes=backup_codes)
+    return SessionOut(user=UserOut.model_validate(user), backup_codes=backup_codes)
 
 
-@router.post("/login/mfa", response_model=SessionOut)
+@router.post("/login/mfa", response_model=SessionOut, dependencies=_login_rate_limit)
 def login_mfa(body: MfaVerifyIn, request: Request, response: Response, db: Session = Depends(get_db)):
     ip, ua = _client_info(request)
     try:
@@ -108,7 +113,7 @@ def login_mfa(body: MfaVerifyIn, request: Request, response: Response, db: Sessi
     except auth_service.AuthError:
         raise HTTPException(401, "invalid code")
     _set_session_cookie(response, raw_token)
-    return SessionOut(session_token=raw_token, user=UserOut.model_validate(user))
+    return SessionOut(user=UserOut.model_validate(user))
 
 
 @router.post("/logout", status_code=204)
@@ -117,6 +122,8 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     raw_token = None
     if authorization and authorization.lower().startswith("bearer "):
         raw_token = authorization[7:].strip()
+    elif request.cookies.get(SESSION_COOKIE):
+        enforce_csrf(request)  # REQ-IAM-019: the cookie alone is an ambient credential
     raw_token = raw_token or request.cookies.get(SESSION_COOKIE)
     if raw_token:
         auth_service.revoke_session_by_token(db, raw_token)
@@ -141,7 +148,7 @@ def change_password(
     except auth_service.AuthError:
         raise HTTPException(401, "invalid current password")
     _set_session_cookie(response, raw_token)
-    return SessionOut(session_token=raw_token, user=UserOut.model_validate(user))
+    return SessionOut(user=UserOut.model_validate(user))
 
 
 @router.post("/mfa/reenroll/start", response_model=MfaReenrollStartOut)
@@ -166,7 +173,7 @@ def mfa_reenroll_confirm(
     except auth_service.AuthError:
         raise HTTPException(401, "invalid code")
     _set_session_cookie(response, raw_token)
-    return MfaReenrollConfirmOut(backup_codes=backup_codes, session_token=raw_token)
+    return MfaReenrollConfirmOut(backup_codes=backup_codes)
 
 
 @router.get("/sessions", response_model=list[SessionInfoOut])

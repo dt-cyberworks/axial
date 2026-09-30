@@ -12,9 +12,9 @@ import dataclasses
 import datetime as dt
 import fnmatch
 import ipaddress
-import math
 import uuid
 from typing import Literal
+from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -22,11 +22,10 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.settings_store import get_scan_policy
 from app import config_resolver
-from app.gateway import args_safety
+from app.gateway import args_safety, rate_reservation
 from app.gateway.audit import append_audit_log
 from app.tools import registry
 from app.models.approval import ApprovalRequest
-from app.models.audit import AuditLog
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset, ToolApprovalPolicy, ToolGrant
 from app.models.scan_run import ScanRun
 
@@ -195,39 +194,9 @@ def _bound_scan_run(db: Session, call: ToolCall) -> tuple[ScanRun | None, Decisi
     return run, None
 
 
-def _effective_rate_window(max_rps: float) -> float:
-    """GitHub issue #19: a fixed 1-second window cannot express "less than
-    1 request per second" - any positive integer count-threshold within a
-    1-second window still permits at least 1 req/s, however small max_rps
-    is (max(1, int(0.5)) = 1, so 0.5 rps was silently allowed at 1 rps: 2x
-    over-permissive; 0.2 rps at 1 rps: 5x). For max_rps < 1, widen the
-    lookback window to ceil(1/max_rps) seconds instead - the count threshold
-    stays 1 (max(1, int(max_rps)) is always 1 there), so "allowed" now means
-    "zero allowed calls in the last N seconds", the only way to express a
-    sub-1 rate with an integer count. Mirrored (deliberately duplicated, not
-    imported - see egress-proxy/app/proxy.py's own copy) so the gateway and
-    the proxy's independent enforcement paths cannot silently drift apart.
-    """
-    return 1.0 if max_rps >= 1 else math.ceil(1.0 / max_rps)
-
-
-def _rate_retry_after(db: Session, engagement_id: uuid.UUID, max_rps: float) -> float | None:
-    now = dt.datetime.now(dt.timezone.utc)
-    window_seconds = _effective_rate_window(max_rps)
-    window_start = now - dt.timedelta(seconds=window_seconds)
-    rows = db.scalars(
-        select(AuditLog.ts).where(
-            AuditLog.engagement_id == engagement_id,
-            AuditLog.action == "tool_call",
-            AuditLog.decision == "ALLOW",
-            AuditLog.ts >= window_start,
-        ).order_by(AuditLog.ts.asc())
-    ).all()
-    if len(rows) < max(1, int(max_rps)):
-        return None
-    oldest = rows[0]
-    retry_at = oldest + dt.timedelta(seconds=window_seconds)
-    return max(0.1, min((retry_at - now).total_seconds() + 0.05, 5.0))
+# GitHub issue #19's window formula now lives with the reservation primitive
+# (GitHub issue #40); kept under this name for the window tests.
+_effective_rate_window = rate_reservation.effective_rate_window
 
 
 def _create_approval_request(db: Session, call: ToolCall) -> ApprovalRequest:
@@ -291,6 +260,42 @@ def _claim_matching_approval(db: Session, call: ToolCall, approval_request_id: u
     approval.execution_started_at = now
     approval.execution_error = None
     db.add(approval)
+    return None
+
+
+def _extended_discovery_denial(db: Session, eng: Engagement, call: ToolCall, prog: BountyProgram | None) -> Decision | None:
+    """REQ-COVER-003/004/006/007: switch checks and per-URL validation for the
+    opt-in discovery capabilities. None means no objection."""
+    mode = call.args.get("mode") if isinstance(call.args, dict) else None
+    if call.tool == "subfinder" and not eng.subfinder_enabled:
+        return DENY("subfinder_not_enabled")
+    if call.tool == "katana" and not eng.crawling_enabled:
+        return DENY("crawling_not_enabled")
+    if call.tool == "nuclei" and mode == "endpoints":
+        if not eng.crawling_enabled:
+            return DENY("crawling_not_enabled")
+        # The crawler found these URLs; the target list is untrusted input, so
+        # every URL is checked against scope and deny rules like a target.
+        for url in args_safety.endpoint_urls(call.args) or []:
+            parts = urlsplit(url)
+            host = (parts.hostname or "").lower().rstrip(".")
+            path = parts.path or "/"
+            if parts.username or parts.password:
+                return DENY("endpoint_out_of_scope")
+            if _matching_rules(db, eng.id, host, path, "deny"):
+                return DENY("endpoint_out_of_scope")
+            if not _matching_rules(db, eng.id, host, path, "allow"):
+                return DENY("endpoint_out_of_scope")
+    if call.tool == "nuclei" and mode == "oob" and not eng.oob_enabled:
+        return DENY("oob_not_enabled")
+    if call.tool == "screenshot":
+        if not eng.screenshots_enabled:
+            return DENY("screenshots_not_enabled")
+        # A browser cannot be made to carry the program's identification
+        # header on every sub-request through a CONNECT tunnel, so it is not
+        # used where the program requires identification (REQ-COVER-006).
+        if prog is not None and (prog.ident_header_value or prog.ua_suffix):
+            return DENY("screenshots_not_permitted_for_bounty")
     return None
 
 
@@ -371,6 +376,10 @@ def authorize(db: Session, call: ToolCall, *, approved_request_id: uuid.UUID | N
     tool_spec = registry.get(call.tool)
     if call.mode == "passive" and (tool_spec is None or tool_spec.execution_class != "passive"):
         return _log_and_return(db, call, DENY("passive_not_supported"))
+    # REQ-COVER-007: pipeline-only tools (katana, screenshot, subfinder) are
+    # never callable from an agent proposal, whatever the switches say.
+    if call.phase == "agent" and tool_spec is not None and not tool_spec.agent_callable:
+        return _log_and_return(db, call, DENY("tool_not_agent_callable"))
     if not registry.validate_args(call.tool, call.args):
         return _log_and_return(db, call, DENY("unsafe_arguments"))
 
@@ -381,15 +390,25 @@ def authorize(db: Session, call: ToolCall, *, approved_request_id: uuid.UUID | N
     if not config_resolver.effective_tool_config(db, eng.id, call.tool).enabled:
         return _log_and_return(db, call, DENY("tool_disabled"))
 
+    # 5c. REQ-COVER-007: per-engagement switches for the extended discovery
+    #     capabilities. They can only narrow what the steps above allow.
+    switch_denial = _extended_discovery_denial(db, eng, call, prog)
+    if switch_denial is not None:
+        return _log_and_return(db, call, switch_denial)
+
     # 6. Rate-Limit / Blast-Radius (bei bug_bounty aus Programm-Policy).
     # If auto-throttle is enabled, the gateway returns a wait/retry decision
     # instead of a hard denial. The worker must re-authorize after waiting.
+    # GitHub issue #40: reserve the slot now, atomically, instead of counting
+    # earlier ALLOW audit rows and hoping no concurrent call does the same. A
+    # call that does not go ahead after all (budget, approval) gives the slot
+    # back before this transaction commits.
     scan_policy = get_scan_policy(db)
     limit = float(prog.max_rps) if prog else scan_policy.max_rps
-    retry_after = _rate_retry_after(db, eng.id, limit)
-    if retry_after is not None:
+    reservation = rate_reservation.reserve(db, eng.id, "gateway", limit)
+    if not reservation.allowed:
         if scan_policy.auto_throttle_enabled:
-            return _log_and_return(db, call, THROTTLE("rate_limited_wait", retry_after))
+            return _log_and_return(db, call, THROTTLE("rate_limited_wait", reservation.retry_after_seconds))
         return _log_and_return(db, call, DENY("rate_limited"))
 
     # GitHub issue #32: a dedicated step 7 used to re-deny here whenever a
@@ -408,6 +427,7 @@ def authorize(db: Session, call: ToolCall, *, approved_request_id: uuid.UUID | N
     #    den niemand ruft. Gezaehlt werden nur tatsaechlich freigegebene Calls
     #    (die dispatcht werden); abgelehnte Vorschlaege verbrauchen kein Budget.
     if run is not None and run.budget_tool_calls_used >= run.budget_tool_calls_max:
+        rate_reservation.release(db, reservation)
         return _log_and_return(db, call, DENY("budget_exhausted"))
 
     # 8. Human-in-the-loop. A resumed approval does not bypass this block: it
@@ -425,14 +445,18 @@ def authorize(db: Session, call: ToolCall, *, approved_request_id: uuid.UUID | N
     )
     requires_approval = state_changing or _tool_requires_manual_approval(db, eng.id, grant, call.tool)
     if state_changing and not (call.risk and str(call.risk.get("description") or "").strip()):
+        rate_reservation.release(db, reservation)
         return _log_and_return(db, call, DENY("risk_statement_required"))
     if approved_request_id is not None:
         # A policy change that removes the approval requirement must not turn an
         # already issued approval into an unclaimed reusable dispatch token.
         claim_error = _claim_matching_approval(db, call, approved_request_id)
         if claim_error is not None:
+            rate_reservation.release(db, reservation)
             return _log_and_return(db, call, claim_error)
     elif requires_approval:
+        # The call only runs once approved; it reserves a slot again then.
+        rate_reservation.release(db, reservation)
         approval = _create_approval_request(db, call)
         return _log_and_return(
             db, call, Decision(allowed=False, reason="pending_approval", is_pending=True,

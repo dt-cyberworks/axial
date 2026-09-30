@@ -66,6 +66,16 @@ class Engagement(Base):
     # der Pipeline sie beruehrt (REQ-ASSETREVIEW-001). Default false = kein
     # Verhaltensunterschied zu vorher.
     asset_review_enabled: Mapped[bool] = mapped_column(server_default="false")
+    # Per-Engagement-Schalter fuer erweiterte Entdeckung (REQ-COVER-007). Sie
+    # koennen nur verengen: das Gateway erzwingt sie bei jedem Tool-Aufruf.
+    subfinder_enabled: Mapped[bool] = mapped_column(server_default="true")
+    crawling_enabled: Mapped[bool] = mapped_column(server_default="false")
+    oob_enabled: Mapped[bool] = mapped_column(server_default="false")
+    screenshots_enabled: Mapped[bool] = mapped_column(server_default="false")
+    # REQ-PIPE-005: scan depth. `standard` selects checks from what the scan
+    # observed; `thorough` runs every template on every web surface. Neither
+    # widens scope, grants or switches.
+    scan_profile: Mapped[str] = mapped_column(String(16), nullable=False, server_default="standard")
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
     # REQ-IAM-007: wer dieses Engagement angelegt hat/besitzt. NULL bei
     # Alt-Zeilen vor dem Backfill (Rollout-Schritt) - bis dahin fuer NICHT-

@@ -240,7 +240,6 @@ def test_pipeline_passes_fingerprint_services_to_correlation(monkeypatch):
     correlated = []
     monkeypatch.setattr(pipeline.correlate, "run", lambda eid, services: correlated.extend(services) or [])
     monkeypatch.setattr(pipeline.agent, "run", lambda *a, **k: SimpleNamespace(incomplete_reason=None))
-    monkeypatch.setattr(pipeline.validate, "run", lambda *a, **k: [])
     monkeypatch.setattr(pipeline.score, "run", lambda *a, **k: {})
     monkeypatch.setattr(pipeline.report, "run", lambda *a, **k: {})
 

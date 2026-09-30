@@ -24,9 +24,9 @@ MIGRATIONS = sorted((pathlib.Path(__file__).resolve().parents[2] / "migrations")
 
 _DATA_TABLES = [
     "audit_log", "finding_observation", "agent_step", "approval_request", "asset_review_request",
-    "finding", "service", "dns_record", "report", "openwire_callback_token",
+    "finding", "service", "dns_record", "report", "openwire_callback_token", "scan_check", "scan_surface",
     "discovered_asset", "resolved_host", "bounty_program", "tool_approval_policy",
-    "tool_grant", "scope_asset", "scan_run", "app_setting", "engagement", "customer",
+    "tool_grant", "scope_asset", "scan_run", "rate_reservation", "app_setting", "engagement", "customer",
     "account_audit_log", "user_session", "login_challenge", "user_backup_code", "app_user",
     "cve_lookup_cache", "epss_score_cache", "kev_catalog_cache",
 ]

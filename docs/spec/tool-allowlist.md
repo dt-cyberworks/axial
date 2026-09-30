@@ -46,8 +46,8 @@ for external assessments.
 
 | Tool | Purpose | Mode |
 |---|---|---|
-| `subfinder` | passive subdomain enumeration | passive |
-| `amass` | subdomain/OSINT (passive mode) | passive |
+| `subfinder` (runs in the worker image, REQ-COVER-001; per-engagement switch) | passive subdomain enumeration | passive |
+| `amass` (retired, REQ-COVER-005: not enabled) | subdomain/OSINT (passive mode) | passive |
 | `dnsx` / `dnsutils` | DNS resolution, records | passive |
 | `tlsx` | TLS/certificate data | passive |
 | (crt.sh via API) | certificate-transparency logs | passive |
@@ -57,9 +57,9 @@ for external assessments.
 | Tool | Purpose | Mode |
 |---|---|---|
 | `httpx` | HTTP probing, tech/title detection | active (light) |
-| `whatweb` | technology-stack detection | active (light) |
+| `whatweb` (retired, REQ-COVER-005: not enabled) | technology-stack detection | active (light) |
 | `nmap` | service/version detection (`-sV`) | active |
-| `sslscan` / `testssl` | TLS configuration analysis | active (light) |
+| `sslscan` (retired, REQ-COVER-005: not enabled) / `testssl` | TLS configuration analysis | active (light) |
 | `wafw00f` | WAF detection | active (light) |
 
 > [!IMPORTANT]
@@ -86,7 +86,7 @@ for external assessments.
 
 | Tool | Purpose | Mode |
 |---|---|---|
-| (in-house default-credential check) | known default logins only, max. 3 attempts | active ⚖ |
+| (in-house default-credential check; retired, REQ-COVER-005: not enabled) | known default logins only, max. 3 attempts | active ⚖ |
 
 > [!IMPORTANT]
 > **⚖ LEGAL / SECURITY — no brute force, no general-purpose crackers.**

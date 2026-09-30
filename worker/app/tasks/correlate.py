@@ -74,14 +74,14 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
         for name, version, source_label in _resolve_signatures(entry)
     ]
     if not signatures:
-        logger.info("correlate: keine korrelierbaren Produkt/Version-Signale fuer engagement %s", engagement_id)
+        logger.info("correlate: no product/version signals to correlate for engagement %s", engagement_id)
         return []
 
     try:
         nvd_config = client.get_nvd_config()
         api_key = nvd_config.get("api_key") or None
     except Exception as exc:  # noqa: BLE001 - config lookup failure -> just no key
-        logger.warning("NVD-Config nicht abrufbar, fahre ohne API-Key fort: %s", exc)
+        logger.warning("NVD config not retrievable, continuing without an API key: %s", exc)
         api_key = None
 
     nvd_ok = epss_ok = kev_ok = True
@@ -95,7 +95,7 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
         try:
             cached = client.get_cve_lookup_cache(key)
         except Exception as exc:  # noqa: BLE001 - cache read failure is not an NVD failure
-            logger.warning("cve_lookup_cache nicht lesbar fuer %s: %s", key, exc)
+            logger.warning("cve_lookup_cache not readable for %s: %s", key, exc)
             cached = None
         if cached is not None and not _is_stale(cached.get("fetched_at"), NVD_CACHE_TTL_SECONDS):
             candidates_by_key[key] = cached["candidates"]
@@ -109,7 +109,7 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
         try:
             client.put_cve_lookup_cache(key, fetched)
         except Exception as exc:  # noqa: BLE001 - a cache-write failure must not drop the data we already have
-            logger.warning("cve_lookup_cache nicht schreibbar fuer %s: %s", key, exc)
+            logger.warning("cve_lookup_cache not writable for %s: %s", key, exc)
 
     # 2. Local version-range filter -> per-service CVE matches (REQ-CORR-001).
     matches: list[dict] = []
@@ -131,7 +131,7 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
 
     if not matches:
         if not nvd_ok:
-            logger.warning("correlate: NVD nicht erreichbar fuer engagement %s, keine Treffer diesen Lauf", engagement_id)
+            logger.warning("correlate: NVD not reachable for engagement %s, no matches this run", engagement_id)
         return []
 
     all_cve_ids = sorted({m["cve_id"] for m in matches})
@@ -141,7 +141,7 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
         epss_cached = client.get_epss_cache(all_cve_ids)
         epss_scores: dict[str, float] = dict(epss_cached.get("scores") or {})
     except Exception as exc:  # noqa: BLE001
-        logger.warning("epss_cache nicht lesbar: %s", exc)
+        logger.warning("epss_cache not readable: %s", exc)
         epss_scores = {}
     missing_epss = [c for c in all_cve_ids if c not in epss_scores]
     if missing_epss:
@@ -154,14 +154,14 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
                 try:
                     client.put_epss_cache(fetched_epss)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("epss_cache nicht schreibbar: %s", exc)
+                    logger.warning("epss_cache not writable: %s", exc)
 
     # 4. KEV membership, cache-first, once per run (REQ-CORR-003/004).
     kev_ids: set[str] = set()
     try:
         kev_cached = client.get_kev_catalog_cache()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("kev_catalog_cache nicht lesbar: %s", exc)
+        logger.warning("kev_catalog_cache not readable: %s", exc)
         kev_cached = {}
     kev_ids = set(kev_cached.get("cve_ids") or [])
     if _is_stale(kev_cached.get("fetched_at"), KEV_CACHE_TTL_SECONDS):
@@ -174,7 +174,7 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
             try:
                 client.put_kev_catalog_cache(ids, catalog_version)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("kev_catalog_cache nicht schreibbar: %s", exc)
+                logger.warning("kev_catalog_cache not writable: %s", exc)
 
     # 5. Persist findings (REQ-CORR-005: partial source failure never
     # discards matches already obtained from the sources that did succeed).
@@ -194,8 +194,8 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
 
     if not (nvd_ok and epss_ok and kev_ok):
         logger.warning(
-            "correlate: degraded outcome fuer engagement %s (nvd_ok=%s epss_ok=%s kev_ok=%s) - "
-            "%d Findings trotzdem persistiert",
+            "correlate: degraded outcome for engagement %s (nvd_ok=%s epss_ok=%s kev_ok=%s) - "
+            "%d findings persisted anyway",
             engagement_id, nvd_ok, epss_ok, kev_ok, len(written),
         )
     return written

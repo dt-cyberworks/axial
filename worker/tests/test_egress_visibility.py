@@ -47,4 +47,7 @@ def test_dispatch_reports_block_not_clean(monkeypatch):
                         lambda *a, **k: {"stdout": "missing_engagement_id_header", "stderr": "", "success": True})
     obs = dispatch.dispatch("019649b8-0000-7000-8000-000000000001", "aid", "nikto", "example.org")
     assert "EGRESS BLOCKED" in obs.as_text()
-    assert "keine" not in obs.as_text().lower()  # nicht als 'keine Treffer' getarnt
+    # Not disguised as a clean result (these are the tools' "nothing found" summaries).
+    text = obs.as_text().lower()
+    for clean in ("no missing security headers reported", "no template matches", "no hits", "no waf detected"):
+        assert clean not in text

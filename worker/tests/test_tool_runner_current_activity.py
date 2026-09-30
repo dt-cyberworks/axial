@@ -12,7 +12,7 @@ _RUN_ID = "33333333-3333-3333-3333-333333333333"
 
 def _runner(monkeypatch, post_result):
     runner = trc.ToolRunnerClient()
-    monkeypatch.setattr(runner, "_post_cancellable", lambda path, payload, scan_run_id: post_result)
+    monkeypatch.setattr(runner, "_post_cancellable", lambda path, payload, scan_run_id, budget_s=None: post_result)
     return runner
 
 
@@ -58,7 +58,7 @@ def test_activity_is_cleared_even_when_the_tool_call_raises(monkeypatch):
     monkeypatch.setattr(cpc.client, "update_scan_run", lambda scan_run_id, **fields: calls.append(fields))
     runner = trc.ToolRunnerClient()
 
-    def boom(path, payload, scan_run_id):
+    def boom(path, payload, scan_run_id, budget_s=None):
         raise RuntimeError("dispatch thread failure")
 
     monkeypatch.setattr(runner, "_post_cancellable", boom)

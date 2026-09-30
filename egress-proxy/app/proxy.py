@@ -28,13 +28,12 @@ import datetime as dt
 import fnmatch
 import ipaddress
 import logging
-import math
 import os
 import time
 import uuid
 from urllib.parse import urlsplit
 
-from app.audit_client import submit_audit
+from app.audit_client import reserve_rate_slot, submit_audit
 from app.ssrf_guard import BlockedAddressError, vet_target_host
 from app.db import (
     active_engagements_for_materialized_ip,
@@ -43,7 +42,6 @@ from app.db import (
     is_materialized_ip,
     load_engagement,
     matching_scope_assets,
-    recent_allowed_count,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,17 +95,6 @@ def _matches_host(host: str, asset: dict) -> bool:
         except ValueError:
             return False
     return False
-
-
-def _effective_rate_window(max_rps: float) -> float:
-    """GitHub issue #19: mirrors control-plane/app/gateway/authorize.py's own
-    copy (deliberately duplicated, not imported - same defense-in-depth
-    reasoning as _matches_host's own cross-reference comment). A fixed
-    1-second window cannot express "less than 1 request per second" - widen
-    the lookback window to ceil(1/max_rps) seconds when max_rps < 1, so
-    "allowed" means "zero allowed calls in the last N seconds", the only way
-    an integer count can express a sub-1 rate."""
-    return 1.0 if max_rps >= 1 else math.ceil(1.0 / max_rps)
 
 
 def _effective_port_range(asset: dict, eng: dict) -> tuple[int, int]:
@@ -224,17 +211,9 @@ async def evaluate(engagement_id: str, host: str, path: str, port: int) -> tuple
         prog = await asyncio.to_thread(bounty_program_for, engagement_id)
         if prog is None:
             return False, "bounty_program_missing"
-        max_rps = float(prog["max_rps"])
-        # GitHub issue #19: threshold and window both derived the same way as
-        # the gateway's own copy - max(1, int(max_rps)) alone was the bug
-        # (compared against a FIXED 1-second window regardless of max_rps, so
-        # any max_rps < 1 still permitted 1 req/s: 2x-5x over the configured
-        # limit for the fractional values a program can actually configure).
-        window_seconds = _effective_rate_window(max_rps)
-        threshold = max(1, int(max_rps))
-        recent = await asyncio.to_thread(recent_allowed_count, engagement_id, window_seconds)
-        if recent >= threshold:
-            return False, "rate_limited"
+        # GitHub issue #40: the max_rps check is no longer a read here - the
+        # slot is reserved atomically right before forwarding
+        # (_reserve_rate_slot), after every other check has passed.
         # GitHub issue #30: max_concurrency was configured, stored, and even
         # SELECTed here - but never enforced anywhere. In-memory, per-proxy-
         # instance counter (consistent with MAX_CONCURRENT_CLIENTS/
@@ -246,6 +225,21 @@ async def evaluate(engagement_id: str, host: str, path: str, port: int) -> tuple
             return False, "concurrency_limit_exceeded"
 
     return True, "allow"
+
+
+async def _reserve_rate_slot(engagement_id: str) -> tuple[bool, str]:
+    """GitHub issue #40 (REQ-RATE-005): reserve one of the program's max_rps
+    slots, through the control plane (this proxy is read-only on the
+    database). Called last, right before a request is audited and forwarded.
+    An unreachable control plane denies: nothing leaves without a slot."""
+    try:
+        result = await asyncio.to_thread(reserve_rate_slot, engagement_id)
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        logger.error("rate reservation failed for engagement %s: %s", engagement_id, exc)
+        return False, "rate_reservation_unavailable"
+    if result.get("allowed"):
+        return True, "allow"
+    return False, str(result.get("reason") or "rate_limited")
 
 
 class RequestTooSlowError(Exception):
@@ -449,6 +443,8 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                         engagement_id, int(prog_for_slot["max_concurrency"]),
                     ):
                         allowed, reason = False, "concurrency_limit_exceeded"
+                    elif prog_for_slot is not None:
+                        allowed, reason = await _reserve_rate_slot(engagement_id)
             try:
                 if not await _submit_audit_or_deny(
                     writer, engagement_id, "ALLOW" if allowed else "DENY", reason,
@@ -515,6 +511,8 @@ async def _forward_plain_http(
         # whatever happens next (connect failure, relay error, client abort).
         if prog is not None and not _try_acquire_concurrency_slot(engagement_id, int(prog["max_concurrency"])):
             allowed, reason = False, "concurrency_limit_exceeded"
+        elif prog is not None:
+            allowed, reason = await _reserve_rate_slot(engagement_id)
 
     try:
         if not await _submit_audit_or_deny(

@@ -25,5 +25,5 @@ def run(engagement_id: str, scan_run_id: str | None = None) -> dict:
             scan_run_id=uuid.UUID(scan_run_id) if scan_run_id else None,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("report phase: Reporterzeugung fehlgeschlagen: %s", exc)
+        logger.warning("report phase: report generation failed: %s", exc)
         return {"status": "failed", "error": str(exc)[:500]}

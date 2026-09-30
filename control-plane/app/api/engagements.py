@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app import config_resolver, scan_diff, scan_readiness
+from app import config_resolver, scan_diff, scan_plan, scan_readiness
 from app.config import get_settings
 from app.pdf import pdf_escape as _pdf_escape  # noqa: F401  (kept for existing callers/tests)
 from app.pdf import simple_pdf as _simple_pdf
@@ -23,10 +23,12 @@ from app.tools import registry
 from app.models.approval import ApprovalRequest
 from app.models.asset import DiscoveredAsset, Service
 from app.models.asset_review import AssetReviewRequest
+from app.models.discovery_artifacts import DiscoveredEndpoint, WebScreenshot
 from app.models.dns_record import DnsRecord
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset, ToolApprovalPolicy, ToolGrant
 from app.models.finding import Finding, FindingObservation
 from app.models.report import Report
+from app.models.rate_reservation import RateReservation
 from app.models.resolved_host import ResolvedHost
 from app.models.scan_run import AgentStep, ScanRun
 from app.models.surface_graph import SurfaceEdge, SurfaceNode
@@ -83,9 +85,18 @@ def create_engagement(body: EngagementCreate, user: User = Depends(require_user)
             "title": eng.title, "source": eng.source,
             "tcp_port_range": f"{eng.tcp_port_from}-{eng.tcp_port_to}",
             "udp_discovery_enabled": eng.udp_discovery_enabled,
+            "scan_profile": eng.scan_profile,
+            **_discovery_switches(eng),
         },
     )
     return eng
+
+
+DISCOVERY_SWITCHES = ("subfinder_enabled", "crawling_enabled", "oob_enabled", "screenshots_enabled")
+
+
+def _discovery_switches(eng: Engagement) -> dict[str, bool]:
+    return {name: bool(getattr(eng, name)) for name in DISCOVERY_SWITCHES}
 
 
 @router.put("/{engagement_id}/owner", response_model=EngagementOut)
@@ -191,6 +202,7 @@ def _authorization_config_payload(eng: Engagement, assets: list[ScopeAsset], gra
             for g in grants
         ],
         "manual_approval_tools": [p.tool_name for p in policies if p.requires_manual_approval],
+        "discovery_switches": _discovery_switches(eng),
     }
 
 
@@ -243,6 +255,16 @@ def _authorization_pdf(eng: Engagement, assets: list[ScopeAsset], grants: list[T
     else:
         lines.append("- No tool grants configured.")
 
+    switches = _discovery_switches(eng)
+    lines.extend([
+        "",
+        "Extended discovery (per-engagement switches)",
+        f"- Passive subdomain discovery with subfinder: {'enabled' if switches['subfinder_enabled'] else 'disabled'}",
+        f"- Crawling and URL history: {'enabled' if switches['crawling_enabled'] else 'disabled'}",
+        f"- Out-of-band interaction testing: {'enabled' if switches['oob_enabled'] else 'disabled'}",
+        f"- Web screenshots: {'enabled' if switches['screenshots_enabled'] else 'disabled'}",
+    ])
+
     lines.extend(["", "Tools requiring manual approval"])
     if manual_tools:
         for tool in manual_tools:
@@ -294,8 +316,14 @@ def update_engagement(
 ):
     eng = _get_engagement_or_404(db, engagement_id)
     changes = body.model_dump(exclude_unset=True)
+    # REQ-COVER-007: switches are booleans, never null; editable at any status
+    # because they can only narrow what the scope and grants already allow.
+    for name in (*DISCOVERY_SWITCHES, "scan_profile"):
+        if name in changes and changes[name] is None:
+            del changes[name]
     if not changes:
         return eng
+    switches_before = _discovery_switches(eng)
 
     new_from = changes.get("authorized_from", eng.authorized_from)
     new_until = changes.get("authorized_until", eng.authorized_until)
@@ -315,7 +343,14 @@ def update_engagement(
         setattr(eng, key, value)
     append_audit_log(
         db, engagement_id=eng.id, actor=f"user:{user.email}", action="engagement_updated",
-        decision="ALLOW", reason="metadata_updated", payload={"fields": sorted(changes.keys())},
+        decision="ALLOW", reason="metadata_updated",
+        payload={
+            "fields": sorted(changes.keys()),
+            "switch_changes": {
+                k: v for k, v in _discovery_switches(eng).items() if v != switches_before[k]
+            },
+            **({"scan_profile": eng.scan_profile} if "scan_profile" in changes else {}),
+        },
     )
     db.commit()
     db.refresh(eng)
@@ -428,7 +463,10 @@ def _delete_engagement_dependents(db: Session, engagement_id: uuid.UUID) -> None
     # 500s (ForeignKeyViolation) since scan_run rows it references were never
     # cleared first. Delete leaf-first like everything else here.
     db.execute(delete(Report).where(Report.engagement_id == engagement_id))
+    db.execute(delete(DiscoveredEndpoint).where(DiscoveredEndpoint.engagement_id == engagement_id))  # REQ-COVER-003
+    db.execute(delete(WebScreenshot).where(WebScreenshot.engagement_id == engagement_id))  # REQ-COVER-006
     db.execute(delete(ScanRun).where(ScanRun.engagement_id == engagement_id))
+    db.execute(delete(RateReservation).where(RateReservation.engagement_id == engagement_id))  # GitHub issue #40
     db.execute(delete(BountyProgram).where(BountyProgram.engagement_id == engagement_id))
     db.execute(delete(ToolApprovalPolicy).where(ToolApprovalPolicy.engagement_id == engagement_id))
     db.execute(delete(ToolGrant).where(ToolGrant.engagement_id == engagement_id))
@@ -1038,6 +1076,20 @@ def list_agent_steps(engagement_id: uuid.UUID, run_id: uuid.UUID, db: Session = 
          "stop_reason": s.stop_reason, "created_at": s.created_at.isoformat() if s.created_at else None}
         for s in steps
     ]
+
+
+@router.get("/{engagement_id}/scan-runs/{run_id}/plan")
+def scan_run_plan(engagement_id: uuid.UUID, run_id: uuid.UUID, db: Session = Depends(get_db)):
+    """REQ-PIPE-003/010: the surfaces of this run with their technology profile
+    and, per surface, every planned or skipped check with its reason, state,
+    duration and findings. Response headers are not part of the public shape."""
+    run = db.get(ScanRun, run_id)
+    if run is None or run.engagement_id != engagement_id:
+        raise HTTPException(404, "scan_run not found for this engagement")
+    plan = scan_plan.read_plan(db, run_id)
+    plan["scan_profile"] = run.scan_profile or "standard"
+    plan["state"] = run.state
+    return plan
 
 
 @router.get("/{engagement_id}/scan-runs/{run_id}/diff")

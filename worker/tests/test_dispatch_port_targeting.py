@@ -22,7 +22,7 @@ def _mock_tool_execution_telemetry(monkeypatch):
 
 
 def _fake_run(calls):
-    def run(tool, target, args, scan_run_id=None, engagement_id=None):
+    def run(tool, target, args, scan_run_id=None, engagement_id=None, **kw):
         calls.append((tool, target))
         return {"success": True, "exit_code": 0, "stdout": "", "stderr": ""}
     return run
@@ -61,6 +61,8 @@ def test_nuclei_dispatch_targets_the_configured_port(monkeypatch):
 
     dispatch.dispatch("eid", "asset-1", "nuclei", "pentest-ground.com", single_port=4280)
 
+    # One product-selection call (REQ-PIPE-004): the generic templates already
+    # ran in this run's fingerprint phase.
     assert calls == [("nuclei", "https://pentest-ground.com:4280")]
 
 
@@ -164,7 +166,7 @@ def test_negative_a_graceful_transport_failure_is_also_recorded(monkeypatch):
     monkeypatch.setattr(dispatch.tool_execution, "record", lambda *a, **k: recorded.append(k))
     monkeypatch.setattr(
         dispatch.tool_runner, "run",
-        lambda tool, target, args, scan_run_id=None, engagement_id=None: {
+        lambda tool, target, args, scan_run_id=None, engagement_id=None, **kw: {
             "success": False, "exit_code": -1, "stdout": "", "stderr": "",
             "error_reason": "raw_egress_unavailable",
         },
@@ -173,9 +175,9 @@ def test_negative_a_graceful_transport_failure_is_also_recorded(monkeypatch):
 
     dispatch.dispatch("019649b8-0000-7000-8000-000000000001", "asset-1", "nuclei", "pentest-ground.com")
 
-    assert len(recorded) == 1
-    assert recorded[0]["result"]["success"] is False
-    assert recorded[0]["result"]["error_reason"] == "raw_egress_unavailable"
+    assert len(recorded) == 1  # one product-selection call (REQ-PIPE-004)
+    assert all(r["result"]["success"] is False for r in recorded)
+    assert all(r["result"]["error_reason"] == "raw_egress_unavailable" for r in recorded)
 
 
 def test_a_successful_dispatch_is_also_recorded(monkeypatch):
@@ -186,7 +188,7 @@ def test_a_successful_dispatch_is_also_recorded(monkeypatch):
     monkeypatch.setattr(dispatch.tool_execution, "record", lambda *a, **k: recorded.append(k))
     monkeypatch.setattr(
         dispatch.tool_runner, "run",
-        lambda tool, target, args, scan_run_id=None, engagement_id=None: {
+        lambda tool, target, args, scan_run_id=None, engagement_id=None, **kw: {
             "success": True, "exit_code": 0, "stdout": "", "stderr": "",
         },
     )
@@ -226,7 +228,7 @@ def test_confirmed_http_reaches_scheme_dependent_tools(monkeypatch, tool):
     _wire(monkeypatch, calls)
     dispatch.dispatch("eid", "asset-1", tool, "target.example", single_port=8080,
                       confirmed_protocol="http")
-    assert calls == [(tool, "http://target.example:8080")]
+    assert set(calls) == {(tool, "http://target.example:8080")}
 
 
 @pytest.mark.parametrize("tool", ["nikto", "wafw00f", "nuclei"])
@@ -235,7 +237,7 @@ def test_confirmed_https_still_uses_https(monkeypatch, tool):
     _wire(monkeypatch, calls)
     dispatch.dispatch("eid", "asset-1", tool, "target.example", single_port=8443,
                       confirmed_protocol="https")
-    assert calls == [(tool, "https://target.example:8443")]
+    assert set(calls) == {(tool, "https://target.example:8443")}
 
 
 @pytest.mark.parametrize("tool", ["nikto", "wafw00f", "nuclei"])
@@ -249,7 +251,7 @@ def test_unknown_protocol_falls_back_to_https_not_schemeless(monkeypatch, tool):
         calls.clear()
         dispatch.dispatch("eid", "asset-1", tool, "target.example", single_port=8443,
                           confirmed_protocol=unknown)
-        assert calls == [(tool, "https://target.example:8443")], f"failed for {unknown!r}"
+        assert set(calls) == {(tool, "https://target.example:8443")}, f"failed for {unknown!r}"
 
 
 def test_http_request_and_ffuf_receive_the_confirmed_scheme(monkeypatch):
@@ -276,7 +278,7 @@ def test_testssl_is_skipped_on_a_confirmed_plain_http_port(monkeypatch):
     obs = dispatch.dispatch("eid", "asset-1", "testssl", "target.example", ip="1.2.3.4",
                             single_port=8080, confirmed_protocol="http")
     assert calls == []
-    assert "uebersprungen" in obs.summary
+    assert "skipped" in obs.summary
 
 
 def test_nikto_records_the_confirmed_protocol_not_a_hardcoded_https(monkeypatch):

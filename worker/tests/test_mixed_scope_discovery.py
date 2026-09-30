@@ -18,7 +18,7 @@ def test_mixed_domain_ip_cidr_scope_produces_every_candidate_type_together(monke
     rec = _setup(
         monkeypatch,
         [
-            {"rule": "allow", "asset_type": "domain", "value": "example.com"},
+            {"rule": "allow", "asset_type": "domain", "value": "example.com", "active_allowed": True},
             {"rule": "allow", "asset_type": "ip", "value": "198.51.100.9", "active_allowed": True},
             {"rule": "allow", "asset_type": "cidr", "value": "203.0.113.0/28", "active_allowed": True},
             # A false-positive host deselected during a prior asset review -
@@ -74,7 +74,7 @@ def test_mixed_scope_second_run_still_finds_a_new_host_after_the_deny_exists(mon
     rec = _setup(
         monkeypatch,
         [
-            {"rule": "allow", "asset_type": "domain", "value": "example.com"},
+            {"rule": "allow", "asset_type": "domain", "value": "example.com", "active_allowed": True},
             {"rule": "allow", "asset_type": "ip", "value": "198.51.100.9", "active_allowed": True},
             {"rule": "allow", "asset_type": "cidr", "value": "203.0.113.0/28", "active_allowed": True},
             {"rule": "deny", "asset_type": "ip", "value": "203.0.113.5", "active_allowed": False},

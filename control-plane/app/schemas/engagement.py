@@ -36,6 +36,11 @@ class EngagementCreate(BaseModel):
     tcp_port_to: int = Field(default=65535, ge=1, le=65535)
     udp_discovery_enabled: bool = False
     asset_review_enabled: bool = False
+    subfinder_enabled: bool = True
+    crawling_enabled: bool = False
+    oob_enabled: bool = False
+    screenshots_enabled: bool = False
+    scan_profile: Literal["standard", "thorough"] = "standard"
 
     @model_validator(mode="after")
     def validate_tcp_port_range(self):
@@ -76,6 +81,11 @@ class EngagementUpdate(BaseModel):
     tcp_port_to: int | None = Field(default=None, ge=1, le=65535)
     udp_discovery_enabled: bool | None = None
     asset_review_enabled: bool | None = None
+    subfinder_enabled: bool | None = None
+    crawling_enabled: bool | None = None
+    oob_enabled: bool | None = None
+    screenshots_enabled: bool | None = None
+    scan_profile: Literal["standard", "thorough"] | None = None
 
 
 class EngagementOut(BaseModel):
@@ -90,6 +100,11 @@ class EngagementOut(BaseModel):
     tcp_port_to: int = 65535
     udp_discovery_enabled: bool = False
     asset_review_enabled: bool = False
+    subfinder_enabled: bool = True
+    crawling_enabled: bool = False
+    oob_enabled: bool = False
+    screenshots_enabled: bool = False
+    scan_profile: str = "standard"
     authorized_from: datetime.datetime
     authorized_until: datetime.datetime
     emergency_contact: str | None = None

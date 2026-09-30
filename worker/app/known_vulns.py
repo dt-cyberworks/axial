@@ -40,11 +40,11 @@ KNOWN_VULNS: list[KnownVuln] = [
     KnownVuln("proftpd", ["CVE-2010-4221"], 7.5, 0.60, False,
               "ProFTPd - Remote Command Execution (Telnet IAC)"),
     KnownVuln("openssh", ["CVE-2016-6210"], 5.9, 0.10, False,
-              "OpenSSH - veraltete Version"),
+              "OpenSSH - outdated version"),
     KnownVuln("apache tomcat", ["CVE-2009-2693"], 6.4, 0.20, False,
-              "Apache Tomcat - veraltete Version"),
+              "Apache Tomcat - outdated version"),
     KnownVuln("mysql", ["CVE-2012-2122"], 7.5, 0.30, False,
-              "MySQL - Authentication Bypass bei wiederholtem Login"),
+              "MySQL - authentication bypass on repeated login"),
 ]
 
 

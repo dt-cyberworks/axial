@@ -15,7 +15,11 @@ _WORKER_DISPATCHABLE = {
 }
 # Diese sind zwar default_enabled, aber NICHT dispatch-faehig -> duerfen dem
 # Agenten nie angeboten werden.
-_ENABLED_BUT_NOT_DISPATCHABLE = {"whatweb", "sslscan", "subfinder", "amass", "default-cred-check"}
+# Nur noch subfinder (REQ-COVER-001: laeuft im Worker-Image, der Discovery-Task ruft es
+# direkt, nicht ueber den Tool-Runner); die uebrigen
+# Tools ohne Aufrufer wurden mit REQ-COVER-005 aus der Whitelist genommen.
+_ENABLED_BUT_NOT_DISPATCHABLE = {"subfinder"}
+_RETIRED = {"whatweb", "sslscan", "amass", "default-cred-check"}
 
 
 def test_agent_dispatchable_matches_worker():
@@ -36,3 +40,18 @@ def test_registry_still_lists_non_dispatchable_as_enabled():
     for name in _ENABLED_BUT_NOT_DISPATCHABLE:
         spec = registry.get(name)
         assert spec is not None and spec.default_enabled and not spec.dispatched
+
+
+def test_every_enabled_tool_has_a_caller_except_the_documented_one():
+    """REQ-COVER-005: the runtime whitelist holds no tool that nothing dispatches."""
+    without_caller = {n for n, s in registry.REGISTRY.items() if s.default_enabled and not s.dispatched}
+    assert without_caller == _ENABLED_BUT_NOT_DISPATCHABLE
+
+
+def test_negative_retired_tools_stay_out_of_whitelist_and_agent_offer(db, lab_engagement):
+    whitelisted = set().union(*registry.enabled_whitelist().values())
+    assert whitelisted.isdisjoint(_RETIRED)
+    assert set(config_resolver.enabled_tools(db, lab_engagement.id)).isdisjoint(_RETIRED)
+    for name in _RETIRED:  # still catalogued, so the matrix shows why they are off
+        spec = registry.get(name)
+        assert spec is not None and not spec.default_enabled

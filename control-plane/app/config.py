@@ -28,6 +28,21 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://asm:asm@localhost:5432/asm"
     redis_url: str = "redis://localhost:6379/0"
 
+    # GitHub issue #31 (REQ-IAM-016): attempts per source IP on the
+    # unauthenticated login steps, per window. Looser than the per-account
+    # lockout, so several users behind one address can still sign in.
+    # 0 disables the limit.
+    login_rate_limit_attempts: int = 30
+    login_rate_limit_window_seconds: int = 300
+    # REQ-IAM-017: only these peers may tell us the client's address via
+    # X-Forwarded-For (the edge reaches the control plane from a private
+    # Docker network or the host). Anyone else's header is ignored.
+    trusted_proxy_cidrs: str = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
+
+    # REQ-IAM-019: origins (besides the host a request was sent to) whose
+    # cookie-authenticated state-changing requests are accepted - the dev console.
+    csrf_trusted_origins: str = "http://localhost:5173"
+
     s3_endpoint: str = "http://localhost:9000"
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
@@ -70,6 +85,9 @@ class Settings(BaseSettings):
     # verwaist und wird geerntet (REQ-RAWLEASE-001). Groesser als das
     # Worker-Heartbeat-Intervall, kleiner als die Nutzlebensdauer eines Laufs.
     stale_run_seconds: int = 300
+    # GitHub issue #42 (REQ-RESUME-003): how often the reaper resumes a claimed
+    # run whose worker died before giving up and aborting it.
+    scan_max_resumes: int = 2
     # Shared secret for /internal/* routes. Dev default is intentionally only
     # a local placeholder; production must inject this via Vault/SOPS.
     internal_api_token: str = "change-me-in-dev"

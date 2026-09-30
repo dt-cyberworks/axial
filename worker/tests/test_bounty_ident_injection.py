@@ -40,19 +40,19 @@ def test_httpx_command_omits_bounty_flags_when_not_configured():
 
 
 def test_nuclei_body_injects_ident_header():
-    body = trc._nuclei_body("host.example.com", _BOUNTY_ARGS)
+    body = trc._nuclei_body("host.example.com", {**_BOUNTY_ARGS, "mode": "tech"})
     assert "-H 'X-Bug-Bounty: researcher-42'" in body["additional_args"]
     assert "-H 'User-Agent: asm-scanner (+contact: r@example.com)'" in body["additional_args"]
 
 
 def test_nuclei_body_omits_bounty_flags_when_not_configured():
-    body = trc._nuclei_body("host.example.com", {})
+    body = trc._nuclei_body("host.example.com", {"mode": "tech"})
     assert "-H " not in body["additional_args"]
     assert "-rate-limit 50" in body["additional_args"]
 
 
 def test_nuclei_body_tightens_rate_limit_to_a_stricter_bounty_cap():
-    body = trc._nuclei_body("host.example.com", {**_BOUNTY_ARGS, "_bounty_max_rps": 7})
+    body = trc._nuclei_body("host.example.com", {**_BOUNTY_ARGS, "_bounty_max_rps": 7, "mode": "tech"})
     assert "-rate-limit 7 " in body["additional_args"]
     assert "-rate-limit 50" not in body["additional_args"]
 
@@ -65,12 +65,12 @@ def test_nuclei_body_headless_mode_also_tightens_rate_limit():
 def test_negative_nuclei_body_never_loosens_rate_limit_above_default():
     """A misconfigured/generous program cap must never make nuclei MORE
     aggressive than our own default - only tighten, never loosen."""
-    body = trc._nuclei_body("host.example.com", {**_BOUNTY_ARGS, "_bounty_max_rps": 500})
+    body = trc._nuclei_body("host.example.com", {**_BOUNTY_ARGS, "_bounty_max_rps": 500, "mode": "tech"})
     assert "-rate-limit 50" in body["additional_args"]
 
 
 def test_negative_nuclei_body_ignores_a_missing_bounty_cap():
-    body = trc._nuclei_body("host.example.com", {})
+    body = trc._nuclei_body("host.example.com", {"mode": "tech"})
     assert "-rate-limit 50" in body["additional_args"]
 
 
@@ -211,7 +211,7 @@ def _patch_dispatch(monkeypatch, *, ident):
     monkeypatch.setattr(trc, "_COMMANDS", {**trc._COMMANDS, "httpx": fake_httpx_command})
     monkeypatch.setattr(
         trc.ToolRunnerClient, "_post_cancellable",
-        lambda self, endpoint, payload, scan_run_id: {"success": True, "stdout": "", "stderr": "", "exit_code": 0},
+        lambda self, endpoint, payload, scan_run_id, budget_s=None: {"success": True, "stdout": "", "stderr": "", "exit_code": 0},
     )
     lookups = []
 
@@ -328,7 +328,7 @@ def test_negative_run_never_injects_for_a_raw_network_tool(monkeypatch):
     monkeypatch.setattr(trc, "_COMMANDS", {**trc._COMMANDS, "redis-probe": fake_redis_probe_command})
     monkeypatch.setattr(
         trc.ToolRunnerClient, "_post_cancellable",
-        lambda self, endpoint, payload, scan_run_id: {"success": True, "stdout": "", "stderr": "", "exit_code": 0},
+        lambda self, endpoint, payload, scan_run_id, budget_s=None: {"success": True, "stdout": "", "stderr": "", "exit_code": 0},
     )
     monkeypatch.setattr(trc.ToolRunnerClient, "raw_network_available", staticmethod(lambda: True))
     lookups = []
@@ -361,7 +361,7 @@ def test_negative_a_bounty_ident_lookup_failure_degrades_to_no_injection(monkeyp
     monkeypatch.setattr(trc, "_COMMANDS", {**trc._COMMANDS, "httpx": fake_httpx_command})
     monkeypatch.setattr(
         trc.ToolRunnerClient, "_post_cancellable",
-        lambda self, endpoint, payload, scan_run_id: {"success": True, "stdout": "", "stderr": "", "exit_code": 0},
+        lambda self, endpoint, payload, scan_run_id, budget_s=None: {"success": True, "stdout": "", "stderr": "", "exit_code": 0},
     )
 
     def raising_get_bounty_ident(engagement_id):

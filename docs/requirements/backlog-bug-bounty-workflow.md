@@ -52,6 +52,7 @@ Implementation authorization:
 Backlog decision log:
 
 - 2026-09-27 — proposed by the review agent.
+- 2026-09-29 — johannes: not needed yet; stays in backlog, deferred.
 
 Security invariants:
 

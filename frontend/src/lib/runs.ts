@@ -1,16 +1,15 @@
 import { type ScanRun } from "../api/client";
 
-export type PhaseId = "discovery" | "fingerprint" | "correlate" | "agent" | "validate" | "score" | "report";
+export type PhaseId = "discovery" | "fingerprint" | "correlate" | "agent" | "score" | "report";
 
-export const PHASES: PhaseId[] = ["discovery", "fingerprint", "correlate", "agent", "validate", "score", "report"];
+export const PHASES: PhaseId[] = ["discovery", "fingerprint", "correlate", "agent", "score", "report"];
 
 /** Per-phase description + the tools it may run (REQ-RUN-003). "internal" = no target-touching tools. */
 export const PHASE_META: Record<PhaseId, { label: string; goal: string; tools: string[] | "internal" }> = {
   discovery:   { label: "Discovery",    goal: "Find candidate assets and normalize them into the engagement inventory.", tools: ["crt.sh (passive OSINT)"] },
-  fingerprint: { label: "Fingerprint",  goal: "Resolve in-scope names and run allowed service and web fingerprint checks.", tools: ["httpx", "nmap", "nikto", "wafw00f", "testssl"] },
+  fingerprint: { label: "Fingerprint",  goal: "Resolve in-scope names and run allowed service and web fingerprint checks.", tools: ["httpx", "nmap", "wafw00f", "testssl", "ffuf", "nuclei"] },
   correlate:   { label: "Correlate",    goal: "Connect observed services and evidence into de-duplicated findings.", tools: "internal" },
   agent:       { label: "Vector Agent", goal: "Use the evidence map to propose the next scoped attack-path validation checks.", tools: ["httpx", "nmap", "nikto", "wafw00f", "testssl", "nuclei", "http_request", "ffuf"] },
-  validate:    { label: "Validate",     goal: "Confirm inferred signals without destructive exploitation.", tools: "internal" },
   score:       { label: "Risk scoring", goal: "Rank open findings by severity, exploitability, KEV, and exposure.", tools: "internal" },
   report:      { label: "Report",       goal: "Package the results into operator and customer-facing output.", tools: "internal" },
 };
@@ -41,12 +40,7 @@ export const PHASE_COPY: Record<PhaseId, PhaseCopy> = {
   agent: {
     uses: "Deterministic evidence, in-scope assets, and enabled tools",
     produces: "Scoped validation observations, blocks, and an agent conclusion",
-    next: "Validate confirms or suppresses inferred signals",
-  },
-  validate: {
-    uses: "Candidate findings and supporting observations",
-    produces: "Confirmed findings with confidence and evidence",
-    next: "Risk scoring prioritizes the validated findings",
+    next: "Risk scoring prioritizes the findings",
   },
   score: {
     uses: "Validated findings, exposure, severity, KEV, and exploitability",

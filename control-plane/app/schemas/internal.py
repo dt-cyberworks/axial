@@ -159,6 +159,8 @@ class ScanRunOut(BaseModel):
     current_tool: str | None = None
     current_target: str | None = None
     current_started_at: datetime.datetime | None = None
+    # REQ-PIPE-005: the scan depth this run was started with.
+    scan_profile: str | None = None
 
 
 class ScanRunUpdate(BaseModel):
@@ -171,6 +173,24 @@ class ScanRunUpdate(BaseModel):
     # phase/state-only-Aufrufe das aktuelle Tool versehentlich loeschen.
     current_tool: str | None = None
     current_target: str | None = None
+    # GitHub issue #42: the claim attempt this write belongs to (REQ-RESUME-002)
+    # and what the next phase needs if the run has to be resumed (REQ-RESUME-001).
+    attempt: int | None = None
+    checkpoint: dict | None = None
+
+
+class ScanRunClaimIn(BaseModel):
+    task_id: str
+    budget_max_iterations: int | None = None
+    approval_timeout_seconds: int | None = None
+
+
+class ScanRunClaimOut(BaseModel):
+    attempt: int
+    phase: str
+    state: str
+    cancel_requested: bool
+    checkpoint: dict | None = None
 
 
 class AgentStepIn(BaseModel):
@@ -198,6 +218,24 @@ class AssetReviewCreateIn(BaseModel):
     """REQ-ASSETREVIEW-002: candidate_assets ist der Snapshot der aktuell
     in-scope entdeckten Assets fuer genau diesen scan_run."""
     candidate_assets: list[dict]
+
+
+class DiscoveredEndpointIn(BaseModel):
+    url: str = Field(max_length=2048)
+    method: Literal["GET", "POST"] = "GET"
+    source: Literal["katana", "wayback", "commoncrawl"]
+    param_names: list[str] = Field(default_factory=list, max_length=50)
+
+
+class DiscoveredEndpointsIn(BaseModel):
+    scan_run_id: uuid.UUID | None = None
+    endpoints: list[DiscoveredEndpointIn] = Field(max_length=500)
+
+
+class WebScreenshotIn(BaseModel):
+    scan_run_id: uuid.UUID | None = None
+    url: str = Field(max_length=2048)
+    png_base64: str = Field(max_length=3_000_000)
 
 
 class DnsRecordIn(BaseModel):
@@ -316,3 +354,52 @@ class BenchmarkEngagementCreate(BaseModel):
     tcp_port_from: int
     tcp_port_to: int
     tool_categories: list[str] = ["recon", "fingerprint", "vuln"]
+
+
+# --- Scan plan (REQ-PIPE-001/003/006/008) ------------------------------------
+
+class ScanCheckIn(BaseModel):
+    check_id: str = Field(min_length=1, max_length=128)
+    tool: str = Field(min_length=1, max_length=64)
+    # A check is created either to run ("planned") or as a deliberate skip with
+    # its reason (REQ-PIPE-003); every other state is reached by executing it.
+    state: Literal["planned", "skipped"]
+    reason: str = Field(min_length=1, max_length=300)
+    args: dict = {}
+    depends_on: str | None = Field(default=None, max_length=128)
+    budget_s: int | None = Field(default=None, ge=1, le=1800)
+
+
+class ScanSurfaceIn(BaseModel):
+    host: str = Field(min_length=1, max_length=255)
+    ip: str | None = Field(default=None, max_length=64)
+    port: int = Field(ge=1, le=65535)
+    scheme: str | None = Field(default=None, max_length=16)
+    service_class: Literal["web", "web_alias", "tls_service", "service", "unknown"]
+    alias_of: str | None = Field(default=None, max_length=300)
+    asset_id: uuid.UUID | None = None
+    profile: list[str] = Field(default=[], max_length=64)
+    fingerprint: dict = {}
+    checks: list[ScanCheckIn] = Field(default=[], max_length=64)
+
+
+class ScanPlanIn(BaseModel):
+    surfaces: list[ScanSurfaceIn] = Field(default=[], max_length=512)
+
+
+class ScanSurfaceUpdate(BaseModel):
+    """Refine a surface after its technology-detection check (REQ-PIPE-002)."""
+    profile: list[str] | None = Field(default=None, max_length=64)
+    fingerprint: dict | None = None
+    attempt: int | None = None
+
+
+class ScanCheckUpdate(BaseModel):
+    state: Literal["running", "complete", "partial", "failed", "skipped"] | None = None
+    reason: str | None = Field(default=None, max_length=300)
+    args: dict | None = None
+    budget_s: int | None = Field(default=None, ge=1, le=1800)
+    findings: int | None = Field(default=None, ge=0)
+    duration_s: float | None = Field(default=None, ge=0)
+    outcome_summary: dict | None = None
+    attempt: int | None = None

@@ -1,38 +1,39 @@
 ---
-title: Container hardening for control-plane, worker, egress-proxy, and edge
+title: Edge proxy as a non-root user
 status: backlog
 risk: R3
 owner: security-engineering
 ---
 
-# Container Hardening
+# Edge Proxy Non-Root
 
-From the 2026-09-27 review (finding B6): the runner and the raw-egress
-gateway already drop all capabilities, run read-only, and forbid privilege
-escalation. The control plane, worker, egress proxy, and edge do not.
+Split from the container-hardening requirement
+([`container-hardening.md`](container-hardening.md), REQ-HARDEN-003), which
+drops all capabilities from the edge but leaves it running as root.
 
-## REQ-HARDEN-003: Least-privilege containers everywhere
+## REQ-HARDEN-004: The edge runs as a non-root user
 
 Acceptance criteria:
 
-- control-plane, worker, egress-proxy, and edge run with
-  `cap_drop: [ALL]` (adding back only what a service provably needs, for
-  example `NET_BIND_SERVICE` for the edge), `no-new-privileges`, and a
-  read-only root filesystem with explicit writable mounts where needed.
-- The edge runs as a non-root user.
-- Verified by starting the full stack and running the UAT golden path and
-  scan journey on the dev environment, then int.
+- The edge proxy (shared edge and single-host `caddy`) runs as a non-root
+  user, still able to bind 80/443 and to renew certificates.
+- Its named volumes (`/data`, `/config`) are writable by that user, including
+  volumes that already exist from earlier deployments.
+- Verified on the dev stack, then int: both sites serve, certificates renew,
+  and the security headers are unchanged (REQ-WEBSEC-001..003).
 
 Value and context:
 
-- Limits what an attacker gains from a compromised service; cheap once
-  verified.
+- Defence in depth on the one container that faces the internet. With
+  `cap_drop: [ALL]` and no-new-privileges (REQ-HARDEN-003) the remaining
+  benefit is smaller, but a root process can still read every file the
+  container mounts.
 
 Open questions and dependencies:
 
-- Which paths each service writes (temp files, report rendering, caches).
-- Needs a live stack for verification; coordinate with the other agent
-  working on this host's containers.
+- Existing `edge_data`/`edge_config` volumes are owned by root; migrating them
+  needs a one-time `chown` step and a plan for the shared edge on the live
+  server, where a failed certificate volume means a public outage.
 
 Implementation authorization:
 
@@ -41,10 +42,9 @@ Implementation authorization:
 
 Backlog decision log:
 
-- 2026-09-27 — proposed by the review agent; not implemented in the review
-  change set because it needs a full live-stack verification.
+- 2026-09-29 - split out of REQ-HARDEN-003 by the implementing agent; flagged
+  to johannes because it touches the live server's certificate volumes.
 
 Security invariants:
 
-- No service gains privileges; the runner and raw-egress gateway settings
-  are unchanged.
+- The edge never gains a capability beyond `NET_BIND_SERVICE`.

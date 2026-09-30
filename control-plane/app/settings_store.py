@@ -20,6 +20,12 @@ from app.models.app_setting import AppSetting
 
 LLM_CONFIG_KEY = "llm_config"
 NVD_CONFIG_KEY = "nvd_config"
+SUBFINDER_CONFIG_KEY = "subfinder_config"  # REQ-COVER-001: {"keys_enc": {provider: ciphertext}}
+# Key-only passive sources subfinder can use. The allowlist is also what stops
+# a caller from writing arbitrary provider-config lines (REQ-COVER-001).
+SUBFINDER_PROVIDERS = (
+    "virustotal", "securitytrails", "shodan", "chaos", "fullhunt", "binaryedge", "bevigil", "c99", "github",
+)
 SCAN_POLICY_KEY = "scan_policy"
 TOOL_POLICY_KEY = "tool_policy"      # global: {tool: {enabled: bool, requires_approval: bool}}
 AGENT_PROMPT_KEY = "agent_prompt"    # global: {prompt: str}
@@ -384,3 +390,50 @@ def set_nvd_config(db: Session, *, api_key: str | None) -> NvdConfig:
         row.updated_at = dt.datetime.now(dt.timezone.utc)
     db.commit()
     return get_nvd_config(db)
+
+
+def get_subfinder_keys(db: Session) -> dict[str, str]:
+    """REQ-COVER-001: decrypted provider keys for the worker. Never returned
+    by any public endpoint; unset is the normal state (free sources only)."""
+    row = db.get(AppSetting, SUBFINDER_CONFIG_KEY)
+    stored = row.value.get("keys_enc") if row and isinstance(row.value, dict) else None
+    if not isinstance(stored, dict):
+        return {}
+    return {
+        name: _decrypt_api_key(token)
+        for name, token in stored.items()
+        if name in SUBFINDER_PROVIDERS and isinstance(token, str) and token
+    }
+
+
+def set_subfinder_keys(db: Session, updates: dict[str, str | None]) -> list[str]:
+    """Per provider: None leaves the stored key unchanged, "" removes it, any
+    other value replaces it (encrypted before storage). Returns the names that
+    have a key afterwards."""
+    row = db.get(AppSetting, SUBFINDER_CONFIG_KEY)
+    current = dict(row.value) if row and isinstance(row.value, dict) else {}
+    enc = dict(current.get("keys_enc") or {})
+    for name, value in updates.items():
+        if name not in SUBFINDER_PROVIDERS:
+            raise ValueError(f"unknown subfinder provider: {name}")
+        if value is None:
+            continue
+        stripped = value.strip()
+        if stripped:
+            enc[name] = _encrypt_api_key(stripped)
+        else:
+            enc.pop(name, None)
+    current["keys_enc"] = enc
+    if row is None:
+        db.add(AppSetting(key=SUBFINDER_CONFIG_KEY, value=current))
+    else:
+        row.value = current
+        row.updated_at = dt.datetime.now(dt.timezone.utc)
+    db.commit()
+    return sorted(enc)
+
+
+def subfinder_providers_with_key(db: Session) -> list[str]:
+    row = db.get(AppSetting, SUBFINDER_CONFIG_KEY)
+    stored = row.value.get("keys_enc") if row and isinstance(row.value, dict) else None
+    return sorted(n for n in (stored or {}) if n in SUBFINDER_PROVIDERS)

@@ -54,6 +54,13 @@ Acceptance criteria:
 - A structural test iterates the tool→endpoint registry itself (not a fixed
   list of tool names) so a newly added dedicated-endpoint tool that forgets
   this fails the test suite, not silently reintroduces stale results.
+- The tool-runner itself never serves or stores a cached result, whatever a
+  caller sends: the build-time HexStrike patch switches caching off inside
+  `execute_command()`, the one function every endpoint uses. (Found live
+  2026-09-29: the dedicated `/api/tools/*` endpoints never read `use_cache`
+  from the request, so the body flag above had no effect and a resumed scan
+  received nmap/nikto/nuclei results replayed in ~20 ms, audited as fresh
+  executions.) A changed upstream anchor fails the image build.
 
 ## REQ-CONCUR-002: Raw-network (Nmap) egress supports multiple concurrent, mutually isolated leases
 

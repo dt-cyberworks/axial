@@ -106,6 +106,56 @@ def _nmap_args_safe(args: dict) -> bool:
     return False
 
 
+# REQ-COVER-003/004, REQ-PIPE-004: nuclei passes the deterministic pipeline may
+# request. The fixed invocation of each is built worker-side
+# (tool_runner_client._nuclei_body / _nuclei_command); the agent never sets more
+# than the default pass (dispatch.py sends {} and expands it itself).
+NUCLEI_MODES = {"select", "tech", "headless", "takeover", "endpoints", "oob"}
+# Disjoint template subsets of the blind-vulnerability pass; the selection
+# itself lives worker-side (tool_runner_client.NUCLEI_OOB_PARTS).
+NUCLEI_OOB_PARTS = {"generic_a", "generic_b", "generic_c", "cves_recent", "cves_legacy"}
+# REQ-PIPE-004: the main pass selects templates from an index built into the
+# tool-runner image. A caller names a group, a shard and product keys - never a
+# template path - and the runner resolves them against that index, so what can
+# be selected is fixed by the image. network/ and javascript/ templates are not
+# in the index: they never run against a web surface.
+NUCLEI_SELECT_GROUPS = {"generic", "products", "all"}
+MAX_SELECT_PRODUCTS = 24
+_SELECT_SHARD_RE = re.compile(r"^([1-9][0-9]?)/([1-9][0-9]?)$")
+_SELECT_PRODUCT_RE = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,39}$")
+_NUCLEI_ARG_KEYS = {"tags", "mode", "urls", "part", "group", "shard", "products"}
+MAX_ENDPOINT_URLS = 50
+_URL_RE = re.compile(r"^https?://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~!$&'()*+,;=:@/%?-]{0,2000})?$")
+
+
+def endpoint_urls(args: dict) -> list[str] | None:
+    """The URL list of a nuclei `endpoints` call, or None when malformed."""
+    urls = args.get("urls")
+    if not isinstance(urls, list) or not urls or len(urls) > MAX_ENDPOINT_URLS:
+        return None
+    if not all(isinstance(u, str) and len(u) <= 2048 and _URL_RE.match(u) for u in urls):
+        return None
+    return urls
+
+
+def _select_args_safe(args: dict) -> bool:
+    group = args.get("group")
+    if not isinstance(group, str) or group not in NUCLEI_SELECT_GROUPS:
+        return False
+    shard = args.get("shard")
+    if shard is not None:
+        match = _SELECT_SHARD_RE.match(shard) if isinstance(shard, str) else None
+        if not match or not 1 <= int(match.group(1)) <= int(match.group(2)) <= 64:
+            return False
+    products = args.get("products")
+    if args["group"] == "products":
+        return (
+            isinstance(products, list) and 1 <= len(products) <= MAX_SELECT_PRODUCTS
+            and all(isinstance(p, str) and _SELECT_PRODUCT_RE.match(p) for p in products)
+        )
+    return products is None
+
+
 def _nuclei_args_safe(args: dict) -> bool:
     # Die konservative Invocation (nicht-intrusive Templates, -etags
     # intrusive,dos,fuzz, Rate-Limit) wird im worker/tool_runner_client._nuclei_body
@@ -113,8 +163,40 @@ def _nuclei_args_safe(args: dict) -> bool:
     # anfordert. Leere args sind sicher (Standardpfad des deterministischen
     # Pipeline-Dispatch); ein spaeterer Vector Agent darf keine dos/intrusive/
     # fuzz-Tags einschleusen.
+    if set(args) - _NUCLEI_ARG_KEYS:
+        return False
     tags = {str(t).lower() for t in args.get("tags", [])}
-    return not (tags & {"intrusive", "dos", "fuzz"})
+    if tags & {"intrusive", "dos", "fuzz"}:
+        return False
+    mode = args.get("mode")
+    if mode is not None and (not isinstance(mode, str) or mode not in NUCLEI_MODES):
+        return False
+    selection_keys = {"group", "shard", "products"}
+    if mode == "select":
+        return not tags and not ({"urls", "part"} & set(args)) and _select_args_safe(args)
+    if mode == "endpoints":
+        return endpoint_urls(args) is not None and not tags and not ({"part"} | selection_keys) & set(args)
+    if mode == "oob":
+        # Fixed invocation only: the interaction server and token are never
+        # arguments (REQ-COVER-004).
+        return (
+            not tags and "urls" not in args and not selection_keys & set(args)
+            and args.get("part", "generic_a") in NUCLEI_OOB_PARTS
+        )
+    # None (the agent's default request, expanded worker-side), tech, headless, takeover.
+    return not ({"urls", "part"} | selection_keys) & set(args)
+
+
+def _subfinder_args_safe(args: dict) -> bool:
+    # REQ-COVER-001: the invocation is fixed worker-side (passive sources only,
+    # no -active); nothing is caller-controlled.
+    return not args
+
+
+def _no_args(args: dict) -> bool:
+    # katana / screenshot (REQ-COVER-003/006): depth, page and time caps and the
+    # browser flags are worker constants, never arguments.
+    return not args
 
 
 def _httpx_args_safe(args: dict) -> bool:
@@ -205,9 +287,25 @@ def _ffuf_args_safe(args: dict) -> bool:
 
 # Tool -> Kap. 3.2/4.1 Validator. Tools ohne Eintrag hier sind konservativ
 # nur mit leeren Argumenten zulaessig.
+# REQ-PIPE-009: testssl on a non-web TLS service names the STARTTLS protocol the
+# service upgrades with. A fixed set - never a free-form flag (worker-side
+# tool_runner_client.TESTSSL_STARTTLS mirrors it).
+TESTSSL_STARTTLS = {"smtp", "imap", "pop3", "ftp", "ldap", "xmpp", "nntp", "postgres", "mysql"}
+
+
+def _testssl_args_safe(args: dict) -> bool:
+    if not args:
+        return True
+    return set(args) == {"starttls"} and isinstance(args["starttls"], str) and args["starttls"] in TESTSSL_STARTTLS
+
+
 _VALIDATORS = {
+    "testssl": _testssl_args_safe,
     "nmap": _nmap_args_safe,
     "nuclei": _nuclei_args_safe,
+    "subfinder": _subfinder_args_safe,
+    "katana": _no_args,
+    "screenshot": _no_args,
     "httpx": _httpx_args_safe,
     "default-cred-check": _default_cred_check_args_safe,
     "http_request": _http_request_args_safe,

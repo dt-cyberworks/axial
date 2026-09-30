@@ -43,6 +43,14 @@ class ScanRun(Base):
     current_tool: Mapped[str | None] = mapped_column(String)
     current_target: Mapped[str | None] = mapped_column(String)
     current_started_at: Mapped[datetime.datetime | None]
+    # GitHub issue #42 (REQ-RESUME-001): worker takeover after a crash. `attempt`
+    # fences every worker write, `checkpoint` carries what the next phase needs.
+    attempt: Mapped[int] = mapped_column(server_default="0")
+    owner_task_id: Mapped[str | None] = mapped_column(String)
+    checkpoint: Mapped[dict | None] = mapped_column(JSONB)
+    # REQ-PIPE-005: the scan depth this run was started with (the engagement's
+    # setting at that moment; a later change does not rewrite history).
+    scan_profile: Mapped[str | None] = mapped_column(String(16))
 
 
 class AgentStep(Base):
