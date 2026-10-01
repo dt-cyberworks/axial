@@ -55,3 +55,12 @@ Expected results:
 
 - `test_negative_a_direct_client_cannot_pick_its_own_address`, `test_behind_the_edge_each_forwarded_client_has_its_own_window`.
 - `test_client_ip` - eight header/peer combinations, including chains, trusted hops, and a malformed hop.
+
+## Live verification (2026-10-01, dev stack)
+
+Only our own platform was exercised (no scan, no target). The source address was simulated with
+`X-Forwarded-For` from localhost, a trusted peer (REQ-IAM-017), and a nonexistent account was used
+so that no real account's lockout counter moved. Thirty-five login attempts from one address: the
+first 30 answered `401`, attempts 31 to 35 answered `429` with `Retry-After: 298`; the next attempt
+from a different address answered `401`, unaffected. The throttle also persisted across a second
+run inside the same window (the first attempt of that run was already `429`).

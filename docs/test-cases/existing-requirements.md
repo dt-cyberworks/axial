@@ -77,6 +77,61 @@ Expected results:
 - Unsupported passive grants are not offered or persisted.
 - The gateway denies a passive call without the correct grant.
 
+## TC-TOOL-003: Grants after creation, removal, audit and explanation
+
+Requirements:
+
+- REQ-TOOL-006
+- REQ-TOOL-007
+- REQ-TOOL-008
+
+Automated tests:
+
+- `control-plane/tests/integration/test_tool_grants_after_creation.py`
+- `control-plane/tests/integration/test_tool_grants_api.py`
+- `frontend/tests/tool_grants_requirements.test.mjs`
+
+Objective:
+
+Prove a category can be granted and removed after activation under the right
+confirmation and scan-running rules, that the gateway follows on the next call, that a
+campaign's switches survive a save, and that the console says why a tool cannot run.
+
+Expected results:
+
+- Granting an active category on an active engagement clears `no_active_tool_grant`; the
+  blocker names where to fix it. Without `confirm_widening` it is refused and nothing is
+  written; drafts, passive grants and repeated saves need none.
+- Nothing is added or changed while a scan runs; a removal works and the next gateway call
+  is denied `no_tool_grant`; "Force on" never replaces a grant; `completed`/`revoked`
+  engagements refuse both; unknown categories or modes are 422.
+- A non-owner gets 404 for add and remove and nothing is written; the owner and an admin
+  succeed.
+- Saving grants keeps Force on/off; only the approval flag changes; an empty row goes.
+- Add and remove are audited with actor, category, mode, widening confirmation and scan state,
+  and the chain verifies; the export shows the current grants and campaign switches.
+- `GET /config` reports `granted` and `unavailable_reason` (not installed, category not granted,
+  off for campaign); a passive tool needs the passive grant.
+- Mutation check (2026-10-01): restoring the old delete-all behaviour fails the Force-off test.
+
+Manual/live verification:
+
+- On dev: create an engagement without tool categories, activate it, grant one from the Edit
+  page (confirming the widening), see the blocker clear; remove it and see the next gateway call
+  denied; set Force off on a tool, save grants, and see the switch survive (recorded below).
+
+Live result (2026-10-01, dev stack, real Chrome through Playwright, 14 of 14 checks passed;
+no scan and no traffic to any target): an engagement activated with no tool category showed
+the blocker as a sentence with a link that landed on the Edit page's tool grants; ticking
+fingerprint / active and saving asked for confirmation first and wrote nothing until it was
+given; afterwards the blocker was gone and the audit log named the acting user with
+`confirmed_widening=true`; Force off on testssl survived saving the grants and the approval flag
+for nmap was written; the tool table said why nuclei is unavailable ("Its category is not
+granted", with a link) and why testssl is off ("Switched off for this campaign"); unticking the
+grant needed no confirmation and was audited. The gateway's own decisions (`no_tool_grant` after a
+removal, also mid-scan) are proven by the integration tests, since the gateway demands a scan run
+for every call and a live check would have had to start a real scan.
+
 ## TC-TOOL-002: Agent tool availability
 
 Requirements:
@@ -175,8 +230,9 @@ Automated tests:
 
 Objective:
 
-Verify scan preflight, cancellation, phase presentation, navigation,
-agent-step persistence, and user documentation.
+Verify scan preflight, cancellation, phase presentation, navigation, and
+agent-step persistence. (The user documentation formerly verified here moved to
+the manual: TC-MANUAL-001..005.)
 
 Expected results:
 

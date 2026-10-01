@@ -58,8 +58,10 @@ export default function ApprovalModal({
         <div className="modal-body">
           <h4>What it will do</h4>
           {isHttpShaped ? (
-            <pre className="agent-response">{`${args.method ?? "?"} ${args.path ?? ""}  →  ${tc.target ?? ""}`}
-{Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join("\n")}{args.body ? `\n\n${args.body}` : ""}</pre>
+            <pre className="agent-response">{[
+              `${args.method ?? "?"} ${args.path ?? ""}  →  ${tc.target ?? ""}`,
+              ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`),
+            ].join("\n")}{args.body ? `\n\n${args.body}` : ""}</pre>
           ) : (
             <pre className="agent-response">{`${tc.tool ?? "?"}  →  ${tc.target ?? ""}`}</pre>
           )}

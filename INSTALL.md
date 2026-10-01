@@ -271,7 +271,7 @@ the OpenAPI document.
 ### Create the first administrator
 
 ```bash
-INITIAL_ADMIN_EMAIL=you@example.com docker compose -f docker-compose.yml -f docker-compose.prod.yml exec control-plane python scripts/bootstrap_admin.py
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -e INITIAL_ADMIN_EMAIL=you@example.com control-plane python scripts/bootstrap_admin.py
 ```
 
 The temporary password is displayed once. Open `https://asm.example.com`, sign

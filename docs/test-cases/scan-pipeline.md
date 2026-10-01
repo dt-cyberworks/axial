@@ -432,3 +432,212 @@ Expected results:
 - The list equals wordpress, drupal, joomla, apache, nginx, iis, tomcat, jenkins,
   gitlab, grafana, confluence, jira, php, spring.
 - The test fails when code and the requirement or design diverge.
+
+## TC-PIPE-017: The thorough profile plans a deep content-discovery sweep (worker + gateway)
+
+Requirements:
+
+- REQ-PIPE-017
+
+Automated tests:
+
+- `worker/tests/test_deep_content_discovery.py`
+- `frontend/tests/scan_plan_requirements.test.mjs`
+
+Objective:
+
+Prove the thorough plan holds one deep ffuf check per real web surface with a budget
+that fits its list, that the standard plan is unchanged, that nothing is added where no
+deep check runs, and that the check reuses the existing tool, wordlist keys and rate.
+
+Expected results:
+
+- Under `thorough` a web surface plans `ffuf:deep` (`raft-medium-dirs`) after its
+  nuclei checks; under `standard` there is none.
+- A duplicate virtual host, a redirect-only alias and a campaign that switched ffuf off
+  skip it with the reason; TLS, other and unknown surfaces plan none.
+- The budget covers a whole pass of the list (entries / rate) and never exceeds the
+  runner maximum; a list too large for the maximum gets the maximum; candidates, an
+  unknown key or no list keep the fixed floor. The wordlist table has exactly the allowed
+  keys, matching the gateway's set.
+- ffuf's `-maxtime` is long enough for the whole list; a bug-bounty cap only lowers the rate.
+- The handler passes a stored wordlist on only when it is a known key (a path, a list or
+  nothing falls back to the baseline list); hits become one `inferred` finding naming the
+  wordlist, a cut-short run keeps its hits, a failed run reports none, and a catch-all
+  answer is discarded.
+- The thorough depth choice and the plan tell the operator what the sweep is and costs.
+
+Manual/live verification:
+
+- A thorough scan of a real target: `ffuf:deep` completes or ends `partial` inside its
+  budget and the plan shows its time. Run on dev before int.
+
+## TC-PIPE-018: The Vector Agent sees what ran, and a partial result is reported as partial (worker + control plane)
+
+Requirements:
+
+- REQ-PIPE-018
+
+Automated tests:
+
+- `worker/tests/test_deep_content_discovery.py`
+- `control-plane/tests/integration/test_scan_plan.py`
+
+Objective:
+
+Prove the agent's context lists the run's finished and skipped checks without anything the
+target returned, that its evidence block and prompt use it, and that an agent ffuf stopped by
+its limit returns its hits marked partial (the defect found on int, 2026-09-30).
+
+Expected results:
+
+- `agent-context` lists, per host, checks that are complete, partial, failed or skipped
+  (port, tool, state, ffuf wordlist, cut skip reason) and none that are still planned or
+  running; an empty list without a running run; at most 60 per host.
+- No fingerprint header, cookie or tool argument other than the wordlist key reaches it; a
+  non-string wordlist is left out.
+- The evidence block shows what ran per port (nuclei collapsed, an alias naming its target,
+  switch-offs not listed as done) and adds nothing when there are no checks; an older
+  control plane without the field still renders.
+- An agent ffuf that reached its limit returns its hits with a PARTIAL note and an upper
+  bound of the list tried; without hits it says so without claiming absence; with the
+  agent's own candidates it makes no list claim; a complete run has no note; a failed run
+  reports no hits and no partial claim; the cap stays 240 s.
+- The prompt and the tool description say the baseline ran, that a four-minute call cannot
+  sweep a large list, and that a PARTIAL observation proves nothing absent.
+
+Manual/live verification:
+
+- On dev, an agent run after a thorough or standard fingerprint no longer repeats the
+  baseline and its ffuf observation, when cut short, carries the note.
+
+## TC-PIPE-019: The proxy's audit events are batched, chained and still fail closed
+
+Requirements:
+
+- REQ-PIPE-019
+
+Automated tests:
+
+- `control-plane/tests/integration/test_audit_batch_and_load.py`
+- `egress-proxy/tests/test_audit_batching.py`
+- `egress-proxy/tests/test_audit_client.py`
+
+Objective:
+
+Prove a batch is one verifiable chain, the verifier catches every kind of tampering, and the
+proxy still never forwards before its record is committed and denies every waiter of a failed
+batch.
+
+Expected results:
+
+- A batch of 50 is one chain with strictly increasing timestamps; it continues an existing
+  chain; concurrent single and batch writers form one chain (72 rows verify).
+- An empty batch writes nothing; a malformed entry leaves no part of the batch behind; one
+  invalid decision rejects the whole batch with 422; an unknown engagement is 404; more than
+  200 events or none is refused.
+- `verify_audit_chain` fails on a modified, a removed, an inserted and a reordered row and
+  names the first bad row; an engagement without rows is fine.
+- The batcher sends an idle event at once, groups events that arrive during a send (60 events
+  in at most 3 requests, each exactly once, in order), never exceeds the batch limit, never
+  mixes engagements, and does not release a request before its batch is committed.
+- A failed batch fails every request waiting on it (each is denied 503 `audit_unavailable`),
+  the next batch succeeds, and nothing is dropped or duplicated.
+- The client retries a 503 (nothing was written) up to twice more and never retries a 500,
+  404, timeout or connection error; a non-201 answer is a failure.
+
+Manual/live verification:
+
+- On dev, a real `standard` scan with the Live Scan page open: the proxy's audit traffic
+  arrives in batches and `verify_audit_chain` passes for that engagement afterwards.
+
+Live result (2026-10-01, dev, a real `standard` scan of the project's own confirmed-safe external target with the Live Scan
+page open in two browser tabs): the run ended `done` after about 14.5 minutes with no coverage
+warning; 3,680 proxy `network_request` rows were written by 1,099 batch requests (none through the
+single-event endpoint); `verify_audit_chain` passed over all 3,761 rows of the engagement.
+
+## TC-PIPE-020: Audit traffic cannot starve the control plane, and the stream stays off the event loop
+
+Requirements:
+
+- REQ-PIPE-020
+
+Automated tests:
+
+- `control-plane/tests/integration/test_audit_batch_and_load.py`
+- `control-plane/tests/test_stream_event_loop.py`
+- `control-plane/tests/test_production_config.py`
+
+Objective:
+
+Reproduce the #49 failure in miniature (a three-connection pool, twelve flooding threads, a
+cancel poller, an open stream) and show the control path stays responsive.
+
+Expected results:
+
+- Without a free bulk slot the audit and rate-reservation endpoints answer 503 and write
+  nothing; the slot is released after every call, also after a failing one.
+- With the flood running, no cancel check waits one second and the written chain verifies.
+  Mutation check (2026-10-01): with 12 slots instead of 2 this test fails.
+- A poll that blocks for 0.6 s lets the event loop tick at least 25 times; a poll that hits a
+  pool timeout is skipped and the history is still sent on the next successful poll; the
+  stream only follows rows newer than the last one sent.
+- A poll within 15 s of the last heartbeat does not write the run row; a stale one is still
+  refreshed (REQ-RESUME-004).
+- Production refuses a pool size outside 1-100, an overflow outside 0-100, a timeout outside
+  1-60 s and bulk slots that could take every connection.
+
+Manual/live verification:
+
+- With the Live Scan page open during a real scan: no `QueuePool limit` error in the
+  control-plane log and `cancel-requested` answers well inside 2 s.
+
+Live result (same run as TC-PIPE-019): 835 `cancel-requested` polls, one per second, answered with
+a median of 4 ms and a maximum of 10 ms and without one error; the control-plane log has no
+`QueuePool` line. (The audit rate of this run was about 4 events/s, not the 110-150/s of the
+incident, which is why the flood itself is reproduced by the integration test against a
+three-connection pool.)
+
+## TC-PIPE-021: A missing cancel answer stops the run safely and a failed run says why
+
+Requirements:
+
+- REQ-PIPE-021
+
+Automated tests:
+
+- `worker/tests/test_cancel_resilience.py`
+- `worker/tests/test_pipeline_durability.py`
+- `worker/tests/test_pipeline_resume.py`
+- `frontend/tests/failure_cause_requirements.test.mjs`
+- `control-plane/tests/test_report_failure_reason_text.py`
+
+Objective:
+
+Inject timeouts and errors into every cancel check the worker makes and show the run degrades
+safely instead of crashing, and that what the operator reads is the real cause.
+
+Expected results:
+
+- An unreadable answer is unknown, not `False`; failures are counted consecutively and reset
+  on success; every kind of failed answer counts; a superseded run passes through.
+- The executor survives one lost answer and runs every check; starts nothing while the answer
+  is unknown; with silence from the start starts nothing and raises, leaving every check
+  `planned`; with silence mid-run records the running check, starts no more and raises.
+- The pipeline ends `aborted / cancellation_status_unavailable` (no exception, no phase
+  started) and does the same when the silence is found inside a phase.
+- A failed run records `pipeline_error:<Type>:<phase>` for each phase, never the message.
+- A check write that times out is retried; a superseded write and a 422 are not.
+- Ending a run is retried and never raises.
+- A tool stopped by an unreadable cancel status is a `failed` check with that reason; an
+  operator stop is still `skipped`. The console, plan view and report have text for it.
+
+Manual/live verification:
+
+- On dev, pausing the control plane for 15 s during a real scan ends the run
+  `aborted / cancellation_status_unavailable` with its running tools terminated.
+
+Live result (2026-10-01, dev, real scan of the project's own confirmed-safe external target, `docker pause` of the control
+plane for 15 s once checks were running): the run ended `aborted / cancellation_status_unavailable`
+(never `pipeline_error`), the tool-runner received 3 `terminate-scan-run` calls, the control-plane
+log has no `QueuePool` line, and the audit chain of the engagement verifies (34 rows).

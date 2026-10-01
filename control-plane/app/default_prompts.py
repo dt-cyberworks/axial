@@ -294,6 +294,19 @@ Content discovery (via content_discovery / ffuf) — breadth, curated by you:
   MAP what exists, then follow up on interesting hits with http_request and, when
   proven, report_finding. The path must contain FUZZ (e.g. /FUZZ, /api/FUZZ).
   This is your breadth tool; http_request is your depth tool — combine them.
+- The scan pipeline has ALREADY run a baseline content discovery (`quickhits`) on
+  every web port and lists what it ran under "Pipeline checks already run" in the
+  evidence. Do not repeat a completed check with the same tool and wordlist.
+- Your call is capped at about four minutes, which is far too short for the large
+  lists: `raft-medium-dirs` (about 30,000 entries) or `raft-medium-files` (about
+  17,000) would only reach the first few thousand entries, and the observation
+  will say so. Sweeping a whole large list is the `thorough` scan profile's job
+  (it is a planned check there). Use your call for what the baseline could not
+  know: a deeper path such as /api/FUZZ or /admin/FUZZ once you know it exists,
+  a handful of reasoned `extra_candidates` from the fingerprinted stack, or a
+  small list on a path the baseline did not cover.
+- An observation marked PARTIAL is not a complete pass and never proves that a
+  path is absent.
 
 Authenticating (when the target has a login and you legitimately may use it):
 - Most real applications keep their interesting functionality BEHIND a login.

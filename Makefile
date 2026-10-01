@@ -3,7 +3,7 @@
 
 .PHONY: help up down logs test test-unit test-integration lab-up lab-down \
         lab-verify lab-test frontend-build frontend-requirements requirements-check \
-        requirements-test traceability verify fmt scan uat-venv seed-uat-account uat \
+        requirements-test traceability manual-check manual-screenshots verify fmt scan uat-venv seed-uat-account uat \
         reference-scan
 
 help:  ## Show this help
@@ -21,7 +21,8 @@ logs:  ## Follow the scanner stack's logs
 	docker compose logs -f
 
 bootstrap-admin:  ## First admin account (REQ-IAM-008/011; needs INITIAL_ADMIN_EMAIL set)
-	docker compose exec control-plane python scripts/bootstrap_admin.py
+	@test -n "$$INITIAL_ADMIN_EMAIL" || { echo "set INITIAL_ADMIN_EMAIL, e.g. INITIAL_ADMIN_EMAIL=you@example.com make bootstrap-admin" >&2; exit 1; }
+	docker compose exec -e INITIAL_ADMIN_EMAIL="$$INITIAL_ADMIN_EMAIL" -e INITIAL_ADMIN_DISPLAY_NAME="$$INITIAL_ADMIN_DISPLAY_NAME" control-plane python scripts/bootstrap_admin.py
 
 # --- Requirements as code / SDLC ---
 requirements-check:  ## Validate requirements, test cases, and the generated traceability matrix
@@ -32,6 +33,13 @@ requirements-test:  ## Unit tests for the requirements pipeline
 
 traceability:  ## Regenerate the requirements-to-tests matrix
 	python3 scripts/requirements_pipeline.py generate
+
+# --- User manual (REQ-MANUAL-001..006) ---
+manual-check:  ## Check docs/manual: links, anchors, UI labels, codes, images, no private data (standard library only)
+	python3 scripts/check_manual.py
+
+manual-screenshots:  ## Regenerate docs/manual/img from a throwaway stack with demo data (docker + `make uat-venv`; never touches your stack)
+	uat/.venv/bin/python scripts/manual_screenshots.py $(if $(ONLY),--only $(ONLY),)
 
 # --- Tests ---
 test: test-unit test-integration  ## All control-plane tests (unit + integration)
@@ -68,7 +76,7 @@ frontend-build:  ## Build the operator console (typecheck + Vite)
 frontend-requirements:  ## Executable requirement tests for the operator console
 	cd frontend && npm run test:requirements
 
-verify: requirements-check requirements-test test frontend-requirements frontend-build  ## Full local SDLC verification (DB required)
+verify: requirements-check manual-check requirements-test test frontend-requirements frontend-build  ## Full local SDLC verification (DB required)
 
 # --- User-acceptance testing (REQ-UAT-001..004) ---
 uat-venv:  ## One-time venv for the UAT harness (Playwright/pyotp/httpx; needs system Chrome/Chromium)

@@ -7,6 +7,7 @@ developers and link to the code.
 
 | Page | Content |
 |---|---|
+| [manual/](manual/README.md) | The user manual: quickstart, guides, every screen, tools in plain language, operations, safety, troubleshooting |
 | [spec/](spec/) | The binding specification — Rules of Engagement, tool allowlist, lab environment, scanner specification, operator console UI, deployment architecture, technical architecture |
 | [architecture.md](architecture.md) | Layers, zones, data flow, process topology |
 | [security-model.md](security-model.md) | Scope Gateway, defense in depth, audit trail, threat model |

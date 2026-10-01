@@ -17,6 +17,7 @@ import logging
 import time
 import uuid
 
+from app.cancel_probe import CancelProbe
 from app.control_plane_client import client
 
 logger = logging.getLogger(__name__)
@@ -56,8 +57,9 @@ def gate(engagement_id: str, scan_run_id: str, discovered: list[dict]) -> list[d
     waited = 0
     decision_state = "expired"
     excluded_values: list[str] = []
+    cancel_probe = CancelProbe.for_run(scan_run_id)
     while waited < _REVIEW_MAX_WAIT_SECONDS:
-        if client.is_cancel_requested(uuid.UUID(scan_run_id)):
+        if cancel_probe.is_cancelled():  # GitHub issue #49: raises CancellationStatusUnavailable, fail closed
             decision_state = "cancelled"
             break
         try:

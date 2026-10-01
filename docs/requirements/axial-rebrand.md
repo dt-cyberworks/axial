@@ -27,7 +27,7 @@ in the dark Axial color system by default.
 Acceptance criteria:
 
 - Browser tab title, sidebar brand block, login/auth screen brand block, and
-  the in-app documentation intro read "Axial" (or "Axial Agent" per the
+  the manual's title and first page (`docs/manual/README.md`) read "Axial" (or "Axial Agent" per the
   logo lockup), not "ASM Console" / "ASM-Konsole".
 - A single reusable logo component renders the mark (and optional wordmark)
   used by the sidebar, the auth screen, and the browser favicon — one SVG

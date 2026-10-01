@@ -297,3 +297,198 @@ Security invariants:
 
 - None.
 
+
+## REQ-PIPE-017: The thorough profile plans a deep content-discovery sweep
+
+The system shall, under the `thorough` scan profile, plan one deep
+content-discovery check per web surface with a time budget sized to its
+wordlist, instead of leaving that sweep to the Vector Agent's time-capped call.
+
+Motivation: the `raft-medium-dirs` list has 29,999 entries; at the fixed rate
+of 20 requests per second one pass needs about 25 minutes, but the agent's
+ffuf call is capped at 240 s, so an agent-chosen sweep only ever tried the
+first ~15 % of the list (int, 2026-09-30).
+
+Acceptance criteria:
+
+- Under `thorough`, every `web` surface that is neither an alias nor a
+  duplicate virtual host has a planned check `ffuf:deep` (wordlist
+  `raft-medium-dirs`) after its `ffuf` (`quickhits`) check. Under `standard`
+  there is none; the `standard` plan is unchanged.
+- The check's budget follows from the wordlist's entry count and the request
+  rate (entries divided by rate, with a margin and the set-up time of ffuf's
+  catch-all calibration), at most the runner maximum of 1,800 s. Entry counts
+  of the allowed wordlists are kept in one table next to their keys; a test
+  fails when a key has no count.
+- A sweep cut short by its budget (slow target, or a bug-bounty program's
+  lower rate cap) is `partial`: the hits found so far are kept and reported,
+  and the check is never presented as a complete sweep.
+- The hits become one finding of confidence `inferred` that names the
+  wordlist; a catch-all responder is discarded as in REQ-DISCO-001.
+- The check follows the engagement's tool list (ffuf switched off: skipped as
+  `tool_disabled`) and is resumable like every check (REQ-PIPE-008).
+
+Security invariants:
+
+- Same tool, same allowlisted wordlist key, same per-call gateway
+  authorization, same egress proxy and the same request rate as the existing
+  ffuf check (a bug-bounty program's cap can only lower it). No new argument,
+  wordlist key or path is introduced.
+- The profile never widens scope, grants or switches; `thorough` only sends
+  more of the same conservative requests (about 30,000 per web surface).
+
+## REQ-PIPE-018: The Vector Agent sees what the pipeline already ran, and a partial result is reported as partial
+
+The system shall tell the Vector Agent which checks the current scan run has
+already finished or skipped, and shall never report the output of a check that
+was stopped by its time limit as "no hits".
+
+Acceptance criteria:
+
+- The agent context lists, per host, the checks of the current run that are
+  `complete`, `partial`, `failed` or skipped, with port, tool, outcome and, for
+  ffuf, the wordlist; the list is compact and capped.
+- The agent's evidence block shows it, and the agent prompt states that a
+  completed check with the same tool and wordlist is not repeated, that full
+  wordlist sweeps are the `thorough` plan's job, and that the agent's own
+  ffuf is for targeted paths, reasoned candidates and small lists.
+- An agent-dispatched ffuf that reaches its time limit returns the hits it
+  found, marked partial, with an upper bound of how much of the wordlist was
+  tried. It is never reported as "no hits" when output was discarded (defect
+  found on int, 2026-09-30: the observation read "no hits" after a run that
+  had been stopped by its limit).
+- The agent's ffuf time cap (240 s) is unchanged.
+
+Security invariants:
+
+- The context is read-only; the agent still only proposes and the Scope Gateway
+  decides. No argument validation or allowlist changes.
+- The plan data given to the agent contains no target output, no credentials
+  and no tool arguments other than the wordlist key and the nuclei mode.
+
+## REQ-PIPE-019: Audit events of the egress proxy are committed in batches, and each request still waits for its own
+
+GitHub issue #49 (R3: audit chain and proxy). During the fingerprint phase the
+egress proxy sent one blocking request to the control plane per proxied
+request - up to 150 per second, 2,176 in 30 seconds on 2026-09-30 - and each
+took a pooled database connection and queued on the engagement's audit lock.
+That starved the control plane (REQ-PIPE-020).
+
+The system shall write the proxy's audit events in batches, under one lock
+acquisition and one commit, without weakening the audit guarantees of
+REQ-EGRESS-003 and REQ-AUDIT-001/002.
+
+Acceptance criteria:
+
+- The proxy sends the events of one engagement together (one request, at most
+  200 events); the first event of an idle engagement is sent at once, so an
+  idle proxy adds no delay, and events that arrive while a send is in flight go
+  out together in the next one.
+- The control plane chains and stores a batch under one per-engagement lock
+  and one commit. A batch is all or nothing: any invalid event rejects the
+  whole batch (422), and a failed write leaves no part of it behind.
+- Timestamps within an engagement's audit log strictly increase, also inside a
+  batch, so the predecessor lookup and the live stream's cursor are
+  unambiguous; the predecessor lookup has a deterministic tie-break.
+- `verify_audit_chain` recomputes every row's hash and predecessor link for an
+  engagement and reports the first bad row. It passes after single, batched and
+  concurrent writes.
+- [Negative test] It detects a modified, a removed, an inserted and a reordered
+  row.
+- [Negative test] Fail closed, unchanged: a request is never forwarded before
+  its audit record is committed, and when a batch cannot be written (control
+  plane unavailable, refused, timed out) every request waiting on that batch is
+  denied `503 audit_unavailable`. No event is dropped silently or sent
+  fire-and-forget.
+- [Negative test] Only an explicit 503 from the control plane (returned before
+  anything was written) is retried, at most twice more; a timeout or any other
+  failure is not retried, because the batch may have been committed and a retry
+  would write the same events twice.
+- The single-event endpoint remains for a proxy image that has not been
+  rebuilt yet (rolling deployment).
+
+Security invariants:
+
+- Actor, action and the trimming of untrusted network metadata (20 keys, 64/500
+  characters, reason 100) are identical to the single-event path; the batch
+  endpoint accepts the same internal token only.
+- The hash chain keeps its construction (`sha256(prev_hash || canonical_json(row))`);
+  existing rows still verify.
+
+## REQ-PIPE-020: A flood of audit traffic cannot starve the control plane
+
+GitHub issue #49. The database pool was left at SQLAlchemy's default (5 + 10
+connections, 30 s checkout), the live audit stream did blocking database calls
+on the event loop, and a full pool therefore froze every request, including the
+worker's cancel check (2 s timeout).
+
+Acceptance criteria:
+
+- Pool size, overflow and checkout timeout are settings (`DB_POOL_SIZE` 10,
+  `DB_MAX_OVERFLOW` 10, `DB_POOL_TIMEOUT_SECONDS` 10); the default checkout
+  timeout is shorter than the previous 30 s.
+- The proxy's audit (single and batch) and rate-reservation calls share
+  `INTERNAL_BULK_DB_SLOTS` (4) database slots. A caller that cannot get a slot
+  within `INTERNAL_BULK_WAIT_SECONDS` (3) receives 503 before anything is
+  written, and the proxy fails closed.
+- [Negative test] With the pool held down to three connections, twelve threads
+  flooding the audit endpoints do not delay a cancel check beyond one second,
+  and the chain written under that load verifies. (Mutation check: with the
+  slots effectively unlimited the test fails.)
+- The live audit stream does no database work on the event loop: each poll runs
+  in a worker thread, opens and closes its own session before any row is
+  yielded, and a poll that cannot get a connection is skipped and retried, with
+  the history still owed.
+- [Negative test] A slow poll does not stop the event loop from running other
+  work.
+- A cancel poll rewrites `heartbeat_at` only when it is older than 15 s (the
+  stale window is 300 s), so REQ-RESUME-004 is unchanged.
+- [Negative test] In production the settings are refused when the pool or the
+  timeout is out of range or when the bulk slots could take every connection.
+
+Security invariants:
+
+- No authorization, audit content or egress rule changes. A refused bulk call
+  stops the proxied request (fail closed); it is never allowed through.
+
+## REQ-PIPE-021: A missing cancel answer stops the run safely and a failed run says why
+
+GitHub issue #49. The worker's "has the operator cancelled?" check was tolerant
+in the per-tool wait loop (REQ-FIDELITY-001) but not in the plan executor, at
+the phase boundaries, in the asset-review wait or in the agent loop: one
+timed-out answer crashed the run as a bare `pipeline_error`, and a tool stopped
+for that reason was recorded as `cancelled_by_operator`.
+
+Acceptance criteria:
+
+- An answer that could not be read is never taken as "not cancelled". One lost
+  answer (or up to `ASM_CANCEL_STATUS_FAILURE_TOLERANCE`-1 consecutive ones) is
+  absorbed; while it is unknown no new check is started.
+- [Negative test] When the answer stays unreadable, nothing target-facing is
+  started or continued: the executor starts no further checks, the checks
+  already running finish and are recorded, unstarted ones stay `planned`
+  (resumable), and the run ends `aborted` with the reason
+  `cancellation_status_unavailable` - never as `pipeline_error`.
+- A real operator cancel and a run taken over by a newer attempt behave as before.
+- A tool stopped because the cancel status was unreadable makes its check
+  `failed / cancellation_status_unavailable` (so coverage reads as degraded),
+  not `skipped / cancelled_by_operator`. The console, the plan view and the
+  customer report name the real reason.
+- A check-row write that times out or gets a 5xx is retried; a superseded
+  attempt (409) and any other client error are not.
+- A run that fails for another reason records `pipeline_error:<ExceptionType>:<phase>`
+  (type name only, never the message, which can carry a URL or a credential),
+  and the console explains it. Ending a run is retried, and never raises; if it
+  cannot be recorded the run stays claimed and the reaper resumes or aborts it
+  (REQ-RESUME-003). (Amends the bare `pipeline_error` reason of issue #29; the
+  `task_time_limit_exceeded` reason is unchanged.)
+
+Security invariants:
+
+- The fail-closed property of cancellation is kept and made consistent: a
+  missing answer never lets target-facing work continue.
+
+**Security review:** pending - human review by johannes (project/security
+owner) is owed for REQ-PIPE-019..021 (R3: audit chain, egress proxy, fail-closed
+cancellation). Rolled out to int on his explicit instruction (2026-10-01) ahead
+of that review, per the precedent of REQ-PIPE-017/018.

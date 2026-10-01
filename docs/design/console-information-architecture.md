@@ -74,7 +74,7 @@ breadcrumb
 header (title, status line, Edit · Authorization PDF · Audit)
 status band (risk signal, runs, open findings, readiness)   2×2 on phones
 [authorization not attested]   (only when needed)
-[tool grants + activate]       (drafts only)
+[tool grants + activate]       (drafts only; after activation the grants are on Edit engagement, next to the tool overrides)
 [readiness banner ........ Start run]   one compact panel, aria-label "Start a scan run"
 ┌ Findings (n open) ┬ Assets ┬ Runs & reports (n) ┐   role=tablist, page-tabs
 │ Findings: status tabs · severity chips (counts on Open) · findings table

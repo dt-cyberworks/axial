@@ -36,6 +36,12 @@ test("REQ-PIPE-005 scan depth is a two-way choice set in the wizard and changeab
   assert.match(depth, /Neither widens scope|widens scope, tool grants/, "the help says the depth never widens what is allowed");
 });
 
+test("REQ-PIPE-017 the thorough depth says it adds a deep content-discovery sweep and the plan explains that check", () => {
+  requirement("REQ-PIPE-017");
+  assert.match(depth, /deep sweep of about 30,000 likely paths/, "the choice tells the operator what thorough costs");
+  assert.match(planView, /"thorough:deep_content_discovery": "Thorough depth: deep sweep/, "the plan gives the check a plain-language reason");
+});
+
 test("REQ-PIPE-010 the run detail has a Plan tab that refreshes while the run executes", () => {
   requirement("REQ-PIPE-010");
   assert.match(client, /scanRunPlan: \(id: string, runId: string\) => request<ScanPlan>\(`\/engagements\/\$\{id\}\/scan-runs\/\$\{runId\}\/plan`\)/);

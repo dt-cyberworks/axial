@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from queue import Empty, Queue
 import shlex
@@ -104,6 +105,8 @@ def check_budget_s(tool: str, args: dict | None = None, override: int | None = N
     args = args or {}
     if tool == "nuclei":
         seconds = NUCLEI_BUDGET_S.get(str(args.get("mode") or "select"), RUNNER_DEFAULT_BUDGET_S)
+    elif tool == "ffuf":
+        seconds = ffuf_budget_s(args.get("wordlist"), has_candidates=bool(args.get("extra_candidates")))
     else:
         seconds = CHECK_BUDGET_S.get(tool, RUNNER_DEFAULT_BUDGET_S)
     return max(1, min(seconds, RUNNER_MAX_BUDGET_S))
@@ -113,6 +116,39 @@ def nuclei_select_budget_s(templates: int) -> int:
     """Time budget of one selection call: a base for start-up and template
     loading plus a per-template allowance, within the runner maximum."""
     return max(1, min(int(_SELECT_BASE_S + _SELECT_PER_TEMPLATE_S * max(0, int(templates))), RUNNER_MAX_BUDGET_S))
+
+
+# REQ-PIPE-017: ffuf's own request rate and how many entries each allowed
+# wordlist has (SecLists as installed in the runner image; the keys must stay
+# in step with FFUF_WORDLISTS - a test fails otherwise). A wordlist's whole pass
+# takes entries / rate seconds, so its budget is derived, not guessed.
+FFUF_RATE_RPS = 20
+FFUF_WORDLIST_ENTRIES: dict[str, int] = {
+    "quickhits": 2565, "common": 4749, "raft-medium-files": 17129, "raft-medium-dirs": 29999,
+    "directory-list-medium": 220560,
+}
+_FFUF_SETUP_S = 30       # -ac calibration probes before the sweep starts
+_FFUF_SLACK = 1.1        # a target that answers a little slower than the limit
+
+
+def ffuf_budget_s(wordlist: str | None, *, has_candidates: bool = False, rate: int = FFUF_RATE_RPS) -> int:
+    """Time budget of one ffuf check: enough for one whole pass of its wordlist
+    (entries / rate, with slack and set-up time and the margin before the
+    runner's kill), never below the fixed floor, never above the runner maximum.
+    A list that cannot finish inside the maximum simply runs to it and ends
+    `partial`."""
+    floor = CHECK_BUDGET_S["ffuf"]
+    entries = FFUF_WORDLIST_ENTRIES.get(str(wordlist or ""))
+    if has_candidates or entries is None:
+        return floor
+    seconds = math.ceil(entries / max(1, rate) * _FFUF_SLACK) + _FFUF_SETUP_S + _INNER_MARGIN_S
+    return max(1, min(max(floor, seconds), RUNNER_MAX_BUDGET_S))
+
+
+def ffuf_entries_tried_at_most(duration_s: float, rate: int = FFUF_RATE_RPS) -> int:
+    """Upper bound of the wordlist entries a run of `duration_s` seconds tried:
+    the rate can only be lowered (bug-bounty cap, slow target), never raised."""
+    return max(0, int(duration_s * rate))
 
 
 def _inner_deadline_s(args: dict, default: int) -> int:
@@ -722,7 +758,7 @@ def _ffuf_command(target: str, args: dict) -> str:
         # threads - tightened to a bug-bounty program's configured max_rps
         # when stricter than our default, since the gateway/proxy per-call
         # rate check never sees inside this one authorized invocation.
-        "-rate", str(_bounty_rate_cap(args, 20)), "-t", "10", "-maxtime", str(_inner_deadline_s(args, 90)),
+        "-rate", str(_bounty_rate_cap(args, FFUF_RATE_RPS)), "-t", "10", "-maxtime", str(_inner_deadline_s(args, 90)),
         "-s", "-of", "json", "-o", out,
     ]
     exts = args.get("extensions") or []

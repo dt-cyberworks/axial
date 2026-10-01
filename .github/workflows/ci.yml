@@ -88,18 +88,22 @@ jobs:
             done < <(sed -E ':a;/\\$/{N;s/\\\n[[:space:]]*/ /;ba}' "$f")
           done
           exit $fail
+      # The tool-runner image is ~5 GB and Trivy exports an image to a tar under
+      # /tmp before it can read it, so build layers + image + export did not fit
+      # on the stock runner ("no space left on device" at the tool-runner SBOM).
+      # Free the preinstalled toolchains we never use, and keep the five small
+      # images out of the store while the big one is built and scanned.
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - name: Build control-plane image
         run: docker build -t asm/control-plane:ci control-plane
       - name: Build worker image
         run: docker build -t asm/worker:ci worker
       - name: Build egress-proxy image
         run: docker build -t asm/egress-proxy:ci egress-proxy
-      # GitHub issue #20: previously only the three images above were built
-      # in CI - tool-runner (the offensive execution plane), raw-egress-
-      # gateway, and edge could break or silently pull in changed upstream
-      # code with nothing catching it until an actual deploy.
-      - name: Build tool-runner image
-        run: docker build -f tool-runner/runner.Dockerfile -t asm/tool-runner:ci tool-runner
       - name: Build raw-egress-gateway image
         run: docker build -t asm/raw-egress-gateway:ci raw-egress-gateway
       - name: Build edge image
@@ -130,13 +134,6 @@ jobs:
           image-ref: asm/egress-proxy:ci
           format: cyclonedx
           output: sbom/egress-proxy.cdx.json
-      - name: SBOM tool-runner
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: image
-          image-ref: asm/tool-runner:ci
-          format: cyclonedx
-          output: sbom/tool-runner.cdx.json
       - name: SBOM raw-egress-gateway
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -151,6 +148,29 @@ jobs:
           image-ref: asm/edge:ci
           format: cyclonedx
           output: sbom/edge.cdx.json
+      - name: Free disk before the tool-runner build
+        run: |
+          docker image rm asm/control-plane:ci asm/worker:ci asm/egress-proxy:ci asm/raw-egress-gateway:ci asm/edge:ci
+          docker builder prune -af
+          df -h /
+      # GitHub issue #20: previously only three images were built in CI -
+      # tool-runner (the offensive execution plane), raw-egress-gateway, and
+      # edge could break or silently pull in changed upstream code with
+      # nothing catching it until an actual deploy. tool-runner goes last
+      # because it is by far the largest.
+      - name: Build tool-runner image
+        run: docker build -f tool-runner/runner.Dockerfile -t asm/tool-runner:ci tool-runner
+      - name: Free build cache before the tool-runner SBOM
+        run: |
+          docker builder prune -af
+          df -h /
+      - name: SBOM tool-runner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: asm/tool-runner:ci
+          format: cyclonedx
+          output: sbom/tool-runner.cdx.json
       - name: Upload SBOMs
         uses: actions/upload-artifact@v4
         with:

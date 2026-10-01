@@ -51,5 +51,12 @@ assert.match(modal, /isHttpShaped/, "modal must branch on whether the approval i
 assert.match(modal, /hasRiskAssessment/, "modal must not claim a risk assessment exists when the tool never provides one");
 assert.match(modal, /tc\.tool[\s\S]*tc\.target/, "the non-HTTP branch must still show which tool and target");
 
+// REQ-APPROVAL-003: the request line and the headers are separate lines. JSX drops a
+// bare line break between two expressions, which once printed "...example.orgContent-Type: ...".
+assert.match(modal, /\[\s*`\$\{args\.method \?\? "\?"\} \$\{args\.path \?\? ""\}  →  \$\{tc\.target \?\? ""\}`,\s*\.\.\.Object\.entries\(headers\)\.map\(\(\[k, v\]\) => `\$\{k\}: \$\{v\}`\),\s*\]\.join\("\\n"\)/,
+  "the request line and every header are joined with an explicit newline");
+assert.doesNotMatch(modal, /\$\{tc\.target \?\? ""\}`\}\s*\n\{Object\.entries/, "no bare line break between two JSX expressions");
+
 console.log("ok - REQ-APPROVALUI-001/002 global approval surfacing + jump-to-run wired");
 console.log("ok - REQ-APPROVAL-006 approval popup renders non-HTTP-shaped tool calls honestly");
+console.log("ok - REQ-APPROVAL-003 approval popup keeps the request line and the headers on separate lines");

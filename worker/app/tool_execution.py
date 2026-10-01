@@ -117,7 +117,12 @@ def check_outcome(collector: CheckCollector) -> tuple[str, str | None]:
             tool, reason = collector.denials[0]
             return "skipped", f"gateway_denied:{reason}"
         return "complete", None
-    if any(r.get("error_reason") in ("cancelled_by_operator", "cancellation_status_unavailable") for r in collector.results):
+    # GitHub issue #49: a tool stopped because the cancel status could not be read is NOT
+    # an operator stop. It is a failed check with its own reason, so coverage reads
+    # as degraded and the console and report say what really happened.
+    if any(r.get("error_reason") == "cancellation_status_unavailable" for r in collector.results):
+        return "failed", "cancellation_status_unavailable"
+    if any(r.get("error_reason") == "cancelled_by_operator" for r in collector.results):
         return "skipped", "cancelled_by_operator"
     if all(o.startswith("skipped") for o in outcomes):
         return "skipped", outcomes[0].partition(":")[2] or "skipped"

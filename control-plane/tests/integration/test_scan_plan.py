@@ -367,3 +367,102 @@ def test_req_pipe_015_a_bounty_programs_own_concurrency_cap_can_only_lower_it(ap
 
 def test_negative_req_pipe_015_settings_of_an_unknown_engagement_are_404(api):
     assert api.get(f"/internal/engagements/{uuid.uuid4()}/scan-settings", headers=_internal()).status_code == 404
+
+
+# --- REQ-PIPE-018: what the agent is told about the run's checks ------------------------------------
+
+def _in_scope_asset(db, eng, value):
+    from app.models.asset import DiscoveredAsset
+    asset = DiscoveredAsset(engagement_id=eng.id, asset_type="domain", value=value, in_scope=True, discovered_via="passive-osint")
+    db.add(asset)
+    db.commit()
+    return asset
+
+
+def _agent_checks(db, eng, host="a.example"):
+    from app.api.internal import agent_context
+    return next(h for h in agent_context(eng.id, db)["hosts"] if h["host"] == host)["checks"]
+
+
+def _mark(api, db, check_id, state):
+    row = db.scalars(select(ScanCheck).where(ScanCheck.check_id == check_id)).one()
+    api.patch(f"/internal/scan-checks/{row.id}", json={"state": state, "attempt": 1}, headers=_internal())
+
+
+def test_req_pipe_018_the_agent_context_lists_finished_and_skipped_checks_with_the_ffuf_wordlist(api, db, test_user):
+    eng = _engagement(db, test_user)
+    _in_scope_asset(db, eng, "a.example")
+    run = _run(db, eng)
+    _post(api, run, _plan_body(checks=[
+        {"check_id": "wafw00f", "tool": "wafw00f", "state": "planned", "reason": "web"},
+        {"check_id": "ffuf", "tool": "ffuf", "state": "planned", "reason": "web", "args": {"wordlist": "quickhits"}},
+        {"check_id": "ffuf:deep", "tool": "ffuf", "state": "planned", "reason": "thorough", "args": {"wordlist": "raft-medium-dirs"}},
+        {"check_id": "katana", "tool": "katana", "state": "planned", "reason": "switch_on"},
+        {"check_id": "screenshot", "tool": "screenshot", "state": "skipped", "reason": "switch_off"},
+    ]))
+    _mark(api, db, "wafw00f", "complete")
+    _mark(api, db, "ffuf", "complete")
+    _mark(api, db, "ffuf:deep", "partial")
+    assert _agent_checks(db, eng) == [
+        {"port": 443, "check_id": "wafw00f", "tool": "wafw00f", "state": "complete"},
+        {"port": 443, "check_id": "ffuf", "tool": "ffuf", "state": "complete", "wordlist": "quickhits"},
+        {"port": 443, "check_id": "ffuf:deep", "tool": "ffuf", "state": "partial", "wordlist": "raft-medium-dirs"},
+        {"port": 443, "check_id": "screenshot", "tool": "screenshot", "state": "skipped", "reason": "switch_off"},
+    ], "katana is still planned: to come, not done"
+
+
+def test_req_pipe_018_a_host_without_a_plan_or_without_a_running_run_gets_an_empty_list(api, db, test_user):
+    eng = _engagement(db, test_user)
+    _in_scope_asset(db, eng, "a.example")
+    assert _agent_checks(db, eng) == [], "no run"
+    run = _run(db, eng)
+    _post(api, run, _plan_body(checks=[{"check_id": "wafw00f", "tool": "wafw00f", "state": "planned", "reason": "web"}]))
+    _mark(api, db, "wafw00f", "complete")
+    assert len(_agent_checks(db, eng)) == 1
+    db.get(ScanRun, run.id).state = "done"
+    db.commit()
+    assert _agent_checks(db, eng) == [], "a finished run is not the current run"
+
+
+def test_negative_req_pipe_018_nothing_the_target_returned_reaches_the_agent_context(api, db, test_user):
+    import json
+    from app.api.internal import agent_context
+    eng = _engagement(db, test_user)
+    _in_scope_asset(db, eng, "a.example")
+    run = _run(db, eng)
+    _post(api, run, _plan_body(checks=[
+        {"check_id": "ffuf", "tool": "ffuf", "state": "planned", "reason": "web", "args": {"wordlist": "quickhits", "path": "/FUZZ"}},
+    ]))
+    _mark(api, db, "ffuf", "complete")
+    body = json.dumps(agent_context(eng.id, db), default=str)
+    assert "sid=secret" not in body and "authorization" not in body.lower().replace("authorization_", "")
+    (item,) = _agent_checks(db, eng)
+    assert set(item) <= {"port", "check_id", "tool", "state", "wordlist", "reason"}
+    assert "path" not in item and "args" not in item
+
+
+def test_negative_req_pipe_018_a_non_string_wordlist_is_left_out_and_never_crashes(api, db, test_user):
+    eng = _engagement(db, test_user)
+    _in_scope_asset(db, eng, "a.example")
+    run = _run(db, eng)
+    _post(api, run, _plan_body(checks=[
+        {"check_id": "ffuf", "tool": "ffuf", "state": "planned", "reason": "web", "args": {"wordlist": ["x"]}},
+        {"check_id": "nuclei:tech", "tool": "nuclei", "state": "planned", "reason": "t", "args": {"mode": "tech", "wordlist": "quickhits"}},
+    ]))
+    _mark(api, db, "ffuf", "complete")
+    _mark(api, db, "nuclei:tech", "complete")
+    items = {i["check_id"]: i for i in _agent_checks(db, eng)}
+    assert "wordlist" not in items["ffuf"] and "wordlist" not in items["nuclei:tech"], "only an ffuf check carries a wordlist key"
+
+
+def test_req_pipe_018_the_list_per_host_is_capped(api, db, test_user):
+    eng = _engagement(db, test_user)
+    _in_scope_asset(db, eng, "a.example")
+    run = _run(db, eng)
+    skipped = [{"check_id": f"c{i}", "tool": "wafw00f", "state": "skipped", "reason": "x" * 300} for i in range(40)]
+    body = _plan_body(checks=skipped)
+    body["surfaces"].append({**body["surfaces"][0], "port": 8443})
+    assert _post(api, run, body).status_code == 201
+    items = _agent_checks(db, eng)
+    assert len(items) == scan_plan.AGENT_CHECKS_PER_HOST < 80
+    assert all(len(i["reason"]) <= 80 for i in items)

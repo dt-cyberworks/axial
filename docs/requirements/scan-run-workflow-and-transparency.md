@@ -133,6 +133,12 @@ Acceptance criteria:
 
 ## REQ-DOC-001: In-app user documentation
 
+> **Superseded by REQ-MANUAL-001..005 (johannes, 2026-10-01, GitHub issue #50).**
+> The console no longer carries a documentation page; the user documentation is the
+> manual in `docs/manual/`, reviewed like code and shipped with the public export. The
+> criteria below describe the retired page and are kept for history; its coverage is
+> recorded in `docs/design/user-manual-architecture.md` and verified by TC-MANUAL-001..005.
+
 The application must provide human-facing documentation, reachable from the GUI,
 that explains every screen, function, and field.
 

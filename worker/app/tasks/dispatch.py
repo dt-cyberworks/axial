@@ -31,11 +31,21 @@ from app.nuclei_parse import parse_nuclei_jsonl
 from app.target_envelope import httpx_target, protocol_from_httpx_url, target_url
 from app.testssl_parse import parse_testssl_json
 from app.planner import resolve_products
-from app.tool_runner_client import nuclei_select_budget_s, tool_runner
+from app.tool_runner_client import (
+    CHECK_BUDGET_S,
+    FFUF_WORDLIST_ENTRIES,
+    ffuf_entries_tried_at_most,
+    nuclei_select_budget_s,
+    tool_runner,
+)
 from app import tool_execution
 from app.wafw00f_parse import parse_wafw00f
 
 logger = logging.getLogger(__name__)
+
+# REQ-PIPE-018: an agent-dispatched ffuf call keeps the fixed interactive cap
+# whatever wordlist it names; a wordlist-sized budget is only the plan's.
+AGENT_FFUF_BUDGET_S = CHECK_BUDGET_S["ffuf"]
 
 # Tool -> Scope-Gateway-Kategorie (muss zur Registry passen). Der Agent nutzt
 # genau diese Menge; alles andere ist fuer ihn nicht erreichbar.
@@ -387,8 +397,15 @@ def _dispatch_ffuf(
     Beobachtung zurueck - die Bewertung, ob ein Treffer ein Befund ist (z. B.
     exponiertes /admin, /.git/config), macht der Agent per report_finding."""
     url = target_url(target, single_port, confirmed_protocol)
-    result = _run(engagement_id, "ffuf", url, args or {}, scan_run_id, ip=ip, port_range=str(single_port or 443))
-    hits = parse_ffuf_json(result.get("stdout", "")) if result.get("success") else []
+    # The agent's call keeps its interactive time cap whatever list it picks
+    # (REQ-PIPE-018); a whole-list sweep is the thorough plan's check
+    # (REQ-PIPE-017), which gets a budget sized to its list.
+    result = _run(engagement_id, "ffuf", url, args or {}, scan_run_id, ip=ip, port_range=str(single_port or 443),
+                  budget_s=AGENT_FFUF_BUDGET_S)
+    # A run stopped by its time limit still holds real hits; only a failed one
+    # has nothing to parse (REQ-PIPE-006/018).
+    partial = result.get("error_reason") == tool_execution.BUDGET_REACHED
+    hits = parse_ffuf_json(result.get("stdout", "")) if tool_execution.usable_output(result) else []
     # REQ-DISCO-001: the agent must not be told a catch-all responder is a
     # discovery either - it would reason from, and report findings on, paths
     # that do not exist. Same guard as the deterministic fingerprint path.
@@ -399,11 +416,27 @@ def _dispatch_ffuf(
             f"response (catch-all/wildcard, e.g. an SPA fallback or a block page). "
             f"No real content discovery; treat this target as 'no hits'.",
         )
+    note = _ffuf_partial_note(args or {}, result) if partial else ""
     if not hits:
-        return Observation("ffuf", target, "content-discovery: no hits")
+        return Observation("ffuf", target, f"content-discovery: no hits{note}")
     top = "; ".join(f"{h.get('status')} /{h.get('word')} ({h.get('length')}B)" for h in hits[:25])
     more = f" (+{len(hits) - 25} more)" if len(hits) > 25 else ""
-    return Observation("ffuf", target, f"content-discovery: {len(hits)} hits: {top}{more}")
+    return Observation("ffuf", target, f"content-discovery: {len(hits)} hits: {top}{more}{note}")
+
+
+def _ffuf_partial_note(args: dict, result: dict) -> str:
+    """What the agent must know about a sweep its time limit cut short: it is
+    not a complete pass, and how little of a large list it may have tried."""
+    wordlist = str(args.get("wordlist") or "common")
+    entries = FFUF_WORDLIST_ENTRIES.get(wordlist)
+    note = " [PARTIAL: stopped at its time limit"
+    duration = result.get("duration_s")
+    if entries and not args.get("extra_candidates") and isinstance(duration, (int, float)):
+        tried = min(entries, ffuf_entries_tried_at_most(duration))
+        note += (f"; at most the first {tried:,} of {entries:,} entries of '{wordlist}' were tried "
+                 f"(about {round(100 * tried / entries)}%) - this is NOT a complete pass, and the "
+                 f"thorough scan profile's deep sweep is the one that covers the whole list")
+    return note + "]"
 
 
 def _parse_raw_probe(result: dict | None) -> tuple[str, str]:

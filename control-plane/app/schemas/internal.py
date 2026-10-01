@@ -58,6 +58,13 @@ class ProxyAuditEventIn(BaseModel):
     payload: dict = {}
 
 
+class ProxyAuditBatchIn(BaseModel):
+    """GitHub issue #49: the egress proxy's audit events of one engagement, sent
+    together. Bounded so one request cannot hold the database for long."""
+
+    events: list[ProxyAuditEventIn] = Field(min_length=1, max_length=200)
+
+
 class ToolExecutionEventIn(BaseModel):
     scan_run_id: uuid.UUID | None = None
     tool: str = Field(min_length=1, max_length=64)

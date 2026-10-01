@@ -67,6 +67,7 @@ Requirements:
 Automated tests:
 
 - `worker/tests/test_agent.py`
+- `frontend/tests/global_approval_surfacing.test.mjs`
 
 Objective:
 
@@ -79,6 +80,8 @@ Expected results:
 - Approved → the write is dispatched and the approval is consumed once.
 - Rejected → the write is not dispatched.
 - Run cancelled while waiting → the write is not dispatched.
+- The popup shows the request line and each header on separate lines (the target and
+  the first header are never run together).
 
 ## TC-APPROVAL-005: The approval timeout is configurable and cannot be exploited into a permanent pending state
 
