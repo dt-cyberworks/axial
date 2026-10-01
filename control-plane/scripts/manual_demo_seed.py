@@ -151,6 +151,7 @@ def seed(db, *, password: str, now: dt.datetime | None = None) -> dict:
     now = now or dt.datetime.now(dt.timezone.utc)
     users, accounts = _users(db, password, now)
     operator = users["demo.operator@example.com"]
+    analyst = users["sam.analyst@example.com"]  # owns one engagement, so the console shows two owners
 
     # ------------------------------------------------------------------ engagements
     main = _engagement(
@@ -168,7 +169,7 @@ def seed(db, *, password: str, now: dt.datetime | None = None) -> dict:
         ToolApprovalPolicy(engagement_id=main.id, tool_name="http_request", requires_manual_approval=True),
     ])
     draft = _engagement(
-        db, operator, now, title="Example Corp: partner portal", status="draft",
+        db, analyst, now, title="Example Corp: partner portal", status="draft",
         authorized_from=now, authorized_until=now + dt.timedelta(days=30), emergency_contact="Alex Morgan, +1 555 0100",
     )
     _scope(db, draft, [("allow", "domain", f"partners.{DOMAIN}", True, False)])

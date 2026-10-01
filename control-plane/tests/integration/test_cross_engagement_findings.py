@@ -104,42 +104,52 @@ def two_operators(db):
     return a, b, eng_a, eng_b
 
 
-# --- ownership (negative tests first: this is the R3 part) ---------------------
+# --- visibility (REQ-IAM-022, GitHub issue #47): everyone reads everything; `mine` narrows --------------
 
-def test_negative_an_operator_sees_only_findings_of_own_engagements(client, db, two_operators):
-    a, _b, eng_a, _eng_b = two_operators
+def test_an_operator_sees_the_findings_of_every_engagement_with_their_owner(client, db, two_operators):
+    a, b, eng_a, eng_b = two_operators
     resp = client.get("/findings", headers=_auth(db, a))
+    assert sorted(_titles(resp)) == ["A: directory listing", "A: outdated TLS", "B-SECRET: exposed admin panel"]
+    body = resp.json()
+    assert body["total"] == 3
+    assert {item["engagement_id"] for item in body["items"]} == {str(eng_a.id), str(eng_b.id)}
+    assert {item["engagement_owner"] for item in body["items"]} == {"Portfolio Test"}
+    # The counts cover the same rows as the page.
+    assert body["counts_by_severity"]["critical"] == 1
+    assert body["counts_by_status"]["open"] == 3
+
+
+def test_mine_narrows_the_list_the_total_and_the_counts_to_the_callers_engagements(client, db, two_operators):
+    a, _b, eng_a, _eng_b = two_operators
+    resp = client.get("/findings", params={"mine": "true"}, headers=_auth(db, a))
     assert sorted(_titles(resp)) == ["A: directory listing", "A: outdated TLS"]
     body = resp.json()
     assert body["total"] == 2
     assert {item["engagement_id"] for item in body["items"]} == {str(eng_a.id)}
-    # The counts cover the same visible rows - B's critical finding is not counted anywhere.
     assert body["counts_by_severity"]["critical"] == 0
     assert body["counts_by_status"]["open"] == 2
 
 
-def test_negative_another_users_engagement_id_gives_the_same_empty_answer_as_an_unknown_id(client, db, two_operators):
+def test_an_engagement_filter_shows_another_users_engagement_but_not_with_mine(client, db, two_operators):
     a, _b, _eng_a, eng_b = two_operators
     headers = _auth(db, a)
-    foreign = client.get("/findings", params={"engagement_id": str(eng_b.id)}, headers=headers)
+    shown = client.get("/findings", params={"engagement_id": str(eng_b.id)}, headers=headers)
+    assert _titles(shown) == ["B-SECRET: exposed admin panel"]
+    narrowed = client.get("/findings", params={"engagement_id": str(eng_b.id), "mine": "true"}, headers=headers)
     unknown = client.get("/findings", params={"engagement_id": str(uuid.uuid4())}, headers=headers)
-    assert foreign.status_code == unknown.status_code == 200
-    assert foreign.json() == unknown.json()
-    assert foreign.json()["items"] == [] and foreign.json()["total"] == 0
-    assert sum(foreign.json()["counts_by_status"].values()) == 0
-    assert sum(foreign.json()["counts_by_severity"].values()) == 0
+    assert narrowed.status_code == unknown.status_code == 200
+    assert narrowed.json() == unknown.json()
+    assert narrowed.json()["items"] == [] and narrowed.json()["total"] == 0
+    assert sum(narrowed.json()["counts_by_status"].values()) == 0
 
 
-def test_negative_search_never_reaches_another_users_findings(client, db, two_operators):
+def test_search_finds_another_users_findings_unless_narrowed_to_mine(client, db, two_operators):
     a, _b, _eng_a, _eng_b = two_operators
     headers = _auth(db, a)
     for q in ("B-SECRET", "admin.b-bank", "exposed admin panel"):
-        resp = client.get("/findings", params={"q": q}, headers=headers)
-        assert _titles(resp) == [], q
-        assert resp.json()["total"] == 0
-    # Also not in another status or severity view.
-    for params in ({"status": "accepted_risk"}, {"severity": "critical"}):
-        assert _titles(client.get("/findings", params=params, headers=headers)) == []
+        assert _titles(client.get("/findings", params={"q": q}, headers=headers)) == ["B-SECRET: exposed admin panel"], q
+        narrowed = client.get("/findings", params={"q": q, "mine": "true"}, headers=headers)
+        assert _titles(narrowed) == [] and narrowed.json()["total"] == 0, q
 
 
 def test_negative_without_a_session_the_endpoint_answers_401(client, two_operators):

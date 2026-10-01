@@ -101,6 +101,8 @@ Acceptance criteria:
 
 ## REQ-CONCUR-003: Overlapping engagement scope is caught at activation, not mid-scan
 
+> **Amended by REQ-IAM-024 (johannes, 2026-10-01, GitHub issue #47, `docs/requirements/engagement-visibility.md`).** The error names the engagement and its owner.
+
 Context: the egress-proxy resolves the engagement for a request that
 carries no explicit engagement identifier (several HTTP tools cannot be
 told to send a custom header through their built-in proxy support) by
@@ -117,10 +119,10 @@ Acceptance criteria:
 - Activating an engagement (or adding an active-mode allow scope-asset to
   an already-active one) checks for an overlapping allow-scope match
   against every *other* currently active engagement (any owner) and
-  refuses with a clear, actionable error identifying that the conflict
-  exists (not which other engagement/owner, to avoid leaking one user's
-  engagement details to another) rather than silently succeeding into a
-  state that will fail at scan time.
+  refuses with a clear, actionable error that names the conflicting
+  engagement (its title and its owner, REQ-IAM-024: every user can read
+  every engagement now, so naming it discloses nothing) rather than
+  silently succeeding into a state that will fail at scan time.
 - This is a creation/activation-time check only — it does not change the
   egress-proxy's own runtime resolution or its fail-closed behavior, which
   remains the actual enforcement boundary.

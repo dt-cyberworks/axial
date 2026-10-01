@@ -77,10 +77,10 @@ class Engagement(Base):
     # widens scope, grants or switches.
     scan_profile: Mapped[str] = mapped_column(String(16), nullable=False, server_default="standard")
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
-    # REQ-IAM-007: wer dieses Engagement angelegt hat/besitzt. NULL bei
-    # Alt-Zeilen vor dem Backfill (Rollout-Schritt) - bis dahin fuer NICHT-
-    # Admin-Nutzer unsichtbar (sichere Default-Seite), nicht fuer alle offen.
-    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("app_user.id"))
+    # REQ-IAM-007/021: wer dieses Engagement angelegt hat/besitzt. Immer gesetzt
+    # (NOT NULL, Migration 0038): lesen darf jeder angemeldete Nutzer, aendern nur
+    # der Owner oder ein Admin (REQ-IAM-022/023).
+    owner_user_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("app_user.id"), nullable=False)
 
 
 ScopeRule = pg_enum("scope_rule", "allow", "deny")

@@ -10,17 +10,27 @@ Implementation: [`control-plane/app/api/`](../control-plane/app/api/).
 
 ## Public endpoints (operator console)
 
+**Who may do what with an engagement (REQ-IAM-021..025).** Every engagement has an owner. Every
+signed-in user may **read** every engagement: any `GET` under `/engagements/{id}/...`, including
+findings, evidence, runs, reports, the audit log and the live stream. Only the engagement's
+**owner or an admin** may **change** it: any `POST`, `PUT`, `PATCH` or `DELETE` under
+`/engagements/{id}/...` answers `403` to anyone else, before the request is read. An id that does
+not exist is `404`. One rule in `app/security.py` (`enforce_engagement_access`) applies it to
+every such route. The list of pending approvals (`GET /approvals`) is the owner's own queue.
+`EngagementOut` carries `owner_user_id`, `owner_name`, `owner_email` and `can_manage` (whether the
+caller may change it; the server enforces the rule either way).
+
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | liveness |
 | `GET` | `/tools/capabilities` | capability matrix from the registry (installed/authorized/mapped/dispatched/parsed) |
-| `GET` | `/engagements` | dashboard cards |
+| `GET` | `/engagements` | every engagement with its owner and whether the caller may change it (`can_manage`) |
 | `POST` | `/engagements` | wizard: engagement + persisted TCP port interval (`tcp_port_from/to`, default 1–65535) + explicit `udp_discovery_enabled` |
 | `GET` | `/engagements/{id}` | engagement details incl. the TCP/UDP scan envelope |
 | `PATCH` | `/engagements/{id}` | metadata; the TCP/UDP envelope is only changeable in status `draft`. The four discovery switches `subfinder_enabled`, `crawling_enabled`, `oob_enabled`, `screenshots_enabled` are changeable at any status and audited (REQ-COVER-007); `scan_profile` (`standard`/`thorough`, REQ-PIPE-005) too |
 | `GET` | `/engagements/{id}/endpoints` | crawled and archived endpoints (URL, method, parameter names, source; max 1000; REQ-COVER-003) |
 | `GET` | `/engagements/{id}/screenshots` | screenshot metadata (REQ-COVER-006) |
-| `GET` | `/engagements/{id}/screenshots/{screenshot_id}/image` | the PNG; `nosniff`, `Cache-Control: private, no-store`; 404 for another owner's engagement |
+| `GET` | `/engagements/{id}/screenshots/{screenshot_id}/image` | the PNG; `nosniff`, `Cache-Control: private, no-store`; readable by every signed-in user (REQ-IAM-022) |
 | `POST` | `/engagements/{id}/scope-assets` | wizard step 3 (allow/deny) |
 | `GET` | `/engagements/{id}/scope-assets` | scope list |
 | `GET` | `/engagements/{id}/tool-grants` | the granted categories with their manual-approval tools |
@@ -37,7 +47,7 @@ Implementation: [`control-plane/app/api/`](../control-plane/app/api/).
 | `DELETE` | `/engagements/{id}` | atomically deletes the complete engagement data graph (204), keeps the audit trail; active runs return 409 |
 | `GET` | `/engagements/{id}/findings` | results list (filters: `severity`, `status`) |
 | `PATCH` | `/engagements/{id}/findings/{finding_id}` | triage: `{status, note}` with status `open`, `accepted_risk`, `false_positive`, or `resolved`; a note (≥3 characters) is required for `accepted_risk` and `false_positive`; records who/when/why and writes an audit entry; a later scan keeps the decision (REQ-TRIAGE-001/002) |
-| `GET` | `/findings` | findings across every engagement the caller can see (operators: own engagements; admins: all). Filters `status` (default `open`), `severity`, `engagement_id`, `q` (title or target, literal text); paging `limit` (1–200, default 50) and `offset`. Returns `{items, total, limit, offset, counts_by_status, counts_by_severity}`; each item is a finding plus `engagement_title`. The ownership filter is part of the query, so totals and counts never include other users' findings (REQ-PORTFOLIO-001) |
+| `GET` | `/findings` | findings across every engagement (REQ-IAM-022). Filters `status` (default `open`), `severity`, `engagement_id`, `mine` (`true` keeps only the caller's own engagements), `q` (title or target, literal text); paging `limit` (1–200, default 50) and `offset`. Returns `{items, total, limit, offset, counts_by_status, counts_by_severity}`; each item is a finding plus `engagement_title` and `engagement_owner`. The `mine` filter is part of the query, so totals and counts always agree with the page (REQ-PORTFOLIO-001) |
 | `POST` | `/engagements/{id}/findings/{finding_id}/lens-explanation` | the Lens Agent explains a finding, its impact, and remediation; cached in `finding.evidence.lens_agent` |
 | `GET` | `/engagements/{id}/summary` | risk light, open-finding counts by severity, `counts_by_status` for all four statuses, top actions |
 | `POST` | `/engagements/{id}/report` | PDF export (async, returns `job_id`) |

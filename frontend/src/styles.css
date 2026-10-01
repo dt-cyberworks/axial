@@ -828,6 +828,8 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .error-block { border-color: var(--tint-bad-border); background: var(--tint-bad-bg); color: var(--red); }
 .warning-block { border-color: var(--tint-warn-border); background: var(--tint-warn-bg); color: var(--yellow); margin: 12px 0; }
 .success-block { border-color: var(--tint-good-border); background: var(--tint-good-bg); color: var(--green); }
+/* REQ-IAM-025: an engagement the user may read but not change. */
+.read-only-notice { border-radius: 8px; padding: 10px 14px; border: 1px solid var(--tint-info-border); background: var(--tint-info-bg); color: var(--ink); }
 
 @media (max-width: 1040px) {
   .app-shell { grid-template-columns: 1fr; }
@@ -1113,6 +1115,8 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .findings-filters label { display: grid; gap: 4px; font-size: 0.82rem; color: var(--muted); font-weight: 600; }
 .findings-filters select, .findings-filters input { min-width: 180px; }
 .findings-filters .search-filter { flex: 1 1 240px; }
+.checkbox-filter { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.findings-filters .checkbox-filter { align-self: end; min-height: 38px; }
 .findings-filters .search-filter input { width: 100%; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line); color: var(--muted); }
 .finding-open-link { display: inline-block; margin: 0 0 12px; }

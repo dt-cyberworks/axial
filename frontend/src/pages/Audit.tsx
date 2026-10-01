@@ -126,6 +126,9 @@ export default function Audit() {
   const queryClient = useQueryClient();
 
   const [engagementTitle, setEngagementTitle] = useState<string>("");
+  // REQ-IAM-025: the audit log is readable by everyone; the one-click operator override changes the
+  // engagement (scope, grants), so it is offered to the owner and admins only.
+  const [canManage, setCanManage] = useState(false);
   const [entries, setEntries] = useState<AuditRow[]>([]);
   const [facets, setFacets] = useState<{ actors: string[]; actions: string[] }>({ actors: [], actions: [] });
   const [hasMore, setHasMore] = useState(false);
@@ -171,7 +174,7 @@ export default function Audit() {
 
   useEffect(() => {
     if (!id) return;
-    api.getEngagement(id).then((e) => setEngagementTitle(e.title)).catch(() => {});
+    api.getEngagement(id).then((e) => { setEngagementTitle(e.title); setCanManage(e.can_manage); }).catch(() => {});
     api.auditFacets(id).then(setFacets).catch(() => {});
   }, [id]);
 
@@ -361,7 +364,7 @@ export default function Audit() {
         <ol className="audit-log">
           {entries.map((entry) => {
             const isOpen = expanded.has(entry.id);
-            const overrideLabel = entry.decision === "DENY" && entry.reason ? OVERRIDE_LABELS[entry.reason] : undefined;
+            const overrideLabel = canManage && entry.decision === "DENY" && entry.reason ? OVERRIDE_LABELS[entry.reason] : undefined;
             const explanation = (entry.decision === "DENY" || entry.decision === "THROTTLE") && entry.reason
               ? REASON_EXPLANATIONS[entry.reason]
               : undefined;

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select, text
 
+from tests.integration.owners import make_owner
 from app.api.internal import add_finding
 from app.models.engagement import Engagement
 from app.models.finding import Finding
@@ -32,7 +33,7 @@ PAIRS = [
 
 def _engagement(db) -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
-    eng = Engagement(title="Titles", source="own_domain", status="active",
+    eng = Engagement(owner_user_id=make_owner(db).id, title="Titles", source="own_domain", status="active",
                      authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1))
     db.add(eng)
     db.commit()

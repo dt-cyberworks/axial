@@ -39,7 +39,7 @@ test("REQ-CONSOLE-013 the engagement page has URL-driven tabs, findings first", 
 });
 
 test("REQ-CONSOLE-013 only the shown tab is mounted, so only its data is requested", () => {
-  assert.match(detail, /\{activeTab === "findings" && <FindingsSection engagementId=\{id\} \/>\}/);
+  assert.match(detail, /\{activeTab === "findings" && <FindingsSection engagementId=\{id\} canManage=\{canManage\} \/>\}/);
   assert.match(detail, /\{activeTab === "assets" && \(/);
   assert.match(detail, /\{activeTab === "runs" && \(/);
   // The reports list is the only runs-tab query that lives in the page component itself.
@@ -166,7 +166,9 @@ test("REQ-IAM-016 the login page explains a 429 instead of calling it a wrong pa
 test("REQ-CONSOLE-016 empty states say why", () => {
   assert.match(allFindings, /You have no engagements yet\./);
   assert.match(allFindings, /No findings match these filters\./);
-  assert.match(allFindings, /No open findings in any of your engagements\./);
+  // REQ-IAM-022: the list covers every engagement; "Only my engagements" narrows it.
+  assert.match(allFindings, /No open findings in any engagement\./);
+  assert.match(allFindings, /No open findings in your engagements\./);
 });
 
 let failed = 0;

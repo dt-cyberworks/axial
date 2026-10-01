@@ -1,17 +1,24 @@
-# ASM-Scanner — Entwickler-Kommandos.
-# Details zu den Stufen (M1–M6): README.md und docs/testing.md.
+# Axial - developer and operator commands. Run `make help` for the list.
+# Details on the test tiers: README.md and docs/testing.md.
+#
+# REQ-INSTALL-006: every target in THIS file works from a clean public
+# checkout. Targets that need the private test harnesses (lab, UAT, reference
+# scan, screenshot generation) live in Makefile.private, which is not part of
+# the public export and is included below only when present.
 
-.PHONY: help up down logs test test-unit test-integration lab-up lab-down \
-        lab-verify lab-test frontend-build frontend-requirements requirements-check \
-        requirements-test traceability manual-check manual-screenshots verify fmt scan uat-venv seed-uat-account uat \
-        reference-scan
+.PHONY: help env up down logs bootstrap-admin scope-check install-smoke \
+        test test-unit test-integration frontend-build frontend-requirements \
+        requirements-check requirements-test traceability manual-check verify scan
 
 help:  ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-# --- Scanner-Stack (M1: lab / M2–M3: own_domain) ---
-up:  ## Start the scanner stack (control-plane, worker, egress-proxy, database)
+# --- Scanner stack ---
+env:  ## Create or complete .env for local evaluation (generates the encryption keys; never overwrites a set value)
+	python3 scripts/init_dev_env.py
+
+up: env  ## Start the scanner stack (control-plane, worker, egress-proxy, database)
 	docker compose up -d --build
 
 down:  ## Stop the stack and DELETE its volumes - all engagements and findings are lost
@@ -23,6 +30,19 @@ logs:  ## Follow the scanner stack's logs
 bootstrap-admin:  ## First admin account (REQ-IAM-008/011; needs INITIAL_ADMIN_EMAIL set)
 	@test -n "$$INITIAL_ADMIN_EMAIL" || { echo "set INITIAL_ADMIN_EMAIL, e.g. INITIAL_ADMIN_EMAIL=you@example.com make bootstrap-admin" >&2; exit 1; }
 	docker compose exec -e INITIAL_ADMIN_EMAIL="$$INITIAL_ADMIN_EMAIL" -e INITIAL_ADMIN_DISPLAY_NAME="$$INITIAL_ADMIN_DISPLAY_NAME" control-plane python scripts/bootstrap_admin.py
+
+# REQ-INSTALL-006: the pre-scan safety check that needs no lab. It runs the Scope
+# Gateway's deny-path tests (scope matching, argument safety, raw-egress policy,
+# rate window) inside the built control-plane image: no database, nothing started.
+scope-check:  ## Prove the Scope Gateway denies out-of-scope targets and unsafe arguments (runs in the image; no lab needed)
+	docker compose run --rm --no-deps -T -v "$(CURDIR)/control-plane/tests:/app/tests:ro" \
+	  -e PYTHONDONTWRITEBYTECODE=1 control-plane python -m pytest -p no:cacheprovider -q \
+	  tests/test_scope_matching.py tests/test_args_safety.py tests/test_raw_egress_policy.py tests/test_rate_window.py
+
+# REQ-INSTALL-001/008: follow INSTALL.md from a fresh checkout and fail on the first step that
+# does not work. STAGE=local|production|all (default all). Meant for a throwaway host or CI runner.
+install-smoke:  ## Follow the install guide end to end on a copy of the tree (STAGE=local|production|all); needs free ports; removes only its own containers
+	bash scripts/install_smoke.sh $(or $(STAGE),all)
 
 # --- Requirements as code / SDLC ---
 requirements-check:  ## Validate requirements, test cases, and the generated traceability matrix
@@ -38,9 +58,6 @@ traceability:  ## Regenerate the requirements-to-tests matrix
 manual-check:  ## Check docs/manual: links, anchors, UI labels, codes, images, no private data (standard library only)
 	python3 scripts/check_manual.py
 
-manual-screenshots:  ## Regenerate docs/manual/img from a throwaway stack with demo data (docker + `make uat-venv`; never touches your stack)
-	uat/.venv/bin/python scripts/manual_screenshots.py $(if $(ONLY),--only $(ONLY),)
-
 # --- Tests ---
 test: test-unit test-integration  ## All control-plane tests (unit + integration)
 
@@ -49,19 +66,6 @@ test-unit:  ## Unit tests (no database or other infrastructure)
 
 test-integration:  ## Integration tests against Postgres (needs TEST_DATABASE_URL)
 	cd control-plane && python -m pytest tests/integration -q
-
-# --- Lab-Testloop (ASM_Lab_Umgebung.docx) ---
-lab-up:  ## Start the deliberately vulnerable lab targets (isolated network)
-	docker compose -f lab/lab-compose.yml up -d
-
-lab-down:  ## Stop the lab targets
-	docker compose -f lab/lab-compose.yml down -v
-
-lab-verify:  ## Isolation checks - mandatory before every lab use
-	bash lab/verify-isolation.sh
-
-lab-test:  ## Full lab test loop (isolation, scope enforcement, oracle); tears the main stack down incl. volumes unless KEEP_UP=1
-	bash lab/run-lab-test.sh
 
 # --- Supply chain (REQ-SUPPLY-001/002) ---
 scan:  ## Supply-chain scan: image-pin guard + Trivy (deps/secrets + Dockerfile/compose misconfig)
@@ -78,17 +82,5 @@ frontend-requirements:  ## Executable requirement tests for the operator console
 
 verify: requirements-check manual-check requirements-test test frontend-requirements frontend-build  ## Full local SDLC verification (DB required)
 
-# --- User-acceptance testing (REQ-UAT-001..004) ---
-uat-venv:  ## One-time venv for the UAT harness (Playwright/pyotp/httpx; needs system Chrome/Chromium)
-	python3 -m venv uat/.venv
-	uat/.venv/bin/pip install -q -r uat/requirements.txt
-
-seed-uat-account:  ## Idempotent UAT service-account creation inside control-plane (needs UAT_ACCOUNT_EMAIL)
-	docker compose exec control-plane python scripts/seed_uat_account.py
-
-uat:  ## Run UAT against ENV=dev|int|prod (golden path; +scan journey for int/prod). See uat/environments.py.
-	uat/.venv/bin/python uat/run_uat.py --env $(ENV)
-
-reference-scan:  ## On-demand reference scan against pentest-ground.com:4280 (REQ-REFSCAN-001); default ENV=dev. Not part of `make uat`/CI.
-	uat/.venv/bin/python uat/reference_scan.py --env $(or $(ENV),dev)
-
+# Private-checkout-only targets (lab, UAT, reference scan, manual screenshots).
+-include Makefile.private

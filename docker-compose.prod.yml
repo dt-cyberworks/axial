@@ -23,8 +23,8 @@ services:
     environment:
       ENVIRONMENT: production
       # GitHub issue #17: these two vars gate real production safety (the
-      # runner execution-boundary secret, and whether the API/MinIO console
-      # bind to loopback) but only ever had *documented* defaults, never an
+      # runner execution-boundary secret, and whether the API binds to
+      # loopback) but only ever had *documented* defaults, never an
       # enforced one - a forgotten export left them silently at their
       # insecure/public default. Referencing them here with `:?` is enough to
       # fail `docker compose config` for the WHOLE merged file if either is
@@ -89,9 +89,15 @@ services:
       - -eviction
       - "${OOB_RETENTION_DAYS:-7}"
 
-  minio:
+  seaweedfs:
+    # REQ-INSTALL-002: the object store publishes no host port in any profile,
+    # so unlike its predecessor's console there is nothing to bind to loopback.
+    # What production must not run with is the public development credential:
+    # without these the store would accept the default S3 keys. (The
+    # control-plane's own gate rejects the defaults as well.)
     environment:
-      MINIO_CONSOLE_PUBLISH_HOST: ${MINIO_CONSOLE_PUBLISH_HOST:?set MINIO_CONSOLE_PUBLISH_HOST=127.0.0.1 or the console publishes on every interface}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY to a real value - the development default is public in this repo}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY to a real secret - the development default is public in this repo}
 
   caddy:
     build:

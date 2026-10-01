@@ -17,6 +17,7 @@ import pytest
 from fastapi import HTTPException
 from pypdf import PdfReader
 
+from tests.integration.owners import make_owner
 from app.api.findings import download_report, list_reports, request_report
 from app.api.internal import internal_request_report
 from app.models.asset import DiscoveredAsset, Service
@@ -36,6 +37,7 @@ PASSWORD = "Hunter2!SuperSecret"
 def _engagement(db, **overrides) -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title=overrides.pop("title", "Report Test Engagement"), source="own_domain", status="active",
         authorized_from=now - dt.timedelta(days=1), authorized_until=now + dt.timedelta(days=1),
         tcp_port_from=1, tcp_port_to=65535, ai_testing_allowed=True,

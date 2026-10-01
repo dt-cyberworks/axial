@@ -82,13 +82,14 @@ def test_noedge_overlay_has_no_caddy_service(rendered):
         assert "caddy" not in cfg.get("services", {})
 
 
-def test_control_plane_and_minio_bind_loopback_in_both_envs(rendered):
+def test_control_plane_binds_loopback_and_the_object_store_publishes_nothing_in_both_envs(rendered):
     for cfg in rendered:
         svcs = cfg["services"]
         cp_ports = [p for p in svcs["control-plane"].get("ports", []) if isinstance(p, dict)]
-        mi_ports = [p for p in svcs["minio"].get("ports", []) if isinstance(p, dict)]
+        store_ports = [p for p in svcs["seaweedfs"].get("ports", []) if isinstance(p, dict)]
         assert all(p.get("host_ip") == "127.0.0.1" for p in cp_ports), cp_ports
-        assert all(p.get("host_ip") == "127.0.0.1" for p in mi_ports), mi_ports
+        # REQ-INSTALL-002 (stricter than the former console rule): no port at all.
+        assert not store_ports, store_ports
 
 
 def test_prod_and_int_never_collide_on_published_ports(rendered):
@@ -121,7 +122,8 @@ def test_prod_and_int_use_disjoint_internal_network_names(rendered):
     prod_cfg, int_cfg = rendered
     prod_nets = _network_names(prod_cfg)
     int_nets = _network_names(int_cfg)
-    assert len(prod_nets) == 6 and len(int_nets) == 6, (prod_nets, int_nets)
+    # edge, ctrl, runner, control, oob, egress + objstore (REQ-INSTALL-002)
+    assert len(prod_nets) == 7 and len(int_nets) == 7, (prod_nets, int_nets)
     overlap = prod_nets & int_nets
     assert not overlap, f"prod and int share internal Docker network name(s): {overlap}"
 
@@ -139,7 +141,7 @@ def test_unnamed_environment_keeps_the_historical_literal_network_names():
         capture_output=True, text=True, timeout=120, check=True, cwd=ROOT, env=env,
     )
     cfg = json.loads(out.stdout)
-    assert _network_names(cfg) == {"asm_edge", "asm_ctrl", "asm_runner", "asm_control", "asm_egress"}
+    assert _network_names(cfg) == {"asm_edge", "asm_ctrl", "asm_runner", "asm_control", "asm_egress", "asm_objstore"}
 
 
 def test_scope_signing_secret_reaches_the_container_via_a_named_env_file(tmp_path_factory):

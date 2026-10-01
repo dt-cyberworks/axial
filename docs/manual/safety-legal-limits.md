@@ -67,7 +67,7 @@ An honest list, so that a clean report is read for what it is.
 - **Cloud accounts are matched by exact identifier**, not inventoried or scanned through the provider's API.
 - **Authenticated testing is limited.** The agent can log in where credentials are supplied or self-registration is open. It is not a substitute for a tester with real accounts and roles. If it cannot log in, it is told to report what is behind the login as untested.
 - **The agent is only as good as its model.** Its findings are marked *validated* or *inferred*; inferred ones are leads, not proof.
-- **One installation, individual accounts.** There is no multi-tenant separation inside one installation: operators see only their own engagements, admins see all. Sign-in uses a password and an authenticator code; there is no single sign-on, no hardware keys and no self-service password reset, and the system sends no email.
+- **One installation, individual accounts.** There is no multi-tenant separation inside one installation: every signed-in user can read every engagement (scope, findings, evidence, audit log), and only an engagement's owner or an admin can change it. If two organisations must not see each other's work, run two installations. Sign-in uses a password and an authenticator code; there is no single sign-on, no hardware keys and no self-service password reset, and the system sends no email.
 - **No scheduled scans or alerts.** Scans start when a person starts them.
 - **No guarantee of completeness for compliance.** A report supports an assessment; it does not certify that a system is secure or compliant.
 

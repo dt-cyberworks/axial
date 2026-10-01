@@ -108,6 +108,7 @@ class PortfolioFindingOut(FindingOut):
     """REQ-PORTFOLIO-001: a finding in the cross-engagement list."""
 
     engagement_title: str
+    engagement_owner: str = ""
 
 
 class FindingPage(BaseModel):

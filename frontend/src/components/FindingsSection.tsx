@@ -17,7 +17,7 @@ export { severityClass };
  * expanded finding are part of the URL (`?status=`, `?finding=`), so a link
  * from the all-findings page opens exactly that finding.
  */
-export default function FindingsSection({ engagementId }: { engagementId: string }) {
+export default function FindingsSection({ engagementId, canManage }: { engagementId: string; canManage: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = parseFindingStatus(searchParams.get("status"));
   const expandedFindingId = searchParams.get("finding");
@@ -106,7 +106,7 @@ export default function FindingsSection({ engagementId }: { engagementId: string
                     </tr>
                     {expanded && (
                       <tr className="finding-detail-row"><td colSpan={8}>
-                        <FindingDetail finding={finding} onTriaged={() => updateParams({ finding: null })} />
+                        <FindingDetail finding={finding} canManage={canManage} onTriaged={() => updateParams({ finding: null })} />
                       </td></tr>
                     )}
                   </Fragment>

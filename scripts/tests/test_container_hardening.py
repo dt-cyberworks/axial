@@ -27,6 +27,10 @@ HARDENED = {
     "control-plane": set(),
     "worker": set(),
     "egress-proxy": set(),
+    # REQ-INSTALL-002: the object store's entrypoint starts as root, fixes /data's
+    # ownership and drops to its own uid-1000 user with su-exec - exactly these three
+    # capabilities, verified against the real image (the server process holds none).
+    "seaweedfs": {"CHOWN", "SETUID", "SETGID"},
 }
 # The edge proxy binds 80/443 on the host network: NET_BIND_SERVICE is the one
 # capability it provably needs. It still runs as root (REQ-HARDEN-004, backlog).
@@ -40,9 +44,7 @@ EXCEPTIONS = {
     "raw-egress-gateway": "owns the nftables rules; hardened by REQ-HARDEN-002",
     "postgres": "third-party image, initialises its data directory as root",
     "redis": "third-party image",
-    "minio": "third-party image",
     "migrate": "one-shot job, not a long-running service",
-    "minio-init": "one-shot job, not a long-running service",
 }
 
 

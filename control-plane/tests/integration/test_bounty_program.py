@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from tests.integration.owners import make_owner
 from app.api.engagements import add_bounty_program, get_bounty_program
 from app.api.internal import get_bounty_ident
 from app.models.engagement import BountyProgram, Engagement
@@ -21,6 +22,7 @@ from app.schemas.engagement import BountyProgramCreate
 def _engagement(db, *, source="own_domain") -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Bounty test", source=source, status="draft",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1),
     )

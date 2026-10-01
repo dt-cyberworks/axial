@@ -1,5 +1,6 @@
 import datetime as dt
 
+from tests.integration.owners import make_owner
 from app.api import findings as findings_api
 from app.models.asset import DiscoveredAsset, Service
 from app.models.audit import AuditLog
@@ -10,6 +11,7 @@ from app.models.finding import Finding
 def _seed_finding(db):
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Lens test",
         source="own_domain",
         status="active",

@@ -146,7 +146,7 @@ def test_negative_another_operator_cannot_triage(client, db):
     finding = _observe(db, eng)
     resp = client.patch(f"/engagements/{eng.id}/findings/{finding.id}",
                         json={"status": "false_positive", "note": "hide it"}, headers=_auth(db, _user(db)))
-    assert resp.status_code == 404
+    assert resp.status_code == 403  # REQ-IAM-023: readable by everyone, changeable by the owner only
     assert _findings(db, eng)[0].status == "open"
 
 

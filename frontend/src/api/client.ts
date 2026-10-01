@@ -30,7 +30,14 @@ export interface Engagement {
   authorized_until: string;
   emergency_contact: string | null;
   created_at: string;
-  owner_user_id: string | null;
+  // REQ-IAM-021/022/025: every engagement has an owner, everyone may read it, and
+  // `can_manage` says whether the caller may change it (its owner, or an admin).
+  // The server refuses a change either way; the flag only lets the console hide
+  // controls that would be refused.
+  owner_user_id: string;
+  owner_name: string | null;
+  owner_email: string | null;
+  can_manage: boolean;
 }
 
 export interface EngagementUpdate {
@@ -171,6 +178,7 @@ export interface Finding {
 // shows what it gets.
 export interface PortfolioFinding extends Finding {
   engagement_title: string;
+  engagement_owner: string;
 }
 
 export interface FindingPage {
@@ -186,6 +194,8 @@ export interface FindingPageQuery {
   status?: FindingStatus;
   severity?: string;
   engagement_id?: string;
+  // REQ-IAM-022: the list covers every engagement; `mine` narrows it to the caller's own.
+  mine?: boolean;
   q?: string;
   limit?: number;
   offset?: number;

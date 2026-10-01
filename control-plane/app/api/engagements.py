@@ -34,7 +34,7 @@ from app.models.scan_run import AgentStep, ScanRun
 from app.models.surface_graph import SurfaceEdge, SurfaceNode
 from app.models.user import User
 from app.scan_lifecycle import ScanRunAlreadyActive, reap_stale_runs, start_scan_run
-from app.security import require_admin, require_operator, require_user
+from app.security import can_manage_engagement, require_admin, require_operator, require_user
 from app.schemas.asset_review import AssetReviewDecisionIn, AssetReviewOut
 from app.schemas.engagement import (
     BountyProgramCreate,
@@ -59,13 +59,27 @@ from app.schemas.internal import ScanRunOut
 router = APIRouter(prefix="/engagements", tags=["engagements"])
 
 
+def _annotate(eng: Engagement, user: User, owner: User | None, db: Session | None = None) -> Engagement:
+    """REQ-IAM-022/025: who owns the engagement and whether the caller may change
+    it, set as plain (non-column) attributes so EngagementOut can read them. The
+    flag is a convenience for the console; the router still refuses a change."""
+    if owner is None and db is not None:
+        owner = db.get(User, eng.owner_user_id)
+    eng.owner_name = owner.display_name if owner else None
+    eng.owner_email = owner.email if owner else None
+    eng.can_manage = can_manage_engagement(user, eng)
+    return eng
+
+
 @router.get("", response_model=list[EngagementOut])
 def list_engagements(user: User = Depends(require_user), db: Session = Depends(get_db)):
-    # REQ-IAM-007: operators see only their own; admins see everything.
-    stmt = select(Engagement).order_by(Engagement.created_at.desc())
-    if user.role != "admin":
-        stmt = stmt.where(Engagement.owner_user_id == user.id)
-    return db.scalars(stmt).all()
+    # REQ-IAM-022: every signed-in user sees every engagement, with its owner.
+    rows = db.execute(
+        select(Engagement, User)
+        .join(User, User.id == Engagement.owner_user_id)
+        .order_by(Engagement.created_at.desc())
+    ).all()
+    return [_annotate(eng, user, owner) for eng, owner in rows]
 
 
 @router.post("", response_model=EngagementOut, status_code=201)
@@ -81,6 +95,7 @@ def create_engagement(body: EngagementCreate, user: User = Depends(require_user)
     db.add(eng)
     db.commit()
     db.refresh(eng)
+    _annotate(eng, user, user)
     append_audit_log(
         db, engagement_id=eng.id, actor=f"user:{user.email}", action="engagement_created",
         decision=None, reason=None, payload={
@@ -107,7 +122,7 @@ def reassign_owner(
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     """REQ-IAM-007: admin-only reassignment. Ownership itself is already
-    enforced router-wide (enforce_engagement_ownership); this additionally
+    enforced router-wide (enforce_engagement_access); this additionally
     requires the admin role specifically, since a non-admin owner must never
     be able to reassign their own engagement away or to themselves."""
     eng = _get_engagement_or_404(db, engagement_id)
@@ -117,6 +132,7 @@ def reassign_owner(
     eng.owner_user_id = new_owner.id
     db.commit()
     db.refresh(eng)
+    _annotate(eng, user, new_owner)
     append_audit_log(
         db, engagement_id=eng.id, actor=f"user:{user.email}", action="engagement_owner_reassigned",
         decision=None, reason=None, payload={"new_owner_user_id": str(new_owner.id)},
@@ -161,22 +177,34 @@ def _check_no_active_scope_overlap(db: Session, eng: Engagement, candidate_asset
     """REQ-CONCUR-003: refuse to activate (or extend an already-active
     engagement's allow-scope) into overlap with another currently active
     engagement - any owner. Discovered this way, at the source, instead of as
-    a confusing `ambiguous_host` scan failure well into a run. Deliberately
-    does not name the other engagement or its owner in the error, to avoid
-    leaking one user's engagement details to another."""
+    a confusing `ambiguous_host` scan failure well into a run. REQ-IAM-024:
+    every signed-in user can see every engagement now, so the error names the
+    engagement(s) in the way (title and owner, at most three) - the operator
+    needs to know whom to ask."""
     own_allow = [a for a in candidate_assets if a.rule == "allow"]
     if not own_allow:
         return
-    others = db.scalars(
-        select(ScopeAsset)
+    others = db.execute(
+        select(ScopeAsset, Engagement, User)
         .join(Engagement, Engagement.id == ScopeAsset.engagement_id)
+        .join(User, User.id == Engagement.owner_user_id)
         .where(Engagement.status == "active", Engagement.id != eng.id, ScopeAsset.rule == "allow")
+        .order_by(Engagement.created_at, Engagement.id)
     ).all()
-    if any(_host_rules_overlap(mine, other) for mine in own_allow for other in others):
+    conflicts: dict[uuid.UUID, tuple[Engagement, User]] = {}
+    for mine in own_allow:
+        for other, other_eng, owner in others:
+            if _host_rules_overlap(mine, other):
+                conflicts.setdefault(other_eng.id, (other_eng, owner))
+    if conflicts:
+        shown = list(conflicts.values())[:3]
+        named = ", ".join(f'"{e.title}" (owner {o.display_name}, {o.email})' for e, o in shown)
+        if len(conflicts) > len(shown):
+            named += f" and {len(conflicts) - len(shown)} more"
         raise HTTPException(
             409,
-            "allow-scope overlaps another currently active engagement's allow-scope; "
-            "resolve the conflict before activating",
+            f"allow-scope overlaps another currently active engagement's allow-scope: {named}; "
+            "resolve the conflict with its owner before activating",
         )
 
 
@@ -301,17 +329,16 @@ def _authorization_pdf(eng: Engagement, assets: list[ScopeAsset], grants: list[T
 
 
 @router.get("/{engagement_id}", response_model=EngagementOut)
-def get_engagement(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
-    return _get_engagement_or_404(db, engagement_id)
+def get_engagement(engagement_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    return _annotate(_get_engagement_or_404(db, engagement_id), user, None, db)
 
 
 @router.get("/{engagement_id}/surface-graph")
 def get_surface_graph(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     """Read-only attack-surface graph for the operator console (REQ-GRAPH-004/005).
 
-    Ownership/auth is enforced once at the router level (enforce_engagement_ownership),
-    so a caller who does not own this engagement gets the same 404 as elsewhere -
-    no cross-engagement disclosure."""
+    Auth is enforced once at the router level (enforce_engagement_access); every
+    signed-in user may read an engagement (REQ-IAM-022)."""
     _get_engagement_or_404(db, engagement_id)
     return read_graph(engagement_id, db)
 
@@ -329,7 +356,7 @@ def update_engagement(
         if name in changes and changes[name] is None:
             del changes[name]
     if not changes:
-        return eng
+        return _annotate(eng, user, None, db)
     switches_before = _discovery_switches(eng)
 
     new_from = changes.get("authorized_from", eng.authorized_from)
@@ -361,7 +388,7 @@ def update_engagement(
     )
     db.commit()
     db.refresh(eng)
-    return eng
+    return _annotate(eng, user, None, db)
 
 
 @router.get("/{engagement_id}/config")
@@ -981,7 +1008,7 @@ def activate_engagement(
         db, engagement_id=eng.id, actor=f"user:{user.email}", action="engagement_activated",
         decision="ALLOW", reason="activation_checklist_passed", payload={"at": now.isoformat()},
     )
-    return eng
+    return _annotate(eng, user, None, db)
 
 
 @router.get("/{engagement_id}/scan-readiness")

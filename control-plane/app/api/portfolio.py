@@ -1,11 +1,11 @@
 """REQ-PORTFOLIO-001: findings across every engagement the caller can see.
 
 Every other findings route carries an engagement_id in its path, where the
-router-wide enforce_engagement_ownership check applies. This one does not, so
-that check never runs here. The ownership rule (REQ-IAM-007: operators see
-their own engagements, admins all) is therefore part of every query below -
-never a filter over results - so totals and counts cannot leak other users'
-data either.
+router-wide enforce_engagement_access check applies. This one does not. Since
+REQ-IAM-022 (GitHub issue #47) every signed-in user reads every engagement, so
+the list covers all of them; `mine=true` narrows it to the caller's own. The
+filter is part of every query below - never applied over results - so totals
+and counts always agree with the page.
 """
 
 import uuid
@@ -36,6 +36,7 @@ def list_all_findings(
     status: str = Query(default="open"),
     severity: str | None = Query(default=None),
     engagement_id: uuid.UUID | None = Query(default=None),
+    mine: bool = Query(default=False),
     q: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -49,7 +50,7 @@ def list_all_findings(
 
     # Filters shared by the page, the total, and both count groups.
     scope = []
-    if user.role != "admin":
+    if mine:
         scope.append(Engagement.owner_user_id == user.id)
     if engagement_id is not None:
         scope.append(Finding.engagement_id == engagement_id)
@@ -90,9 +91,13 @@ def list_all_findings(
     })
 
     ids = [finding.id for finding in rows]
-    titles = dict(db.execute(
-        select(Engagement.id, Engagement.title).where(Engagement.id.in_({f.engagement_id for f in rows}))
-    ).all()) if rows else {}
+    engagement_info = {
+        eng_id: (title, owner_name) for eng_id, title, owner_name in db.execute(
+            select(Engagement.id, Engagement.title, User.display_name)
+            .join(User, User.id == Engagement.owner_user_id)
+            .where(Engagement.id.in_({f.engagement_id for f in rows}))
+        ).all()
+    } if rows else {}
     last_seen = dict(db.execute(
         select(FindingObservation.finding_id, func.max(FindingObservation.observed_at))
         .where(FindingObservation.finding_id.in_(ids))
@@ -102,7 +107,8 @@ def list_all_findings(
     items = [
         PortfolioFindingOut(
             **_finding_out(db, finding, last_seen.get(finding.id)).model_dump(),
-            engagement_title=titles.get(finding.engagement_id, ""),
+            engagement_title=engagement_info.get(finding.engagement_id, ("", ""))[0],
+            engagement_owner=engagement_info.get(finding.engagement_id, ("", ""))[1],
         )
         for finding in rows
     ]

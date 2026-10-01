@@ -43,7 +43,11 @@ def test_the_private_instructions_name_the_manual_when_present():
 def test_make_has_the_manual_targets_and_verify_runs_the_check():
     makefile = read("Makefile")
     assert re.search(r"^manual-check:", makefile, re.M)
-    assert re.search(r"^manual-screenshots:", makefile, re.M)
+    # REQ-INSTALL-006: regenerating the screenshots needs the private UAT harness, so that target
+    # lives in Makefile.private, which the public export omits (it could not work there).
+    private = ROOT / "Makefile.private"
+    if private.is_file():
+        assert re.search(r"^manual-screenshots:", private.read_text(encoding="utf-8"), re.M)
     verify = re.search(r"^verify:(.*)$", makefile, re.M)
     assert verify and "manual-check" in verify.group(1).split("##")[0].split()
 

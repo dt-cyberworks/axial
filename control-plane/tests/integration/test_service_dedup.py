@@ -14,6 +14,7 @@ import datetime as dt
 import pytest
 from fastapi import HTTPException
 
+from tests.integration.owners import make_owner
 from app.api.internal import add_service
 from app.models.asset import DiscoveredAsset, Service
 from app.models.engagement import Engagement
@@ -24,6 +25,7 @@ from app.schemas.internal import ServiceIn
 def asset(db):
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Service dedup", source="own_domain", status="active",
         authorized_from=now - dt.timedelta(days=1), authorized_until=now + dt.timedelta(days=1),
     )

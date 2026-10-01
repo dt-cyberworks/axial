@@ -259,13 +259,14 @@ def test_req_pipe_010_the_owner_reads_the_plan_of_a_run(api, db, test_user):
     assert {"reason", "state", "duration_s", "findings"} <= set(surface["checks"][0])
 
 
-def test_negative_req_pipe_010_another_user_or_engagement_gets_404(api, db, test_user):
+def test_negative_req_pipe_010_a_mismatched_run_or_unknown_run_is_404_and_any_user_may_read_the_plan(api, db, test_user):
     eng = _engagement(db, test_user)
     other_eng = _engagement(db, test_user)
     run = _run(db, eng)
     _post(api, run, _plan_body())
     stranger = _user(db, "stranger@example.com")
-    assert api.get(f"/engagements/{eng.id}/scan-runs/{run.id}/plan", headers=_bearer(db, stranger)).status_code == 404
+    # REQ-IAM-022: every signed-in user reads every engagement's plan.
+    assert api.get(f"/engagements/{eng.id}/scan-runs/{run.id}/plan", headers=_bearer(db, stranger)).status_code == 200
     assert api.get(f"/engagements/{other_eng.id}/scan-runs/{run.id}/plan", headers=_bearer(db, test_user)).status_code == 404
     assert api.get(f"/engagements/{eng.id}/scan-runs/{uuid.uuid4()}/plan", headers=_bearer(db, test_user)).status_code == 404
     assert api.get(f"/engagements/{eng.id}/scan-runs/{run.id}/plan").status_code == 401

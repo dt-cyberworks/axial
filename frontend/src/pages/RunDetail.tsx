@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router-dom";
 import { api, isNotFound, type AgentStep, type AssetReview } from "../api/client";
 import NotFound from "./NotFound";
 import { severityClass } from "../components/FindingsSection";
+import ReadOnlyNotice from "../components/ReadOnlyNotice";
 import RunActivity from "../components/RunActivity";
 import ScanPlanView from "../components/ScanPlanView";
 import { activityKey, reasonExplanation, type RunLogEntry } from "../lib/runActivity";
@@ -104,12 +105,14 @@ export default function RunDetail() {
 
   // REQ-CONSOLE-008: an unknown run (or an engagement that is not the caller's) gets a real not-found page.
   if ((engagementQuery.isError && isNotFound(engagementQuery.error)) || (scanRunsQuery.isSuccess && !run)) {
-    return <NotFound title="Scan run not found" message="This run does not exist in this engagement, or the engagement belongs to another user." />;
+    return <NotFound title="Scan run not found" message="This run does not exist in this engagement." />;
   }
+  // REQ-IAM-025: everyone reads a run; only the engagement's owner or an admin stops it or decides its asset review.
+  const canManage = engagement?.can_manage ?? false;
 
   return (
     <section className="page-stack">
-      {pendingReview && (
+      {pendingReview && canManage && (
         <AssetReviewModal
           review={pendingReview}
           busy={decideAssetReview.isPending}
@@ -149,7 +152,7 @@ export default function RunDetail() {
           <span className={`pill ${runStatePill(run?.state ?? "")}`}>
             {run?.cancel_requested && isRunning ? "stopping…" : run?.state ?? "?"}
           </span>
-          {isRunning && (
+          {isRunning && canManage && (
             <button className="danger-button" disabled={run?.cancel_requested || cancelRun.isPending}
               onClick={() => cancelRun.mutate()}>
               {run?.cancel_requested ? "Stop requested" : cancelRun.isPending ? "Stopping…" : "Stop scan"}
@@ -157,6 +160,11 @@ export default function RunDetail() {
           )}
         </div>
       </header>
+
+      {engagement && !canManage && <ReadOnlyNotice engagement={engagement} />}
+      {pendingReview && !canManage && (
+        <div className="warning-block">This run is paused until the owner reviews the discovered assets.</div>
+      )}
 
       {isRunning && run?.current_tool && (
         <div className="current-activity-banner">

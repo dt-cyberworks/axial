@@ -138,8 +138,19 @@ For the **operator override** on some of these, see [Audit](reference/audit.md#d
 | confirm your authorization for every target that allows active testing | tick **authorization attested** on each active allow row |
 | the test window is missing or ends before it starts | correct the dates |
 | a bug-bounty engagement needs its program details | fill in the program policy |
-| the allow-scope overlaps another currently active engagement's allow-scope | another active engagement already covers some of these hosts; the two cannot both be responsible. Change one scope, or finish the other engagement. You can only see your own engagements, so ask the other operator or an admin |
+| the allow-scope overlaps another currently active engagement's allow-scope: "Title" (owner Name, email) | the message names the active engagement that already covers some of these hosts (up to three; "and N more" if there are more), and its owner. The two cannot both be responsible. Change one scope, or ask the owner to finish theirs |
 | a customer engagement needs the signed scope document | record who signed it and the document's SHA-256 |
+
+## Why a change was refused
+
+You can read every engagement, but only its owner and administrators can change it (see [Roles and ownership](concepts.md#roles-and-ownership)). A change from anyone else is refused, and nothing is written.
+
+| Message | Meaning and what to do |
+|---|---|
+| only the owner of this engagement or an administrator can change it | the engagement belongs to someone else. Ask its owner (the notice at the top of the page names them), or an administrator, to make the change or to hand the engagement to you |
+| admin role required | the action (for example reassigning an owner, or anything under **Admin**) is for administrators only |
+
+The console hides the buttons that would be refused, so you meet this message only through a stale page or a direct request.
 
 ## Sign-in problems
 

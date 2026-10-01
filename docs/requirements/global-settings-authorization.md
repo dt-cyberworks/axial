@@ -39,12 +39,17 @@ Acceptance criteria:
 
 ## REQ-IAM-014: Approval decisions check ownership before anything else
 
+> **Amended by REQ-IAM-023 (johannes, 2026-10-01, GitHub issue #47, `docs/requirements/engagement-visibility.md`).**
+> Every engagement is readable by everyone now, so a non-owner's refusal is `403`
+> (the check still comes first, before any state is revealed or written); `404`
+> remains for an approval that does not exist.
+
 Acceptance criteria:
 
 - [Negative test] Approving or rejecting another user's approval answers
-  `404 approval not found` whatever that approval's state, exactly as for
-  an approval that does not exist — no `409` revealing it was already
-  decided or has expired.
+  `403` whatever that approval's state — no `409` revealing it was already
+  decided or has expired. An approval that does not exist answers
+  `404 approval not found`.
 - [Negative test] A non-owner's request never writes to the approval, not
   even to mark an expired one `expired`.
 - The owner (or an admin) still gets `409` for an approval that is no

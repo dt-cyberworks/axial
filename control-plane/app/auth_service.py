@@ -408,3 +408,12 @@ def change_password(db: Session, user: User, current_password: str, new_password
     append_account_audit_log(db, actor_user_id=user.id, action="password_change", outcome="success",
                              ip_address=ip, user_agent=user_agent, payload={"sessions_revoked": revoked})
     return raw_token
+
+
+def oldest_active_admin(db: Session) -> User | None:
+    """The account that takes ownership of engagements nobody created through the
+    console (REQ-IAM-021): the benchmark harness's, and the legacy ones the
+    migration adopted."""
+    return db.scalars(
+        select(User).where(User.role == "admin", User.status == "active").order_by(User.created_at, User.id).limit(1)
+    ).first()

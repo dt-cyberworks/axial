@@ -37,7 +37,7 @@ Five wrong passwords in a row lock the account for a short time that grows with 
 - **Active sessions:** every device and browser signed in as you, with when it started, when it was last active and which device it is; yours is marked **this device**. **Revoke** signs one out.
 - **Log out** is also in the navigation, one click from anywhere.
 
-Each engagement belongs to the operator who created it. An operator sees and manages only their own engagements; an admin sees and manages all of them and can reassign ownership.
+Each engagement has one owner, the person who created it. Everyone who is signed in can read every engagement; only its owner or an admin can change it, and only an admin can reassign ownership. See [Roles and ownership](../concepts.md#roles-and-ownership).
 
 ## Admin: Users (`/admin`, tab **Users**)
 

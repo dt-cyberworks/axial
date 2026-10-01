@@ -12,7 +12,7 @@ Everything about **one** run. A breadcrumb shows *Engagements / {engagement} / R
 - A **state** pill: `running`, `waiting_approval`, `done`, `failed` or `aborted`. *stopping…* appears while a stop is being applied.
 - **reduced coverage**: a tool the scan depends on was attempted but never once succeeded, so the result is *not* a clean bill of health. Hover for the detail.
 - **partial coverage**: at least one check stopped at its time budget before it finished. What it reported is real, but a short list does not mean the surface is clean.
-- **Stop scan**, while the run is active. It becomes **Stop requested** once pressed.
+- **Stop scan**, while the run is active, for the engagement's owner and administrators. It becomes **Stop requested** once pressed. Everyone else can read the whole run but not stop it, and a notice says whose engagement it is.
 
 While a tool is running, a banner says which tool on which target and for how long.
 
@@ -70,6 +70,8 @@ A scan runs on its own, but a state-changing request (POST, PUT, DELETE, PATCH, 
 The popup appears wherever you are in the console, not only on this screen, and names the engagement it belongs to, so you cannot miss it. **Approve & open run** takes you straight to the run so you can watch the request execute and see its result fed back to the agent. **Reject** skips it. There is one popup per request; others queue. If nobody decides within the approval timeout, the request is rejected automatically. See [Approve or deny a tool call](../guides/approve-or-deny-a-tool-call.md).
 
 ## Asset review
+
+The decision belongs to the engagement's owner and administrators. Anyone else who opens the run sees that it is paused until the owner reviews the discovered assets.
 
 Only appears when **Pause after discovery for manual asset review** is switched on for the engagement. Right after discovery the run pauses and a popup titled **Review discovered assets** lists every host the current scope allows for active testing, all pre-selected. Names and addresses that are out of scope, denied or passive-only are already left out. Deselect any host that should not be scanned, for example stale DNS pointing outside your control, then choose **Continue with selected**.
 

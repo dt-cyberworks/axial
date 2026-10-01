@@ -1,0 +1,51 @@
+name: Install smoke
+
+# REQ-INSTALL-008: every release is install-tested before it can be merged.
+#
+# A published release once failed to install on a clean machine (an upstream image
+# had been withdrawn, a required key was empty, the production settings block was
+# incomplete) while every unit test and CI job was green - the developer machine had
+# the images cached and the keys already set. This job follows INSTALL.md on a fresh
+# GitHub-hosted runner: nothing cached, nothing pre-installed from this project, so
+# an upstream image that disappears fails the RELEASE, not the first user.
+#
+# It runs for release pull requests (branches named release/*), for v* tags, and on
+# demand. Ordinary pull requests are covered by CI and are not slowed down by it.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-smoke:
+    name: install guide, end to end (clean runner)
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: The runner as the install sees it
+        run: |
+          docker --version
+          docker compose version
+          python3 --version
+          node --version
+          df -h / | tail -1
+          docker images --format '{{.Repository}}:{{.Tag}}' | wc -l | sed 's/^/pre-cached images on this runner: /'
+      - name: Local evaluation (INSTALL.md section 3)
+        run: bash scripts/install_smoke.sh local
+      - name: Single-host production (INSTALL.md section 4)
+        run: bash scripts/install_smoke.sh production

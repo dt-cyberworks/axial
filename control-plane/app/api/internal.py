@@ -21,7 +21,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app import config_resolver, report_service
+from app import auth_service, config_resolver, report_service
 from app.db.base import get_db
 from app.gateway.audit import append_audit_log, append_audit_logs
 from app.gateway.authorize import ToolCall, _matching_rules, authorize
@@ -108,10 +108,16 @@ def internal_create_benchmark_engagement(body: BenchmarkEngagementCreate, db: Se
     and unreachable via the operator-facing POST /engagements (which
     explicitly 403s on source='benchmark', see api/engagements.py). Creates,
     scopes, grants tools, and activates in one call so there is no
-    partially-seeded intermediate state for a caller to leave behind."""
+    partially-seeded intermediate state for a caller to leave behind.
+
+    REQ-IAM-021: every engagement has an owner. The harness has no user, so the
+    oldest active administrator owns what it creates (409 when none exists)."""
+    owner = auth_service.oldest_active_admin(db)
+    if owner is None:
+        raise HTTPException(409, "no active administrator exists to own the benchmark engagement")
     now = datetime.datetime.now(datetime.timezone.utc)
     eng = Engagement(
-        title=body.title, source="benchmark", status="active",
+        title=body.title, source="benchmark", status="active", owner_user_id=owner.id,
         authorized_from=now - datetime.timedelta(minutes=5),
         authorized_until=now + datetime.timedelta(days=1),
         tcp_port_from=body.tcp_port_from, tcp_port_to=body.tcp_port_to,

@@ -28,11 +28,16 @@ implementation; update implementation when it violates this document.
 
 ## REQ-PORTFOLIO-001: List findings across the caller's engagements
 
+> **Amended by REQ-IAM-022 (johannes, 2026-10-01, GitHub issue #47, `docs/requirements/engagement-visibility.md`).**
+> The list covers every engagement (everyone reads everything); the new `mine=true`
+> parameter narrows it to the caller's own, and each finding carries its engagement's
+> owner. Reading never changes anything, so triage still goes through the
+> engagement's own endpoint, which only the owner or an admin may call.
+
 Acceptance criteria:
 
-- `GET /findings` returns findings from engagements the caller can see:
-  operators only their own engagements, admins all engagements — the same
-  rule as the engagement list (REQ-IAM-007).
+- `GET /findings` returns findings from every engagement, the same rule as
+  the engagement list (REQ-IAM-022); `mine=true` keeps only the caller's own.
 - Query parameters: `status` (default `open`), `severity`, `engagement_id`,
   `q` (text search), `limit` (1–200, default 50), `offset` (default 0).
   Unknown `status` or `severity` values are rejected with `422`.
@@ -67,11 +72,11 @@ Acceptance criteria:
 
 Security invariants:
 
-- The ownership filter is part of the database query, not applied to
-  results afterwards, so `total` and the counts cannot leak other users'
-  data either.
+- The `mine` filter is part of the database query, not applied to
+  results afterwards, so `total` and the counts always agree with the page.
 - Triage stays on the engagement-scoped endpoint, where the router-wide
-  ownership check applies; this endpoint changes nothing.
+  access rule applies (a change is the owner's or an admin's, REQ-IAM-023);
+  this endpoint changes nothing.
 
 Verification log:
 

@@ -1,7 +1,7 @@
 """Crawled endpoints and web screenshots of one engagement (REQ-COVER-003/006).
 
-Mounted under /engagements in the public router, so ownership of the
-engagement in the path is enforced router-wide (enforce_engagement_ownership).
+Mounted under /engagements in the public router, so access to the
+engagement in the path is checked router-wide (enforce_engagement_access).
 """
 
 import uuid

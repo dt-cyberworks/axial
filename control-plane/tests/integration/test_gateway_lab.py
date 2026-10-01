@@ -14,6 +14,7 @@ import datetime as dt
 
 import pytest
 
+from tests.integration.owners import make_owner
 from app.gateway.authorize import ToolCall, authorize
 
 
@@ -62,6 +63,7 @@ def test_domain_allow_authorizes_discovered_subdomain(db):
 
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="domain-scope", source="own_domain", status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(hours=1),
     )
@@ -86,6 +88,7 @@ def test_child_domain_deny_overrides_parent_domain_allow(db):
 
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="domain-deny", source="own_domain", status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(hours=1),
     )
@@ -133,6 +136,7 @@ def test_passive_without_grant_blocked(db):
 
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="passive-no-grant", source="own_domain", status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(hours=1),
     )

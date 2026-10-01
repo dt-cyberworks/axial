@@ -34,7 +34,7 @@ Choose **Activate engagement**. Activation refuses, and says which condition is 
 - there is no allow row at all, or an active allow row is not attested;
 - the test window is missing, or ends before it starts;
 - a bug-bounty engagement has no program policy yet;
-- the scope overlaps another **active** engagement's scope (any owner), so two engagements cannot be responsible for the same host;
+- the scope overlaps another **active** engagement's scope (any owner), so two engagements cannot be responsible for the same host; the refusal names that engagement and its owner, so you know whom to ask;
 - for an engagement of the customer type, the signed scope document has not been recorded.
 
 If everything passes, the engagement becomes `active` and opens on its page. Activation does not start a scan; you do that with **Start run**, see [Start and watch a scan](run-a-scan.md). A scan also needs an active tool grant, and it can only run inside the test window.

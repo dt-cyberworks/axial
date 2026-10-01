@@ -27,7 +27,7 @@ flowchart TB
         WK["worker<br/>Celery — orchestrates,<br/>executes nothing itself"]
         DB[("postgres<br/>data + audit log")]
         RD[("redis")]
-        S3[("minio<br/>evidence, reports")]
+        S3[("seaweedfs<br/>evidence, reports")]
     end
 
     subgraph exec["Execution plane — isolated, ephemeral, disposable"]
@@ -114,7 +114,7 @@ tracked in [roadmap.md](roadmap.md).
 | Primary DB | PostgreSQL 16 | relational + JSONB for flexible findings |
 | Tool execution | MCP server + HexStrike | controlled tool registry per engagement |
 | LLM (reasoning) | Claude (tool use) | reliable structured tool use |
-| Object storage | S3-compatible (MinIO) | raw output, report PDFs, evidence |
+| Object storage | S3-compatible (SeaweedFS) | raw output, report PDFs, evidence |
 | Secrets | Vault / SOPS | scope signing key, API keys |
 | Frontend | React + TypeScript | component-based, type-safe |
 
