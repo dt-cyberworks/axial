@@ -14,10 +14,11 @@ app = FastAPI(
     openapi_url=None if settings.environment.lower() == "production" else "/openapi.json",
 )
 
-# Dev-Default: Operator-Konsole (Vite) laeuft auf 5173. In Produktion enger fassen.
+# Dev-Default: Operator-Konsole (Vite) laeuft auf 5173 (CORS_ALLOWED_ORIGINS ueberschreibt es).
+# In Produktion kommen Konsole und API von einer Origin; dort ist keine weitere noetig.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=settings.cors_origin_list(),
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,

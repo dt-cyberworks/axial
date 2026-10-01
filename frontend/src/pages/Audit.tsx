@@ -63,6 +63,14 @@ function summarize(entry: AuditRow): string {
       return `approval ${entry.reason || ""}`.trim();
     case "gateway_override":
       return `operator override${entry.reason ? ` (${entry.reason.replace("manual_override:", "")})` : ""}`;
+    // GitHub issue #48 (REQ-TOOL-008): who changed which tool grant.
+    case "tool_grant_added":
+    case "tool_grant_removed": {
+      const verb = entry.action === "tool_grant_added" ? "granted" : "removed the grant for";
+      const who = entry.actor.replace(/^user:/, "");
+      const widened = p["confirmed_widening"] === true ? " (confirmed: widens the engagement's authority)" : "";
+      return `${who} ${verb} ${str(p, "mode")} ${str(p, "tool_category")} tools${widened}`;
+    }
     default: {
       const label = entry.action.replace(/_/g, " ");
       return entry.reason ? `${label} — ${entry.reason}` : label;
@@ -83,7 +91,8 @@ function actorLabel(actor: string): string {
 const REASON_EXPLANATIONS: Record<string, string> = {
   target_out_of_scope: "No allow-scope matched this target. A domain scope includes its subdomains; add an explicit allow only for a separately authorized domain/IP.",
   active_not_allowed: "The target is in scope, but active testing is not allowed for the matched scope asset.",
-  no_tool_grant: "The engagement does not currently grant this active tool category.",
+  no_tool_grant: "The engagement does not grant the tool category this call needs (passive or active). Grant it under Edit engagement → Tool grants; a per-tool switch cannot replace the grant.",
+  tool_disabled: "The tool is switched off - in Settings or for this campaign (Edit engagement → Campaign tool overrides).",
   ai_testing_not_enabled: "The Vector Agent is not enabled for autonomous proposals on this engagement.",
   explicit_out_of_scope: "A deny rule matched this target. Deny rules take precedence and are not bypassed from the audit view.",
   unsafe_arguments: "The tool arguments failed the registry safety policy. This needs code/registry changes, not an operator override.",

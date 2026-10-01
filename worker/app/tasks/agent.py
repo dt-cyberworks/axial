@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
 from app import session_state
+from app.cancel_probe import CancelProbe
 from app.control_plane_client import client
 from app.target_envelope import single_port_from_envelope
 from app.tasks import dispatch
@@ -336,7 +337,10 @@ _TOOLS = [
                 "add a few reasoned, target-specific candidates; ffuf does the volume, rate-limited "
                 "and non-destructive, through the scope-enforcing proxy. Use it to find hidden "
                 "endpoints, admin panels, backups, config/exposed files, or to enumerate an ID range. "
-                "The path must contain the literal placeholder FUZZ (e.g. /FUZZ, /api/FUZZ, /users/FUZZ)."
+                "The path must contain the literal placeholder FUZZ (e.g. /FUZZ, /api/FUZZ, /users/FUZZ). "
+                "The pipeline already ran a quickhits baseline (see 'Pipeline checks already run'); the call "
+                "is capped at about four minutes, so a large wordlist only reaches its first few thousand "
+                "entries - prefer a deeper path, reasoned extra_candidates or a small list."
             ),
             "parameters": {
                 "type": "object",
@@ -732,8 +736,9 @@ def _await_approval(engagement_id, approval_id, asset_id, target, args, ip, prop
 
     waited = 0
     decision_state = "expired"
+    cancel_probe = CancelProbe.for_run(run_id) if run_id else None
     while waited < context.approval_timeout_seconds:
-        if run_id and client.is_cancel_requested(uuid.UUID(run_id)):
+        if cancel_probe is not None and cancel_probe.is_cancelled():  # issue #49: fail closed when unreadable
             decision_state = "cancelled"
             break
         st = client.get_approval(str(approval_id)).get("state")
@@ -981,6 +986,47 @@ def _protocols_from_context(ctx: dict) -> dict[str, str]:
     return out
 
 
+def _render_pipeline_checks(checks: list[dict]) -> list[str]:
+    """REQ-PIPE-018: what the scan pipeline already ran on this host, per port, so
+    the agent builds on it and does not repeat it. Compact: nuclei's many checks
+    collapse into one count per outcome; a redirect-only alias says where its
+    coverage lives."""
+    by_port: dict[int, list[dict]] = {}
+    for c in checks:
+        by_port.setdefault(int(c.get("port") or 0), []).append(c)
+    if not by_port:
+        return []
+    lines = [
+        "  Pipeline checks already run in this scan (do not repeat a completed check with the same "
+        "tool and wordlist; a check marked partial was cut short by its time limit):"
+    ]
+    for port in sorted(by_port):
+        items = by_port[port]
+        skipped = [c for c in items if c.get("state") == "skipped"]
+        alias = next((str(c.get("reason")) for c in skipped if str(c.get("reason", "")).startswith("web_alias_of:")), None)
+        if alias:
+            lines.append(f"    port {port}: only a redirect to {alias.split(':', 1)[1]}; its checks run there")
+            continue
+        parts: list[str] = []
+        nuclei: dict[str, int] = {}
+        for c in items:
+            state = str(c.get("state"))
+            if state == "skipped":
+                continue
+            if c.get("tool") == "nuclei":
+                nuclei[state] = nuclei.get(state, 0) + 1
+                continue
+            label = str(c.get("check_id"))
+            if c.get("wordlist"):
+                label += f"[{c['wordlist']}]"
+            parts.append(f"{label}={state}")
+        for state, n in sorted(nuclei.items()):
+            parts.append(f"nuclei x{n}={state}")
+        if parts:
+            lines.append(f"    port {port}: " + ", ".join(parts))
+    return lines if len(lines) > 1 else []
+
+
 def _render_evidence(engagement_id: str, asset_by_host: dict[str, str], ctx: dict | None = None) -> str:
     """Baut den Evidenz-Block aus den bereits erhobenen Services/Findings. Faellt
     auf die reine Hostliste zurueck, wenn der Kontext nicht ladbar ist."""
@@ -1014,6 +1060,7 @@ def _render_evidence(engagement_id: str, asset_by_host: dict[str, str], ctx: dic
             )
         else:
             lines.append("  Service: (none recorded yet)")
+        lines.extend(_render_pipeline_checks(h.get("checks") or []))
         if findings:
             for f in findings:
                 extra = []
@@ -1256,9 +1303,11 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
         {"role": "user", "content": _initial_context(engagement_id, asset_by_host, enabled_tools, engagement_params)},
     ]
 
+    cancel_probe = CancelProbe.for_run(scan_run_id) if scan_run_id else None
     while context.iterations < budget_max_iterations and not context.exhausted:
         # Kooperativer Stopp (REQ-RUN-001): vor jedem (teuren) LLM-Aufruf pruefen.
-        if scan_run_id and client.is_cancel_requested(uuid.UUID(scan_run_id)):
+        # An unreadable answer is never "not cancelled" (GitHub issue #49).
+        if cancel_probe is not None and cancel_probe.is_cancelled():
             logger.info("agent phase: stopped by the operator")
             _audit_agent_event(engagement_id, "cancelled", scan_run_id=scan_run_id, decision="DENY", reason="cancelled_by_operator")
             break

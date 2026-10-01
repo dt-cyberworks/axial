@@ -9,7 +9,9 @@ import base64
 import binascii
 import datetime
 import hashlib
+import threading
 import uuid
+from contextlib import contextmanager
 from secrets import compare_digest, token_urlsafe
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -21,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app import config_resolver, report_service
 from app.db.base import get_db
-from app.gateway.audit import append_audit_log
+from app.gateway.audit import append_audit_log, append_audit_logs
 from app.gateway.authorize import ToolCall, _matching_rules, authorize
 from app.gateway.dns_materialization import materialize
 from app.gateway import rate_reservation
@@ -69,6 +71,7 @@ from app.schemas.internal import (
     OpenwireCallbackStatusOut,
     OpenwireCallbackTokenCreate,
     OpenwireCallbackTokenOut,
+    ProxyAuditBatchIn,
     ProxyAuditEventIn,
     RawEgressLeaseIn,
     RawEgressLeaseOut,
@@ -461,21 +464,58 @@ def internal_tool_execution(
     return {"ok": True}
 
 
-@router.post("/engagements/{engagement_id}/proxy-audit", status_code=201)
-def internal_proxy_audit(engagement_id: uuid.UUID, body: ProxyAuditEventIn, db: Session = Depends(get_db)):
+# GitHub issue #49 (REQ-PIPE-020): the egress proxy's audit and rate-reservation
+# calls are the bulk traffic of a scan (100+ per second). They share a few
+# database slots so that cancel checks, heartbeats and the console always find a
+# free pooled connection; a caller that cannot get a slot in time is refused with
+# 503 and the proxy fails closed.
+_bulk_db_slots = threading.BoundedSemaphore(get_settings().internal_bulk_db_slots)
+
+
+@contextmanager
+def bulk_db_slot():
+    if not _bulk_db_slots.acquire(timeout=get_settings().internal_bulk_wait_seconds):
+        raise HTTPException(503, "control plane busy, retry")
+    try:
+        yield
+    finally:
+        _bulk_db_slots.release()
+
+
+def _proxy_audit_entry(body: ProxyAuditEventIn) -> dict:
     if body.decision not in {"ALLOW", "DENY"}:
         raise HTTPException(422, "invalid proxy audit decision")
-    eng = db.get(Engagement, engagement_id)
-    if eng is None:
-        raise HTTPException(404, "engagement not found")
-    payload = dict(body.payload or {})
     # Bound untrusted network metadata before it enters durable audit storage.
-    payload = {str(k)[:64]: str(v)[:500] for k, v in list(payload.items())[:20]}
-    append_audit_log(
-        db, engagement_id=engagement_id, actor="egress-proxy", action="network_request",
-        decision=body.decision, reason=body.reason[:100], payload=payload,
-    )
+    payload = {str(k)[:64]: str(v)[:500] for k, v in list((body.payload or {}).items())[:20]}
+    return {
+        "actor": "egress-proxy", "action": "network_request",
+        "decision": body.decision, "reason": body.reason[:100], "payload": payload,
+    }
+
+
+@router.post("/engagements/{engagement_id}/proxy-audit", status_code=201)
+def internal_proxy_audit(engagement_id: uuid.UUID, body: ProxyAuditEventIn, db: Session = Depends(get_db)):
+    entry = _proxy_audit_entry(body)
+    with bulk_db_slot():
+        eng = db.get(Engagement, engagement_id)
+        if eng is None:
+            raise HTTPException(404, "engagement not found")
+        append_audit_log(db, engagement_id=engagement_id, **entry)
     return {"ok": True}
+
+
+@router.post("/engagements/{engagement_id}/proxy-audit/batch", status_code=201)
+def internal_proxy_audit_batch(engagement_id: uuid.UUID, body: ProxyAuditBatchIn, db: Session = Depends(get_db)):
+    """GitHub issue #49: one lock acquisition and one commit for a whole batch of
+    the proxy's events. All or nothing - a caller that does not get a 201 must
+    treat every event of the batch as unaudited (the proxy then denies them)."""
+    entries = [_proxy_audit_entry(event) for event in body.events]
+    with bulk_db_slot():
+        eng = db.get(Engagement, engagement_id)
+        if eng is None:
+            raise HTTPException(404, "engagement not found")
+        count = append_audit_logs(db, engagement_id=engagement_id, entries=entries)
+    return {"ok": True, "count": count}
 
 
 @router.post("/engagements/{engagement_id}/rate-reservation")
@@ -485,14 +525,15 @@ def reserve_proxy_rate_slot(engagement_id: uuid.UUID, db: Session = Depends(get_
     read-only on the database by design, so the reservation happens here, with
     the same primitive and window the gateway uses. The limit comes from the
     program row, never from the caller."""
-    eng = db.get(Engagement, engagement_id)
-    if eng is None:
-        raise HTTPException(404, "engagement not found")
-    prog = db.scalar(select(BountyProgram).where(BountyProgram.engagement_id == engagement_id))
-    if prog is None:
-        return {"allowed": False, "reason": "bounty_program_missing", "retry_after_seconds": None}
-    slot = rate_reservation.reserve(db, engagement_id, "proxy", float(prog.max_rps))
-    db.commit()
+    with bulk_db_slot():
+        eng = db.get(Engagement, engagement_id)
+        if eng is None:
+            raise HTTPException(404, "engagement not found")
+        prog = db.scalar(select(BountyProgram).where(BountyProgram.engagement_id == engagement_id))
+        if prog is None:
+            return {"allowed": False, "reason": "bounty_program_missing", "retry_after_seconds": None}
+        slot = rate_reservation.reserve(db, engagement_id, "proxy", float(prog.max_rps))
+        db.commit()
     return {"allowed": slot.allowed, "reason": "allow" if slot.allowed else "rate_limited",
             "retry_after_seconds": slot.retry_after_seconds}
 
@@ -663,6 +704,9 @@ def claim_scan_run_endpoint(scan_run_id: uuid.UUID, body: ScanRunClaimIn, db: Se
     )
 
 
+_HEARTBEAT_REFRESH_SECONDS = 15
+
+
 @router.get("/scan-runs/{scan_run_id}/cancel-requested")
 def scan_run_cancel_requested(
     scan_run_id: uuid.UUID, db: Session = Depends(get_db), attempt: Annotated[int | None, Query()] = None,
@@ -677,8 +721,13 @@ def scan_run_cancel_requested(
         raise HTTPException(404, "scan_run not found")
     _fence(run, attempt)
     if attempt is not None and run.state in ("running", "waiting_approval"):
-        run.heartbeat_at = datetime.datetime.now(datetime.timezone.utc)
-        db.commit()
+        # GitHub issue #49: every running check polls this once a second, and a
+        # committed UPDATE per poll contends with every other write to this row.
+        # The stale window is 300 s, so refreshing at most every 15 s loses nothing.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if run.heartbeat_at is None or (now - run.heartbeat_at).total_seconds() >= _HEARTBEAT_REFRESH_SECONDS:
+            run.heartbeat_at = now
+            db.commit()
     return {"cancel_requested": bool(run.cancel_requested)}
 
 
@@ -1186,6 +1235,10 @@ def agent_context(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
             DiscoveredAsset.engagement_id == engagement_id, DiscoveredAsset.in_scope.is_(True)
         )
     ).all()
+    # REQ-PIPE-018: what this run's pipeline already did, so the agent builds on
+    # it instead of repeating it. No running run (manual call) -> nothing.
+    run_id = _active_run_id(db, engagement_id)
+    checks_by_host = scan_plan.agent_check_summary(db, run_id) if run_id is not None else {}
     hosts = []
     for a in assets:
         services = db.scalars(select(Service).where(Service.asset_id == a.id)).all()
@@ -1197,6 +1250,7 @@ def agent_context(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
             "host": a.value,
             "http_checked_at": a.http_checked_at.isoformat() if a.http_checked_at else None,
             "http_live": a.http_live,
+            "checks": checks_by_host.get(str(a.value).lower(), []),
             "services": [
                 {"port": s.port, "protocol": s.protocol, "product": s.product,
                  "tech": (s.tech_stack or {}).get("tech", []) if s.tech_stack else [],

@@ -47,8 +47,9 @@ def test_list_tool_grants_is_empty_for_a_fresh_draft(db):
 
 
 def test_list_tool_grants_reflects_a_passive_grant(db):
-    eng = _draft_engagement(db, _owner(db))
-    add_tool_grant(eng.id, ToolGrantCreate(tool_category="recon", mode="passive", requires_manual_approval=False), db)
+    owner = _owner(db)
+    eng = _draft_engagement(db, owner)
+    add_tool_grant(eng.id, ToolGrantCreate(tool_category="recon", mode="passive", requires_manual_approval=False), db, user=owner)
 
     grants = list_tool_grants(eng.id, db)
     assert len(grants) == 1
@@ -58,15 +59,16 @@ def test_list_tool_grants_reflects_a_passive_grant(db):
 
 
 def test_list_tool_grants_reflects_active_grant_with_manual_tools_scoped_to_its_own_category(db):
-    eng = _draft_engagement(db, _owner(db))
+    owner = _owner(db)
+    eng = _draft_engagement(db, owner)
     add_tool_grant(eng.id, ToolGrantCreate(
         tool_category="fingerprint", mode="active", requires_manual_approval=False, manual_tools=["nmap"],
-    ), db)
+    ), db, user=owner)
     # A second category's active grant, with no manual tools of its own -
     # its manual_tools list must not pick up "nmap" from the other category.
     add_tool_grant(eng.id, ToolGrantCreate(
         tool_category="recon", mode="active", requires_manual_approval=False, manual_tools=[],
-    ), db)
+    ), db, user=owner)
 
     grants = {(g.tool_category, g.mode): g for g in list_tool_grants(eng.id, db)}
     assert grants[("fingerprint", "active")].manual_tools == ["nmap"]
@@ -74,15 +76,16 @@ def test_list_tool_grants_reflects_active_grant_with_manual_tools_scoped_to_its_
 
 
 def test_list_tool_grants_reflects_an_upsert_not_a_duplicate(db):
-    eng = _draft_engagement(db, _owner(db))
+    owner = _owner(db)
+    eng = _draft_engagement(db, owner)
     add_tool_grant(eng.id, ToolGrantCreate(
         tool_category="fingerprint", mode="active", requires_manual_approval=False, manual_tools=["nmap"],
-    ), db)
+    ), db, user=owner)
     # Resubmitting the same category+mode (as the GUI does on every "Save
     # tool grants" click) must replace, not duplicate, the manual-tool set.
     add_tool_grant(eng.id, ToolGrantCreate(
         tool_category="fingerprint", mode="active", requires_manual_approval=False, manual_tools=["httpx"],
-    ), db)
+    ), db, user=owner)
 
     grants = list_tool_grants(eng.id, db)
     assert len(grants) == 1

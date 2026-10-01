@@ -12,7 +12,7 @@ export const SCAN_DEPTHS: { value: ScanProfile; label: string; help: string }[] 
   {
     value: "thorough",
     label: "Thorough",
-    help: "Every template on every web service, whatever the scan identified. Much slower; use it when a complete sweep matters more than time.",
+    help: "Every template on every web service, whatever the scan identified, plus a deep sweep of about 30,000 likely paths per web service (roughly 25 minutes each). Much slower; use it when a complete sweep matters more than time.",
   },
 ];
 

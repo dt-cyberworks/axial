@@ -21,7 +21,7 @@ review are required.
 **Security review:** approved by johannes (project/security owner) on
 2026-09-29 ("I approve all changes"), after the negative tests and the
 mutation checks listed in the linked test cases. Live verification on the
-dev stack is still owed at deploy time and is recorded in the test case.
+dev stack was owed at deploy time; it is recorded in the test case (2026-10-01).
 
 Tests must verify these requirements directly. Do not weaken tests to match
 implementation; update implementation when it violates this document.

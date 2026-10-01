@@ -20,13 +20,14 @@ export function reasonText(reason: string): string {
   if (reason.startsWith("gateway_denied:")) return `Refused by the Scope Gateway (${reason.slice("gateway_denied:".length)})`;
   const known: Record<string, string> = {
     web: "Web service", web_over_tls: "Web service over TLS", generic_web: "Generic web templates",
-    "thorough:every_template": "Thorough depth: every template", technology_profile: "Identify the technologies",
+    "thorough:every_template": "Thorough depth: every template", "thorough:deep_content_discovery": "Thorough depth: deep sweep of about 30,000 likely paths", technology_profile: "Identify the technologies",
     switch_off: "Switched off for this engagement", tool_disabled: "Tool switched off in this engagement's tool list", switch_on: "Switched on for this engagement",
     "no_product_identified:common_products": "No product identified: templates of common web products",
     crawled_endpoints: "Test the crawled URLs that carry parameters", not_a_tls_service: "Plain HTTP, no TLS layer",
     not_a_web_service: "Not a web service", tls_service: "Encrypted service", oob_unavailable: "Interaction server not deployed",
     no_endpoints: "The crawl found no URL with parameters", no_matching_templates: "No template matches",
     dependency_never_finished: "A check it depends on never finished", cancelled_by_operator: "Stopped by the operator",
+    cancellation_status_unavailable: "Stopped as a safety measure: the cancel status could not be read",
     materialized_ip_missing: "The name did not resolve",
   };
   return known[reason] ?? reason.replace(/[_:]+/g, " ");

@@ -896,15 +896,6 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .agent-msg pre, .agent-response { margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 0.8rem; }
 .agent-response { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 
-.docs-layout { display: grid; grid-template-columns: 240px minmax(0,1fr); gap: 18px; align-items: start; }
-.docs-index { position: sticky; top: 16px; display: grid; gap: 4px; }
-.docs-index a { color: var(--ink-soft); text-decoration: none; padding: 8px 10px; border-radius: 6px; border: 1px solid transparent; font-size: 0.9rem; }
-.docs-index a:hover, .docs-index a.active { background: var(--surface); border-color: var(--line); color: var(--teal); }
-.docs-body { display: grid; gap: 16px; }
-.docs-section { scroll-margin-top: 16px; }
-.docs-fields dt { color: var(--teal); }
-@media (max-width: 900px) { .docs-layout { grid-template-columns: 1fr; } .docs-index { position: static; } }
-
 /* --- Live approval popup (REQ-APPROVAL-003) --- */
 .modal-overlay { position: fixed; inset: 0; background: rgba(4,7,12,0.75); display: grid; place-items: center; z-index: 100; padding: 20px; }
 /* REQ-APPROVALUI-001: the global approval popup always wins over any page-level modal. */

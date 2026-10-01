@@ -203,11 +203,18 @@ class ScopeAuthorizationVerificationCreate(BaseModel):
     verified_by: str = "operator"
 
 
+ToolCategoryName = Literal["recon", "fingerprint", "vuln", "cred", "exploit"]
+ToolGrantMode = Literal["passive", "active"]
+
+
 class ToolGrantCreate(BaseModel):
-    tool_category: str  # recon|fingerprint|vuln|cred|exploit
-    mode: str  # passive|active
+    tool_category: ToolCategoryName
+    mode: ToolGrantMode
     requires_manual_approval: bool = True
     manual_tools: list[str] = []
+    # GitHub issue #48: granting an ACTIVE category on an engagement that has left
+    # draft widens what it is authorized to do, so the caller must say it knows.
+    confirm_widening: bool = False
 
 
 class ToolGrantOut(BaseModel):

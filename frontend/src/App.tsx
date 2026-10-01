@@ -11,7 +11,6 @@ import EngagementEdit from "./pages/EngagementEdit";
 import EngagementDetail from "./pages/EngagementDetail";
 import RunDetail from "./pages/RunDetail";
 import Audit from "./pages/Audit";
-import Documentation from "./pages/Documentation";
 import Login from "./pages/Login";
 import Account from "./pages/Account";
 import AdminHome from "./pages/AdminHome";
@@ -19,6 +18,15 @@ import GlobalApprovalWatcher from "./components/GlobalApprovalWatcher";
 import AuthLayout from "./components/AuthLayout";
 import Logo from "./components/Logo";
 import { useLogout } from "./lib/useLogout";
+
+/**
+ * REQ-MANUAL-005: the console carries no documentation of its own. When it is built
+ * with VITE_MANUAL_URL (the address of the repository manual) it shows one link to it;
+ * without the variable there is no link. Only http(s) addresses are accepted.
+ */
+const MANUAL_URL = /^https?:\/\//i.test(String(import.meta.env.VITE_MANUAL_URL ?? "").trim())
+  ? String(import.meta.env.VITE_MANUAL_URL).trim()
+  : "";
 
 function RedirectToEngagement() {
   const { id } = useParams();
@@ -137,8 +145,8 @@ function AuthenticatedShell() {
           <NavLink to="/" end>Overview</NavLink>
           <NavLink to="/findings">Findings</NavLink>
           <NavLink to="/new">New engagement</NavLink>
-          <NavLink to="/docs">Documentation</NavLink>
           {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
+          {MANUAL_URL && <a href={MANUAL_URL} target="_blank" rel="noopener noreferrer">Manual</a>}
           {/* REQ-CONSOLE-005: a fixed destination label. The display name is a
               subtitle ("who am I signed in as"), never the nav label itself -
               a user called "Test Account" otherwise read as its own section. */}
@@ -156,7 +164,6 @@ function AuthenticatedShell() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/findings" element={<AllFindings />} />
           <Route path="/new" element={<EngagementWizard />} />
-          <Route path="/docs" element={<Documentation />} />
           <Route path="/account" element={<Account />} />
           <Route path="/admin" element={<AdminHome />} />
           <Route path="/engagements/:id" element={<EngagementDetail />} />

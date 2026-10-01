@@ -71,7 +71,7 @@ Routes:
 | `/engagements/:id/edit` | Engagement edit (metadata + campaign config) | engagement |
 | `/new` | New engagement wizard | — |
 | `/settings` | Agent settings | global |
-| `/docs` | Documentation (NEW) | — |
+| `/docs` | ~~Documentation (NEW)~~ removed by REQ-MANUAL-005; shows Page not found | — |
 | `/engagements/:id/audit` | Audit (full compliance trail) | engagement |
 
 Deprecated/redirected: `/engagements/:id/live` and `/engagements/:id/results`
@@ -110,7 +110,10 @@ field. Static mapping grounded in what each phase dispatches today:
 
 Rendered as chips in the expanded phase panel.
 
-## 6. GUI: documentation page (REQ-DOC-001)
+## 6. GUI: documentation page (REQ-DOC-001) — superseded
+
+> Superseded by REQ-MANUAL-001..005: the page was removed and the documentation moved to
+> `docs/manual/` (see [user-manual-architecture.md](user-manual-architecture.md)). Kept for history.
 
 Single `/docs` route, `Documentation.tsx`, content authored as structured
 sections (index + anchors) covering every screen and field. Kept in the

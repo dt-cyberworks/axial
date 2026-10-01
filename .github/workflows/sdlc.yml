@@ -19,6 +19,8 @@ jobs:
           python-version: "3.12"
       - name: Validate requirements and traceability
         run: python3 scripts/requirements_pipeline.py check
+      - name: Check the user manual (links, anchors, UI labels, codes, images, no private data)
+        run: python3 scripts/check_manual.py
       - name: Test pipeline implementation
         run: |
           python3 -m pip install pytest

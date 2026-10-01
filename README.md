@@ -127,6 +127,10 @@ verification, troubleshooting, upgrades, backups, and safe shutdown—follow
 **[INSTALL.md](INSTALL.md)**. Run `make help` to see the available project
 commands.
 
+Once the console is open, the **[user manual](docs/manual/README.md)** takes you
+from there: a [quickstart](docs/manual/quickstart.md) to a first report, a guide
+for each job, and a page for every screen.
+
 ## Project structure
 
 | Directory | Role | Zone |
@@ -144,6 +148,7 @@ commands.
 
 | Page | Content |
 |---|---|
+| [User manual](docs/manual/README.md) | how to use Axial: quickstart, guides, every screen, troubleshooting |
 | [architecture.md](docs/architecture.md) | layers, zones, data flow, pipeline |
 | [security-model.md](docs/security-model.md) | gateway, defense in depth, audit, threat model |
 | [data-model.md](docs/data-model.md) | entities, ER diagram, scope resolution, scoring |

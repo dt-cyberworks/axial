@@ -1,13 +1,28 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { api, type ScanProfile, type ScopeAsset } from "../api/client";
 import DiscoverySwitches, { DEFAULT_DISCOVERY_FLAGS, discoveryFlagSummary, type DiscoveryFlags } from "../components/DiscoverySwitches";
 import ScanDepth from "../components/ScanDepth";
+import ToolGrantsEditor from "../components/ToolGrantsEditor";
 
 type EnabledChoice = "inherit" | "on" | "off";
 interface ToolOverrideState { enabled: EnabledChoice; approval: boolean; }
+
+// GitHub issue #48: why a tool cannot run here, in plain words.
+const UNAVAILABLE_TEXT: Record<string, string> = {
+  not_installed: "Not installed in this version",
+  category_not_granted: "Its category is not granted",
+  off_for_campaign: "Switched off for this campaign",
+  off_in_settings: "Switched off in Settings",
+  off_by_default: "Off by default in this version",
+};
+const SOURCE_TEXT: Record<string, string> = {
+  registry: "this version's default",
+  global: "Settings",
+  campaign: "this campaign",
+};
 
 function isoToDateInput(value: string) {
   const date = new Date(value);
@@ -41,6 +56,9 @@ export default function EngagementEdit() {
   const [discoveryFlags, setDiscoveryFlags] = useState<DiscoveryFlags>(DEFAULT_DISCOVERY_FLAGS);
   const [scanProfile, setScanProfile] = useState<ScanProfile>("standard");
   const [formError, setFormError] = useState<string | null>(null);
+
+  // The blocker on the engagement page links here (#tool-grants).
+  const location = useLocation();
 
   const { data: engagement, isLoading, error } = useQuery({
     queryKey: ["engagement", id],
@@ -100,6 +118,12 @@ export default function EngagementEdit() {
       navigate(`/engagements/${updated.id}/live`);
     },
   });
+
+  useEffect(() => {
+    if (location.hash === "#tool-grants" && engagement) {
+      document.getElementById("tool-grants")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [location.hash, engagement]);
 
   // --- Per-campaign config overrides (layers 4/5) ---
   const { data: config } = useQuery({
@@ -338,15 +362,32 @@ export default function EngagementEdit() {
         </div>
       </section>
 
+      {engagement && engagement.status !== "completed" && engagement.status !== "revoked" && (
+        <ToolGrantsEditor engagementId={id!} status={engagement.status} />
+      )}
+
       <section className="form-panel settings-panel">
         <h2>Campaign tool overrides</h2>
         <div className="warning-block">
-          Overrides the global tool policy for this campaign only. "Inherit" uses the global default; the capability registry floor and scope/arg-safety always apply.
+          <p>
+            Whether a tool can run depends on three things, checked in this order: the tools built into this version
+            (a tool that is not installed can never run), then the tool policy in Settings, then this campaign. Every
+            tool call must also be covered by a <strong>tool grant</strong> above and by the engagement's scope.
+          </p>
+          <p>
+            Here you can switch a single tool <strong>off</strong> for this campaign, or <strong>on</strong> against the
+            Settings default. "Force on" cannot grant a category, cannot add scope and cannot enable a tool that is not
+            installed: without a grant the call is still refused. "Inherit global" follows Settings.
+          </p>
+          <p>
+            <strong>Approval</strong> means every call of that tool waits for a person to approve it first. It is the same
+            setting as "Require approval" in the tool grants table above.
+          </p>
         </div>
         <div className="responsive-table">
           <table className="data-table">
             <thead>
-              <tr><th>Tool</th><th>Category</th><th>Effective</th><th>This campaign</th><th>Approval</th></tr>
+              <tr><th>Tool</th><th>Category</th><th>Available</th><th>This campaign</th><th>Approval</th></tr>
             </thead>
             <tbody>
               {(config?.tools ?? []).map((t) => (
@@ -354,8 +395,19 @@ export default function EngagementEdit() {
                   <td>{t.tool}{t.installed === false && <span className="muted-line">not installed</span>}</td>
                   <td>{t.category}</td>
                   <td>
-                    <span className={`pill ${t.enabled ? "good" : "neutral"}`}>{t.enabled ? "enabled" : "disabled"}</span>
-                    <span className="muted-line">via {t.enabled_source}</span>
+                    {t.unavailable_reason ? (
+                      <>
+                        <span className={`pill ${t.unavailable_reason === "category_not_granted" ? "warn" : "neutral"}`}>
+                          {UNAVAILABLE_TEXT[t.unavailable_reason] ?? t.unavailable_reason}
+                        </span>
+                        {t.unavailable_reason === "category_not_granted" && (
+                          <span className="muted-line"><a href="#tool-grants">Grant {t.category}</a></span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="pill good">can run</span>
+                    )}
+                    <span className="muted-line">decided by {SOURCE_TEXT[t.enabled_source] ?? t.enabled_source}</span>
                   </td>
                   <td>
                     <select
@@ -370,6 +422,7 @@ export default function EngagementEdit() {
                   </td>
                   <td>
                     <input type="checkbox" checked={overrides[t.tool]?.approval ?? false}
+                      title="Every call of this tool waits for a person to approve it"
                       onChange={(e) => setOverride(t.tool, { approval: e.target.checked })} />
                   </td>
                 </tr>

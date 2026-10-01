@@ -78,6 +78,12 @@ Expected results:
 
 - The tests above pass; a lock entry without `==` or without a hash fails
   `test_negative_every_locked_package_is_pinned_and_hashed`.
+- The CI job frees disk before building and keeps the tool-runner build and
+  SBOM last (`test_ci_frees_disk_before_the_tool_runner_is_built_and_scanned`);
+  removing the disk-freeing steps, or scanning an image after its removal,
+  fails it. A green "docker images build" CI run with six SBOMs in the `sbom`
+  artifact is the live evidence: CI run 36785038061 (commit b149360, 2026-10-01) passed all three
+  jobs, and its `sbom` artifact holds the six CycloneDX files including `tool-runner.cdx.json`.
 - Built image (2026-09-29, dev): `GET /health` answers; a call without the
   shared secret is rejected; `getcap` shows `cap_net_raw` on nmap; `nmap`,
   `nuclei`, `testssl`, `ffuf`, `curl` (`--globoff`) run.

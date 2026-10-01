@@ -56,3 +56,47 @@ scope here (this fixes the single-click-storm case, which is what was
 actually observed and is the overwhelmingly common cause); a server-side
 idempotency key would be a separate, larger change if this ever recurs
 despite the client-side guard.
+
+## REQ-ENGCREATE-002: One wizard session edits one draft; saving a step again never duplicates
+
+Context: GitHub issue #46, found live 2026-09-30 on dev. Two drafts with the
+same title and owner were created 96 seconds apart, so the in-flight guard of
+REQ-ENGCREATE-001 was not involved: the operator had returned to step 1 through
+the step sidebar and pressed "Save draft and continue" again. That handler
+always called `POST /engagements` and overwrote the wizard's `engagementId`, so
+every later call targeted the new draft and the first was left behind with no
+scope and no tools. Step 3 had the same flaw one level down: it re-sent every
+scope row, and `POST /scope-assets` does not deduplicate, so going back and
+saving step 3 again duplicated the scope.
+
+**Risk class: R2** (frontend data-integrity fix: no change to scope semantics,
+authorization, the gateway or egress; the server-side endpoints are unchanged).
+
+Acceptance criteria:
+
+- Once the wizard session has a draft (`engagementId` is set), step 1 updates
+  that draft with `PATCH /engagements/{id}` and never sends a second
+  `POST /engagements`. A cleared emergency contact is sent as `null`, because
+  PATCH only applies the fields it receives.
+- The step-1 button says "Save changes and continue" (and "Saving…" while in
+  flight) when it edits an existing draft. Its first-create wording and the
+  REQ-ENGCREATE-001 guards are unchanged.
+- Saving step 3 again sends only scope rows that are new or were edited since
+  the last save. An edited saved row is replaced (delete, then add); an
+  unchanged row is not sent again. If a call fails part-way, what already went
+  through is remembered, so a retry does not repeat it.
+- The draft id is kept in the URL (`/new?draft=<id>`). Opening that
+  URL after a reload or after navigating away resumes the draft: the step-1
+  fields, the scope rows and the saved tool grants are loaded from the server
+  and the wizard continues at step 2, without creating another draft.
+- [Negative test] Only a draft can be resumed. An engagement that is no longer
+  a draft, or an id the caller cannot open (the server answers 404), clears the
+  URL parameter and shows a message instead of creating or changing anything.
+- [Regression test] Source-level checks on the handler's `engagementId`
+  branch, the single `createEngagement` call, the step-3 sync and the resume
+  path (`frontend/tests/engagement_creation_double_submit.test.mjs`).
+
+Not part of this: the 409 that `POST /engagements/{id}/activate` returns when
+the new allow scope overlaps another active engagement (REQ-CONCUR-003) is
+expected behavior. Dashboard handling of abandoned, empty drafts is a separate
+improvement.

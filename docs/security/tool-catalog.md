@@ -362,8 +362,17 @@ agent curates (picks a wordlist matching the target's tech stack, optionally
 adds a few reasoned candidate paths); ffuf does the volume, rate-limited and
 non-destructive, through the egress proxy.
 ```
-ffuf -w <wordlist-path>:FUZZ -u <url> -mc 200,204,301,302,307,401,403,405,500 -rate 20 -t 10 -maxtime 90 -s -of json -o <tmp>.json [-e <ext1,ext2,...>] [-x <egress-proxy-url>]
+ffuf -w <wordlist-path>:FUZZ -u <url> -mc 200,204,301,302,307,401,403,405,500 -ac -rate 20 -t 10 -maxtime <budget - 20> -s -of json -o <tmp>.json [-e <ext1,ext2,...>] [-x <egress-proxy-url>]
 ```
+Three callers use this one builder, all through the Scope Gateway with the same
+envelope: the fingerprint baseline check `ffuf` (`quickhits`, 2,565 entries, 240 s,
+REQ-SCANQUAL-005), the `thorough` profile's `ffuf:deep` check (`raft-medium-dirs`,
+29,999 entries, a budget derived from the list: 1,700 s, REQ-PIPE-017) and the
+Vector Agent's `content_discovery` call (any allowed key or its own candidates,
+always capped at 240 s, REQ-PIPE-018). The rate is the same 20 requests per second
+for all three (only a bug-bounty program's cap lowers it); a run that reaches its
+deadline is recorded `partial`, and the agent is told how little of a large list
+that covers.
 | Flag | Why |
 |---|---|
 | `-w <path>:FUZZ` | The agent selects a wordlist by a **fixed key** (`common`, `raft-medium-dirs`, `raft-medium-files`, `quickhits`, `directory-list-medium`), mapped server-side to a real SecLists path baked into the runner image (`FFUF_WORDLISTS`, `tool_runner_client.py:331-337`) — the agent can never supply a raw filesystem path (which would otherwise allow something like `-w /etc/passwd`). |
@@ -558,7 +567,7 @@ Generated from `registry.capability_matrix()` — run `python -c "from app.tools
 | `testssl` | fingerprint | http_proxy | yes | yes | **yes** | §2.5; also agent-proposable via `run_check`. |
 | `nuclei` | vuln | http_proxy | yes | yes | **yes** | §2.6, two passes; also agent-proposable via `run_check` (single pass). |
 | `http_request` | vuln | http_proxy | yes | yes | **yes** | Agent-only (§3.2); not part of the deterministic pipeline. |
-| `ffuf` | vuln | http_proxy | yes | yes | **yes** | Agent-only (§3.3); not part of the deterministic pipeline. |
+| `ffuf` | vuln | http_proxy | yes | yes | **yes** | §3.3; a `quickhits` baseline check on every web surface, `raft-medium-dirs` under `thorough`, and agent-proposable. |
 | `redis-probe` | fingerprint | raw_network | yes | yes | **yes** | §3.4; agent-only, passive (sends one fixed `PING\r\n`). |
 | `activemq-banner` | fingerprint | raw_network | yes | yes | **yes** | §3.4; agent-only, purely passive (sends nothing). |
 | `activemq-openwire-probe` | vuln | raw_network | yes | yes | **yes** | §3.4; agent-only, R4 — the one tool that actively exercises a vulnerability (CVE-2023-46604); mandatory per-call human approval. |

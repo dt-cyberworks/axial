@@ -60,7 +60,7 @@ const REASON_COPY: Record<string, string> = {
   explicit_out_of_scope: "A deny rule matched this target. Nothing was sent to it.",
   target_out_of_scope: "No active allow-scope matched this target. Nothing was sent to it.",
   active_not_allowed: "The target is in scope, but active testing is not authorized.",
-  no_tool_grant: "This engagement does not grant the required tool category.",
+  no_tool_grant: "This engagement does not grant the tool category this call needs. Grant it under Edit engagement → Tool grants.",
   tool_not_whitelisted: "The requested tool is not enabled by the safety registry.",
   unsafe_arguments: "The proposed arguments did not pass the deterministic safety policy.",
   outside_time_window: "The authorized testing window is not currently open.",
@@ -97,6 +97,12 @@ const REASON_COPY: Record<string, string> = {
   empty_response: "The model returned no answer or tool calls. No action was executed.",
   llm_call_failed: "The model provider request failed. Deterministic scan results remain available.",
   cancelled_by_operator: "The operator requested a cooperative stop.",
+  // GitHub issue #49 (REQ-PIPE-021): safety stops and internal errors say what really happened.
+  cancellation_status_unavailable:
+    "The control plane could not say whether the operator had cancelled the run, so target-facing work was stopped as a safety measure. " +
+    "Nothing was left out on purpose; start the scan again.",
+  task_time_limit_exceeded: "The scan ran into the worker's task time limit and was stopped.",
+  pipeline_error: "The scan stopped because of an internal error; this older run did not record which one.",
   deterministic_full_scan_only: "Full Nmap discovery is pipeline-owned and was not repeated by Vector Agent.",
   raw_egress_unavailable: "The scope-restricted raw network path was unavailable.",
   lease_issued: "A short-lived scope-bound network rule was issued for Nmap.",
@@ -197,6 +203,13 @@ function compoundReasonExplanation(reason: string): string | null {
       `Partial coverage: at least one ${tools || "check"} check stopped at its time budget before it finished. ` +
       `Everything it reported before that is real, but a short findings list does NOT mean the ` +
       `examined surface is clean. Technical detail: ${detail}.`
+    );
+  }
+  if (reason.startsWith("pipeline_error:")) {
+    const [, type = "an error", phase = "an unknown"] = reason.split(":");
+    return (
+      `The scan stopped because of an internal error (${type}) while it was in the ${phase} phase. ` +
+      `Results found before that are kept. Technical detail: ${reason}.`
     );
   }
   if (reason.startsWith("agent_incomplete:")) {

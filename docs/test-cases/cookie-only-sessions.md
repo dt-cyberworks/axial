@@ -55,3 +55,16 @@ Expected results:
 - `test_same_origin_cookie_post_with_the_header_is_accepted`, `test_trusted_dev_origin_is_accepted`.
 - `test_safe_methods_need_no_header`, `test_bearer_authenticated_requests_are_exempt`.
 - `test_cookie_sign_out_follows_the_same_rules`.
+
+## Live verification (2026-10-01, dev stack)
+
+Against the running stack with a real password and TOTP login: neither `/auth/login` nor
+`/auth/login/mfa` carries a session token in its body; the session cookie is `HttpOnly` and
+`SameSite=Strict`; after a real browser login through the console `sessionStorage` and
+`localStorage` are empty and `document.cookie` does not expose the session cookie. A
+cookie-authenticated `POST` without the `X-Requested-With` header is refused with `403`
+("missing anti-CSRF header"); with the header but `Origin: https://evil.example` it is refused
+with `403` ("request origin not allowed"); with the header and the console's own origin it passes
+the gate (the request then answers `404` for the engagement that does not exist). The int UAT
+golden path (login, wizard, edit, delete, log out) also ran through the cookie-only flow on
+2026-10-01.

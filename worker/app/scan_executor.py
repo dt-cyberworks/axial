@@ -21,7 +21,10 @@ import logging
 import time
 from collections.abc import Callable
 
+import httpx
+
 from app import tool_execution
+from app.cancel_probe import CancelProbe, CancellationStatusUnavailable
 from app.control_plane_client import ScanRunSuperseded
 
 logger = logging.getLogger(__name__)
@@ -95,12 +98,34 @@ def _dependency_ready(check: dict, states: dict[tuple[str, str], dict], surface_
     return row is None or row["state"] in _TERMINAL
 
 
+_CHECK_WRITE_ATTEMPTS = 3
+_CHECK_WRITE_BACKOFF_SECONDS = 0.5
+
+
+def _write_check(client, scan_run_id: str, check_id, **fields) -> dict:
+    """GitHub issue #49: a check's state is its checkpoint, so a failed write must not
+    silently lose it, and a busy control plane must not crash the run. Transport
+    errors and 5xx are retried (the update is idempotent); a superseded attempt
+    (409) and any other answer are not."""
+    for attempt in range(1, _CHECK_WRITE_ATTEMPTS + 1):
+        try:
+            return client.update_scan_check(scan_run_id, check_id, **fields)
+        except ScanRunSuperseded:
+            raise
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            retryable = isinstance(exc, httpx.TransportError) or exc.response.status_code >= 500
+            if not retryable or attempt == _CHECK_WRITE_ATTEMPTS:
+                raise
+            logger.warning("writing check %s failed (attempt %d): %s", check_id, attempt, type(exc).__name__)
+            time.sleep(_CHECK_WRITE_BACKOFF_SECONDS * attempt)
+
+
 def _run_one(
     client, scan_run_id: str, engagement_id: str, surface: dict, check: dict,
     handler: Handler | None, dependencies: dict[str, dict],
 ) -> dict:
     started = time.monotonic()
-    client.update_scan_check(scan_run_id, check["id"], state="running")
+    _write_check(client, scan_run_id, check["id"], state="running")
     run = CheckRun(engagement_id, scan_run_id, surface, check, dependencies)
     crashed: Exception | None = None
     with tool_execution.collect() as collector:
@@ -111,6 +136,8 @@ def _run_one(
                 handler(run)
             except ScanRunSuperseded:
                 raise
+            except CancellationStatusUnavailable:
+                run.forced_state = ("failed", "cancellation_status_unavailable")
             except Exception as exc:  # noqa: BLE001 - one check's error never stops the others
                 logger.exception("check %s on %s:%s failed", check["check_id"], run.host, run.port)
                 crashed = exc
@@ -132,7 +159,7 @@ def _run_one(
         fields["args"] = run.args
     if run.budget_s is not None:
         fields["budget_s"] = run.budget_s
-    return client.update_scan_check(scan_run_id, check["id"], **fields)
+    return _write_check(client, scan_run_id, check["id"], **fields)
 
 
 def execute_plan(
@@ -147,12 +174,27 @@ def execute_plan(
     pending = [(sid, c) for sid, c in rows if c["state"] in _UNFINISHED]
     result = ExecutionResult()
     running: dict[concurrent.futures.Future, tuple[str, dict]] = {}
+    probe = CancelProbe(is_cancelled, label=f"scan run {scan_run_id}")
+    unavailable: CancellationStatusUnavailable | None = None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, max_parallel), thread_name_prefix="check") as pool:
         while pending or running:
-            if not result.cancelled and is_cancelled():
-                result.cancelled = True
-            while not result.cancelled and pending and len(running) < max(1, max_parallel):
+            hold = False
+            if not result.cancelled:
+                try:
+                    status = probe.check()
+                except CancellationStatusUnavailable as exc:
+                    # GitHub issue #49, fail closed: start nothing more. The checks
+                    # already running stop themselves the same way in the runner
+                    # client. The run ends with this cause once they are done.
+                    logger.error("plan of %s: %s - no further checks are started", scan_run_id, exc)
+                    unavailable = exc
+                    result.cancelled = True
+                else:
+                    if status is True:
+                        result.cancelled = True
+                    hold = status is None  # no answer yet: start nothing new this round
+            while not result.cancelled and not hold and pending and len(running) < max(1, max_parallel):
                 ready = next(((sid, c) for sid, c in pending if _dependency_ready(c, states, sid)), None)
                 if ready is None:
                     break
@@ -166,6 +208,9 @@ def execute_plan(
                 running[future] = (sid, check)
             if result.cancelled:
                 pending.clear()
+            if hold and not running:
+                time.sleep(_POLL_SECONDS)  # no cancel answer yet and nothing running: ask again shortly
+                continue
             if not running:
                 if pending:  # nothing runnable and nothing running: unreachable dependencies
                     logger.error("scan plan of %s has %d checks that can never run", scan_run_id, len(pending))
@@ -182,4 +227,8 @@ def execute_plan(
                 states[(sid, check["check_id"])] = finished
                 result.ran += 1
                 result.by_state[finished["state"]] = result.by_state.get(finished["state"], 0) + 1
+    if unavailable is not None:
+        # The remaining checks stay `planned`, so a resumed run picks them up; the
+        # caller ends this run as aborted/cancellation_status_unavailable.
+        raise unavailable
     return result

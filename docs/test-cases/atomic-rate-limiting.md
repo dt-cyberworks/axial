@@ -38,3 +38,15 @@ Expected results:
 - `test_negative_the_proxy_endpoint_refuses_without_a_bounty_program`, `test_engagements_are_counted_separately`, `test_gateway_and_proxy_paths_have_their_own_counter`.
 - `test_gateway_fractional_rate.py` - issue #19's widened windows against the reservation primitive.
 - Proxy tests: no reserved slot means no forwarding; an unreachable control plane fails closed.
+
+## Live verification (2026-10-01, dev and int)
+
+The gateway path is exercised by every real scan: within the last hour of the dev scans of
+2026-09-30/10-01 the gateway wrote 41 `rate_reservation` rows (path `gateway`), and on int 26 during
+the UAT scan journey; those scans completed normally with the reservation in front of each call
+(older rows are purged by the reservation itself after an hour, so the counts are a floor).
+
+Not exercised live: the proxy path, which only applies to bug-bounty engagements. None exists on
+dev or int, so the atomicity of that path rests on the barrier-synchronized concurrent tests
+above, which is the acceptance criterion of GitHub issue #40. A live check would need a bug-bounty
+engagement with a program policy and is left to the first real use.

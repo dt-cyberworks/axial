@@ -145,7 +145,7 @@ def test_negative_a_superseded_task_that_fails_does_not_overwrite_the_new_owners
     monkeypatch.setattr(pipeline.discovery, "run", _boom)
     with pytest.raises(RuntimeError):
         h.go()
-    assert calls == [{"state": "failed", "state_reason": "pipeline_error"}]  # attempted, refused, swallowed
+    assert calls == [{"state": "failed", "state_reason": "pipeline_error:RuntimeError:discovery"}]  # attempted, refused, swallowed
 
 
 def test_req_pipe_014_a_run_stored_at_the_removed_validate_phase_continues_at_score(monkeypatch):

@@ -48,7 +48,7 @@ def test_proxy_request_fails_closed_when_audit_is_unavailable(monkeypatch):
     def unavailable(*args, **kwargs):
         raise OSError("control plane unavailable")
 
-    monkeypatch.setattr(proxy, "submit_audit", unavailable)
+    monkeypatch.setattr(proxy, "submit_audit_batch", unavailable)
     writer = Writer()
     result = asyncio.run(proxy._submit_audit_or_deny(writer, "engagement", "ALLOW", "ok", {}))
     assert result is False

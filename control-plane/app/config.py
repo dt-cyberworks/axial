@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://asm:asm@localhost:5432/asm"
     redis_url: str = "redis://localhost:6379/0"
 
+    # Origins a browser console may call this API from, comma-separated. The default
+    # is the development console (Vite on port 5173). Production serves the console
+    # and the API from one origin and needs none. The manual's screenshot generator
+    # (REQ-MANUAL-004) runs its throwaway console on another port and sets this.
+    cors_allowed_origins: str = "http://localhost:5173"
+
     # GitHub issue #31 (REQ-IAM-016): attempts per source IP on the
     # unauthenticated login steps, per window. Looser than the per-account
     # lockout, so several users behind one address can still sign in.
@@ -107,6 +113,21 @@ class Settings(BaseSettings):
 
     default_max_rps: float = 5.0
 
+    # GitHub issue #49 (REQ-PIPE-019): the database pool, sized on purpose. The
+    # SQLAlchemy defaults (5 + 10, 30 s checkout) were shorter than the demand of a
+    # scan with the console open and far longer than the worker's 2 s cancel-check
+    # timeout, so a stall looked like a dead control plane.
+    db_pool_size: int = 10
+    db_max_overflow: int = 10
+    db_pool_timeout_seconds: float = 10.0
+    # The egress proxy's audit and rate-reservation calls (100+ per second in a
+    # scan) may hold at most this many database connections at once, so cancel
+    # checks, heartbeats and the console always find a free one. A caller that
+    # cannot get a slot within internal_bulk_wait_seconds gets 503 and the proxy
+    # fails closed (REQ-EGRESS-003).
+    internal_bulk_db_slots: int = 4
+    internal_bulk_wait_seconds: float = 3.0
+
     # REQ-IAM-004: encrypts TOTP secrets at rest (Fernet key, urlsafe-base64
     # 32 bytes). Separate from the DB credential on purpose - a compromised
     # DB dump alone must not yield usable MFA secrets. No key ships in source:
@@ -124,6 +145,9 @@ class Settings(BaseSettings):
     settings_encryption_key: str = ""
     settings_encryption_key_previous: str = ""
 
+
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
 
     @model_validator(mode="after")
     def reject_insecure_production_defaults(self):
@@ -162,6 +186,11 @@ class Settings(BaseSettings):
             insecure.append("raw_egress_lease_ttl_seconds")
         if not 1 <= self.nmap_max_rate <= 1000:
             insecure.append("nmap_max_rate")
+        if not (1 <= self.db_pool_size <= 100 and 0 <= self.db_max_overflow <= 100
+                and 1 <= self.db_pool_timeout_seconds <= 60):
+            insecure.append("db_pool")
+        if not 1 <= self.internal_bulk_db_slots < self.db_pool_size + self.db_max_overflow:
+            insecure.append("internal_bulk_db_slots")
         if "asm:asm@" in self.database_url or "localhost" in self.database_url:
             insecure.append("database_url")
         if self.s3_access_key == "minioadmin" or self.s3_secret_key == "minioadmin":

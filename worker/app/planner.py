@@ -33,6 +33,9 @@ COMMON_PRODUCTS = (
 )
 
 SCAN_PROFILES = ("standard", "thorough")
+# REQ-PIPE-017: the thorough profile's deep content-discovery sweep.
+DEEP_FFUF_CHECK_ID = "ffuf:deep"
+DEEP_FFUF_WORDLIST = "raft-medium-dirs"
 # Templates per nuclei call: small enough that a call's budget stays far below
 # the runner maximum and a stopped call loses little.
 SHARD_TARGET = 400
@@ -158,10 +161,13 @@ def _plan_checks(surface: SurfaceInput, options: Options, index: IndexInfo) -> l
 
     if cls == "web_alias":
         target = surface.alias_of or "another surface"
-        return [_skipped(cid, tool, f"web_alias_of:{target}") for cid, tool in (
+        skipped = [
             ("wafw00f", "wafw00f"), ("testssl", "testssl"), ("header_findings", "httpx"), ("ffuf", "ffuf"),
             ("screenshot", "screenshot"), ("katana", "katana"), ("nuclei", "nuclei"),
-        )]
+        ]
+        if options.scan_profile == "thorough":
+            skipped.insert(4, (DEEP_FFUF_CHECK_ID, "ffuf"))
+        return [_skipped(cid, tool, f"web_alias_of:{target}") for cid, tool in skipped]
 
     if cls == "tls_service":
         return [_planned("testssl", "testssl", "tls_service", {"starttls": surface.starttls} if surface.starttls else {})]
@@ -197,6 +203,12 @@ def _plan_checks(surface: SurfaceInput, options: Options, index: IndexInfo) -> l
         checks.extend(_nuclei_selection_checks(surface, options, index))
         checks.append(_planned("nuclei:headless", "nuclei", "web", {"mode": "headless"}))
         checks.append(_planned("nuclei:takeover", "nuclei", "web", {"mode": "takeover"}))
+    if options.scan_profile == "thorough":
+        # REQ-PIPE-017: the full-list sweep is a planned check with a budget
+        # sized to its list (about 25 minutes), not an agent call that a 4-minute
+        # cap cuts at ~15 %. After the cheap and the nuclei checks, so a run cut
+        # short still holds their signal.
+        deep(DEEP_FFUF_CHECK_ID, "ffuf", "thorough:deep_content_discovery", {"wordlist": DEEP_FFUF_WORDLIST})
     deep("nuclei:endpoints", "nuclei", "crawled_endpoints", {"mode": "endpoints"},
          enabled=options.crawling, depends_on="katana")
     for part in sorted(NUCLEI_OOB_PARTS):

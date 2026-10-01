@@ -25,6 +25,8 @@ from app.models.engagement import BountyProgram, Engagement, ScopeAsset, ToolGra
 class Blocker:
     code: str
     message: str
+    # GitHub issue #48: where the operator fixes it (a GUI section), or None.
+    action: str | None = None
 
 
 @dataclasses.dataclass
@@ -78,7 +80,9 @@ def evaluate(db: Session, engagement_id) -> Readiness:
     if active_grant is None:
         blockers.append(Blocker(
             "no_active_tool_grant",
-            "No active tool grant exists. Grant at least one active tool category to run a scan.",
+            "No tool category is granted for active testing on this engagement. "
+            "Grant at least one under Tool grants to run a scan.",
+            action="tool_grants",
         ))
 
     if eng.source == "bug_bounty":

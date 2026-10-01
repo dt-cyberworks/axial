@@ -23,7 +23,10 @@ Implementation: [`control-plane/app/api/`](../control-plane/app/api/).
 | `GET` | `/engagements/{id}/screenshots/{screenshot_id}/image` | the PNG; `nosniff`, `Cache-Control: private, no-store`; 404 for another owner's engagement |
 | `POST` | `/engagements/{id}/scope-assets` | wizard step 3 (allow/deny) |
 | `GET` | `/engagements/{id}/scope-assets` | scope list |
-| `POST` | `/engagements/{id}/tool-grants` | wizard step 4 (steps matrix) |
+| `GET` | `/engagements/{id}/tool-grants` | the granted categories with their manual-approval tools |
+| `POST` | `/engagements/{id}/tool-grants` | grant a category (`tool_category`, `mode` passive/active, `manual_tools`). Allowed until the engagement is `completed`/`revoked` (REQ-TOOL-006); an ACTIVE category on an engagement that has left draft needs `confirm_widening: true` (else 409 `confirmation_required`); refused with 409 `scan_run_active` while a scan runs; audited as `tool_grant_added`. Saving never resets a campaign's per-tool on/off switch |
+| `DELETE` | `/engagements/{id}/tool-grants/{category}/{mode}` | take a grant away (204; 404 if none; 409 when completed/revoked); allowed while a scan runs; the gateway denies the category from the next call; audited as `tool_grant_removed` (REQ-TOOL-007) |
+| `GET` | `/engagements/{id}/config` | the effective per-tool configuration; per tool `granted` (is its category granted here) and `unavailable_reason` (`not_installed`, `category_not_granted`, `off_for_campaign`, `off_in_settings`, `off_by_default`) |
 | `POST` | `/engagements/{id}/bounty-program` | wizard step 5 (conditional) |
 | `POST` | `/engagements/{id}/activate` | wizard step 6 (authorization checklist) |
 | `GET` | `/engagements/{id}/stream` (SSE) | live log + phase progress |

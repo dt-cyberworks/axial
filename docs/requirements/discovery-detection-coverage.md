@@ -57,4 +57,6 @@ Acceptance criteria:
 - Every default-enabled tool either has a caller in the worker or is listed as
   a known exception with a reason. `subfinder` is the one exception until
   REQ-COVER-001 decides how it runs.
-- The in-app documentation and the tool catalog match the registry.
+- The manual's tool page (`docs/manual/tools.md`) and the tool catalog match the registry.
+  (`make manual-check` fails when an installed tool is missing from the manual; the
+  catalog stays the single source for command lines.)

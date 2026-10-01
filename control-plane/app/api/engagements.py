@@ -49,7 +49,9 @@ from app.schemas.engagement import (
     ScopeAssetCreate,
     ScopeAssetOut,
     ScopeAuthorizationVerificationCreate,
+    ToolCategoryName,
     ToolGrantCreate,
+    ToolGrantMode,
     ToolGrantOut,
 )
 from app.schemas.internal import ScanRunOut
@@ -202,6 +204,11 @@ def _authorization_config_payload(eng: Engagement, assets: list[ScopeAsset], gra
             for g in grants
         ],
         "manual_approval_tools": [p.tool_name for p in policies if p.requires_manual_approval],
+        # GitHub issue #48: the campaign's per-tool on/off switches are part of what the
+        # gateway enforces (step 5b), so an export must show them too.
+        "campaign_tool_switches": [
+            {"tool": p.tool_name, "enabled": bool(p.enabled)} for p in policies if p.enabled is not None
+        ],
         "discovery_switches": _discovery_switches(eng),
     }
 
@@ -363,13 +370,34 @@ def get_engagement_config(engagement_id: uuid.UUID, db: Session = Depends(get_db
     enabled/requires_approval mit Herkunft, plus die effektive Agent-Anweisung
     und ob sie kampagnenspezifisch ueberschrieben ist."""
     eng = _get_engagement_or_404(db, engagement_id)
-    tools = [
-        {"tool": c.tool, "enabled": c.enabled, "requires_approval": c.requires_approval,
-         "enabled_source": c.enabled_source, "approval_source": c.approval_source,
-         "category": (registry.get(c.tool).category if registry.get(c.tool) else None),
-         "installed": (registry.get(c.tool).installed if registry.get(c.tool) else False)}
-        for c in config_resolver.effective_tool_policy(db, engagement_id)
-    ]
+    granted_modes = {
+        (g.tool_category, g.mode) for g in db.scalars(select(ToolGrant).where(ToolGrant.engagement_id == engagement_id))
+    }
+
+    def _status(c):
+        """GitHub issue #48: "enabled" alone says nothing about whether the tool's
+        category is granted on this engagement, so say why a tool cannot run."""
+        spec = registry.get(c.tool)
+        if spec is None or not spec.installed:
+            return False, "not_installed"
+        # The mode the gateway asks for (step 4): OSINT tools run passive, all others active.
+        granted = (spec.category, "passive" if spec.execution_class == "passive" else "active") in granted_modes
+        if not granted:
+            return False, "category_not_granted"
+        if not c.enabled:
+            return True, {"campaign": "off_for_campaign", "global": "off_in_settings"}.get(c.enabled_source, "off_by_default")
+        return True, None
+
+    tools = []
+    for c in config_resolver.effective_tool_policy(db, engagement_id):
+        granted, unavailable_reason = _status(c)
+        tools.append({
+            "tool": c.tool, "enabled": c.enabled, "requires_approval": c.requires_approval,
+            "enabled_source": c.enabled_source, "approval_source": c.approval_source,
+            "category": (registry.get(c.tool).category if registry.get(c.tool) else None),
+            "installed": (registry.get(c.tool).installed if registry.get(c.tool) else False),
+            "granted": granted, "unavailable_reason": unavailable_reason,
+        })
     return {
         "tools": tools,
         "agent_prompt": config_resolver.effective_agent_prompt(db, engagement_id),
@@ -678,40 +706,93 @@ def list_tool_grants(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     ]
 
 
+def _require_editable_grants(eng: Engagement) -> None:
+    if eng.status in ("completed", "revoked"):
+        raise HTTPException(409, f"tool grants cannot be changed on a {eng.status} engagement")
+
+
+def _scan_run_active(db: Session, engagement_id: uuid.UUID) -> bool:
+    return db.scalar(
+        select(ScanRun.id).where(
+            ScanRun.engagement_id == engagement_id, ScanRun.state.in_(("running", "waiting_approval"))
+        ).limit(1)
+    ) is not None
+
+
 @router.post("/{engagement_id}/tool-grants", response_model=ToolGrantOut, status_code=201)
-def add_tool_grant(engagement_id: uuid.UUID, body: ToolGrantCreate, db: Session = Depends(get_db)):
-    """Wizard Schritt 4 (UI Kap. 2.1): category grant + concrete manual tools."""
-    _get_engagement_or_404(db, engagement_id)
+def add_tool_grant(
+    engagement_id: uuid.UUID, body: ToolGrantCreate, db: Session = Depends(get_db), user: User = Depends(require_user),
+):
+    """Wizard Schritt 4 (UI Kap. 2.1): category grant + concrete manual tools.
+
+    GitHub issue #48 (REQ-TOOL-006..008): grants can be changed until the engagement
+    is completed or revoked, not only in draft. The gateway reads grants on every call,
+    so a change applies to the next tool call. Two guards follow from that:
+    granting an ACTIVE category after the engagement left draft widens its authority
+    and needs an explicit confirmation, and nothing is added while a scan is running
+    (removing always works - it only narrows). Every change is audited with its actor."""
+    eng = _get_engagement_or_404(db, engagement_id)
+    _require_editable_grants(eng)
     manual_tools = sorted(set(body.manual_tools or []))
     category_tools = _tools_for_category(body.tool_category)
     invalid_tools = [tool for tool in manual_tools if tool not in category_tools]
     if invalid_tools:
         raise HTTPException(400, f"manual tools do not belong to category {body.tool_category}: {', '.join(invalid_tools)}")
 
-    grant = ToolGrant(
+    existing_grant = db.get(ToolGrant, {"engagement_id": engagement_id, "tool_category": body.tool_category, "mode": body.mode})
+    widening = body.mode == "active" and existing_grant is None and eng.status != "draft"
+    if eng.status != "draft":
+        if _scan_run_active(db, engagement_id):
+            raise HTTPException(
+                409, "scan_run_active: tool grants cannot be added or changed while a scan is running; "
+                     "wait for it to finish or cancel it first (removing a grant is always possible)")
+        if widening and not body.confirm_widening:
+            raise HTTPException(
+                409, f"confirmation_required: granting active {body.tool_category} tools widens what this "
+                     f"engagement is authorized to do; confirm to proceed")
+
+    db.merge(ToolGrant(
         engagement_id=engagement_id,
         tool_category=body.tool_category,
         mode=body.mode,
         requires_manual_approval=body.requires_manual_approval,
-    )
-    db.merge(grant)
+    ))
 
-    if body.mode == "active":
-        if category_tools:
-            db.execute(
-                delete(ToolApprovalPolicy).where(
+    if body.mode == "active" and category_tools:
+        # Only the approval flag is owned by this editor. A campaign's on/off switch
+        # (`enabled`, set on the Edit page) lives in the same row and is kept - the
+        # row used to be deleted outright, silently resetting those choices.
+        rows = {
+            r.tool_name: r for r in db.scalars(
+                select(ToolApprovalPolicy).where(
                     ToolApprovalPolicy.engagement_id == engagement_id,
                     ToolApprovalPolicy.tool_name.in_(category_tools),
                 )
             )
-        for tool_name in manual_tools:
-            db.merge(ToolApprovalPolicy(
-                engagement_id=engagement_id,
-                tool_name=tool_name,
-                requires_manual_approval=True,
-            ))
+        }
+        for tool_name in sorted(category_tools):
+            needs_approval = tool_name in manual_tools
+            row = rows.get(tool_name)
+            if row is None:
+                if needs_approval:
+                    db.add(ToolApprovalPolicy(engagement_id=engagement_id, tool_name=tool_name, requires_manual_approval=True))
+                continue
+            row.requires_manual_approval = needs_approval
+            if row.enabled is None and not needs_approval:
+                db.delete(row)  # nothing left in it: the tool follows the global policy again
 
-    db.commit()
+    # Change and audit row are one transaction (append_audit_log commits both).
+    append_audit_log(
+        db, engagement_id=engagement_id, actor=f"user:{user.email}", action="tool_grant_added", decision="ALLOW",
+        reason="operator_granted_tool_category",
+        payload={
+            "tool_category": body.tool_category, "mode": body.mode,
+            "requires_manual_approval": body.requires_manual_approval,
+            "manual_tools": manual_tools if body.mode == "active" else [],
+            "replaced_existing_grant": existing_grant is not None,
+            "engagement_status": eng.status, "confirmed_widening": bool(widening and body.confirm_widening),
+        },
+    )
     saved = db.get(ToolGrant, {"engagement_id": engagement_id, "tool_category": body.tool_category, "mode": body.mode})
     return ToolGrantOut(
         engagement_id=engagement_id,
@@ -722,6 +803,28 @@ def add_tool_grant(engagement_id: uuid.UUID, body: ToolGrantCreate, db: Session 
     )
 
 
+@router.delete("/{engagement_id}/tool-grants/{tool_category}/{mode}", status_code=204)
+def remove_tool_grant(
+    engagement_id: uuid.UUID, tool_category: ToolCategoryName, mode: ToolGrantMode,
+    db: Session = Depends(get_db), user: User = Depends(require_user),
+):
+    """GitHub issue #48: a grant can be taken away again. It only narrows what the
+    engagement may do, so it is allowed at any time before the engagement ends,
+    also while a scan runs: the gateway denies that category from the next call on
+    (`no_tool_grant`). Campaign on/off switches and approval flags are left alone."""
+    eng = _get_engagement_or_404(db, engagement_id)
+    _require_editable_grants(eng)
+    grant = db.get(ToolGrant, {"engagement_id": engagement_id, "tool_category": tool_category, "mode": mode})
+    if grant is None:
+        raise HTTPException(404, "tool grant not found")
+    db.delete(grant)
+    append_audit_log(
+        db, engagement_id=engagement_id, actor=f"user:{user.email}", action="tool_grant_removed", decision="ALLOW",
+        reason="operator_removed_tool_grant",
+        payload={"tool_category": tool_category, "mode": mode, "engagement_status": eng.status,
+                 "scan_run_active": _scan_run_active(db, engagement_id)},
+    )
+    return Response(status_code=204)
 
 
 def _asset_type_for_override_target(target: str) -> str:
@@ -887,7 +990,7 @@ def get_scan_readiness(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     die engagement-weiten Blocking-Bedingungen des Gateways (REQ-RUN-002)."""
     _get_engagement_or_404(db, engagement_id)
     r = scan_readiness.evaluate(db, engagement_id)
-    return {"ready": r.ready, "blockers": [{"code": b.code, "message": b.message} for b in r.blockers]}
+    return {"ready": r.ready, "blockers": [{"code": b.code, "message": b.message, "action": b.action} for b in r.blockers]}
 
 
 @router.post("/{engagement_id}/scan", status_code=202)
@@ -905,7 +1008,7 @@ def start_scan(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     r = scan_readiness.evaluate(db, engagement_id)
     if not r.ready:
         raise HTTPException(409, {"error": "engagement_not_scan_ready",
-                                  "blockers": [{"code": b.code, "message": b.message} for b in r.blockers]})
+                                  "blockers": [{"code": b.code, "message": b.message, "action": b.action} for b in r.blockers]})
     # REQ-AGENT-008: effektives Iterationsbudget (Kampagne -> global ->
     # eingebauter Default) statt eines hartcodierten Werts.
     max_iterations = config_resolver.effective_agent_max_iterations(db, engagement_id)

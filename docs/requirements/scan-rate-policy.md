@@ -82,7 +82,7 @@ Acceptance criteria:
 
 **Security review (REQ-RATE-005, R3):** approved by johannes (project/security owner) on
 2026-09-29, after the concurrent-caller tests and the advisory-lock mutation check.
-Live verification is owed at deploy time.
+Live verification is recorded in the test case (2026-10-01): the gateway path in real scans; the proxy path (bug-bounty only) is covered by the concurrent tests.
 
 GitHub issue #40: the gateway and the egress proxy each counted recent
 `ALLOW` rows in the audit log and then decided, with nothing reserved in

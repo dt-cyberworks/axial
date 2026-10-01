@@ -99,3 +99,40 @@ def test_negative_settings_encryption_key_missing_or_malformed_fails_closed(bad_
     Fernet cipher must be caught here too, not only the literal empty case."""
     with pytest.raises(ValueError, match="settings_encryption_key"):
         Settings(**{**_SECURE_KWARGS, "settings_encryption_key": bad_key})
+
+
+@pytest.mark.parametrize("override", [
+    {"db_pool_size": 0},
+    {"db_pool_size": 101},
+    {"db_max_overflow": -1},
+    {"db_pool_timeout_seconds": 0},
+    {"db_pool_timeout_seconds": 61},
+    {"internal_bulk_db_slots": 0},
+    {"internal_bulk_db_slots": 20},  # the bulk writers may not be able to take every connection (10 + 10)
+])
+def test_negative_unsafe_database_pool_settings_are_refused_in_production(override):
+    """GitHub issue #49: the pool and the bulk-writer slots are sized on purpose; a
+    value that lets the proxy's audit traffic take every connection, or that makes a
+    checkout wait longer than a minute, must not start in production."""
+    with pytest.raises(ValueError):
+        Settings(**{**_SECURE_KWARGS, **override})
+
+
+def test_the_default_pool_settings_leave_headroom_for_the_control_path():
+    s = Settings(**_SECURE_KWARGS)
+    assert s.internal_bulk_db_slots < s.db_pool_size + s.db_max_overflow
+    assert s.db_pool_timeout_seconds < 30  # shorter than SQLAlchemy's default, longer than the worker's 2 s poll
+
+
+def test_cors_origins_default_to_the_dev_console_and_can_be_overridden():
+    """The throwaway console of the manual's screenshot generator runs on another port."""
+    assert Settings(environment="development").cors_origin_list() == ["http://localhost:5173"]
+    custom = Settings(environment="development", cors_allowed_origins=" http://localhost:15173 , http://localhost:5173 ,")
+    assert custom.cors_origin_list() == ["http://localhost:15173", "http://localhost:5173"]
+
+
+def test_the_app_uses_the_configured_cors_origins():
+    from app.main import app
+
+    cors = next(m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware")
+    assert cors.kwargs["allow_origins"] == ["http://localhost:5173"]

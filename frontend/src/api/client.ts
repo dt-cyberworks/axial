@@ -294,7 +294,8 @@ export interface ScanPlan {
 
 export interface ScanReadiness {
   ready: boolean;
-  blockers: { code: string; message: string }[];
+  // GitHub issue #48: `action` names the GUI section where it is fixed ("tool_grants"), or null.
+  blockers: { code: string; message: string; action?: string | null }[];
 }
 
 export interface AgentStep {
@@ -497,6 +498,9 @@ export interface EngagementToolConfig {
   approval_source: "registry" | "global" | "campaign";
   category: string | null;
   installed: boolean;
+  // GitHub issue #48: "enabled" says nothing about whether the category is granted here.
+  granted: boolean;
+  unavailable_reason: "not_installed" | "category_not_granted" | "off_for_campaign" | "off_in_settings" | "off_by_default" | null;
 }
 
 export interface EngagementConfig {
@@ -732,8 +736,14 @@ export const api = {
       method: "POST", body: JSON.stringify({ excluded_values: excludedValues }),
     }),
 
-  addToolGrant: (id: string, body: { tool_category: string; mode: string; requires_manual_approval: boolean; manual_tools?: string[] }) =>
+  addToolGrant: (id: string, body: {
+    tool_category: string; mode: string; requires_manual_approval: boolean; manual_tools?: string[];
+    // GitHub issue #48: required when an ACTIVE category is added after the engagement left draft.
+    confirm_widening?: boolean;
+  }) =>
     request<ToolGrant>(`/engagements/${id}/tool-grants`, { method: "POST", body: JSON.stringify(body) }),
+  removeToolGrant: (id: string, category: string, mode: string) =>
+    request<void>(`/engagements/${id}/tool-grants/${category}/${mode}`, { method: "DELETE" }),
   listToolGrants: (id: string) => request<ToolGrant[]>(`/engagements/${id}/tool-grants`),
   listToolCapabilities: () => request<ToolCapabilitiesResponse>("/tools/capabilities"),
 

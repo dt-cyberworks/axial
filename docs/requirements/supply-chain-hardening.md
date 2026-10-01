@@ -78,6 +78,11 @@ Acceptance criteria:
   when to run it.
 - CI builds every image and publishes a CycloneDX SBOM per image as a workflow
   artifact.
+- The SBOM job has enough disk for the ~5 GB tool-runner image plus Trivy's
+  export of it: runner disk is freed first, the five small images are removed
+  from the image store before the tool-runner is built, and the tool-runner is
+  built and scanned last. (The job failed with `no space left on device` at the
+  tool-runner SBOM step on 2026-09-30.)
 - The built image still starts `hexstrike_server.py` and answers `/health`,
   rejects calls without the shared secret (REQ-HARDEN-001), has
   `cap_net_raw` on nmap, and runs the allowlisted tools.

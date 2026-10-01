@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { api, type ScanProfile, type ScopeAsset, type ToolCapability } from "../api/client";
 import DiscoverySwitches, { DEFAULT_DISCOVERY_FLAGS, discoveryFlagSummary, type DiscoveryFlags } from "../components/DiscoverySwitches";
@@ -28,10 +28,33 @@ function dateOnlyToIso(dateValue: string, endOfDay = false) {
   return date.toISOString();
 }
 
+// Inverse of dateOnlyToIso: the local calendar day the stored instant falls on.
+function isoToDateOnly(iso: string) {
+  const date = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+// GitHub issue #46: what makes two scope rows "the same" once saved, so a
+// second save of step 3 only sends rows that are new or were edited.
+function assetKey(asset: Partial<ScopeAsset>) {
+  return JSON.stringify([
+    asset.rule, asset.asset_type, (asset.value ?? "").trim(), asset.path_pattern ?? null,
+    !!asset.active_allowed, !!asset.authorization_verified, asset.port_from ?? null, asset.port_to ?? null,
+  ]);
+}
+
 export default function EngagementWizard() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const draftParam = searchParams.get("draft");
   const [step, setStep] = useState(1);
+  // GitHub issue #46: one wizard session owns exactly one draft. Once this is
+  // set, step 1 edits that draft (PATCH) and never creates another (POST); the
+  // id also lives in the URL (?draft=) so a reload resumes the draft.
   const [engagementId, setEngagementId] = useState<string | null>(null);
+  const ownDraftRef = useRef<string | null>(null);
+  const [savedAssets, setSavedAssets] = useState<{ id: string; key: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
@@ -139,20 +162,28 @@ export default function EngagementWizard() {
     }
     setIsCreating(true);
     try {
-      const eng = await api.createEngagement({
+      const fields = {
         title,
         ai_testing_allowed: aiTestingAllowed,
         authorized_from: dateOnlyToIso(authorizedFrom),
         authorized_until: dateOnlyToIso(authorizedUntil, true),
-        emergency_contact: emergencyContact || undefined,
         tcp_port_from: firstPort,
         tcp_port_to: lastPort,
         udp_discovery_enabled: udpDiscoveryEnabled,
         asset_review_enabled: assetReviewEnabled,
         ...discoveryFlags,
         scan_profile: scanProfile,
-      } as any);
+      };
+      // GitHub issue #46: going back to step 1 and saving again used to POST a
+      // second draft and orphan the first. A draft that already exists in this
+      // session is edited in place. PATCH only applies fields that are sent,
+      // so a cleared contact is sent as null (undefined would never clear it).
+      const eng = engagementId
+        ? await api.updateEngagement(engagementId, { ...fields, emergency_contact: emergencyContact || null })
+        : await api.createEngagement({ ...fields, emergency_contact: emergencyContact || undefined } as any);
+      ownDraftRef.current = eng.id; // this session made the draft: nothing to resume from the URL
       setEngagementId(eng.id);
+      setSearchParams({ draft: eng.id }, { replace: true });
       setStep(2);
     } catch (e) {
       setError((e as Error).message);
@@ -160,6 +191,67 @@ export default function EngagementWizard() {
       setIsCreating(false);
     }
   }
+
+  // GitHub issue #46: resume a draft from ?draft=<id> after a reload or a
+  // navigation away, instead of starting over and creating another draft. The
+  // server enforces ownership (other users' ids answer 404) and only a draft
+  // is resumable.
+  useEffect(() => {
+    if (!draftParam || engagementId || ownDraftRef.current === draftParam) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [eng, scope, existingGrants] = await Promise.all([
+          api.getEngagement(draftParam), api.listScopeAssets(draftParam), api.listToolGrants(draftParam),
+        ]);
+        if (cancelled) return;
+        if (eng.status !== "draft") {
+          setSearchParams({}, { replace: true });
+          setError("That engagement is no longer a draft. Open it from the dashboard instead.");
+          return;
+        }
+        setEngagementId(eng.id);
+        setTitle(eng.title);
+        setAuthorizedFrom(isoToDateOnly(eng.authorized_from));
+        setAuthorizedUntil(isoToDateOnly(eng.authorized_until));
+        setEmergencyContact(eng.emergency_contact ?? "");
+        setAiTestingAllowed(eng.ai_testing_allowed);
+        setTcpPortFrom(String(eng.tcp_port_from));
+        setTcpPortTo(String(eng.tcp_port_to));
+        setUdpDiscoveryEnabled(eng.udp_discovery_enabled);
+        setAssetReviewEnabled(eng.asset_review_enabled);
+        setDiscoveryFlags({
+          subfinder_enabled: eng.subfinder_enabled, crawling_enabled: eng.crawling_enabled,
+          oob_enabled: eng.oob_enabled, screenshots_enabled: eng.screenshots_enabled,
+        });
+        setScanProfile(eng.scan_profile);
+        if (scope.length > 0) {
+          setAssets(scope);
+          setSavedAssets(scope.map((asset) => ({ id: asset.id, key: assetKey(asset) })));
+        }
+        if (existingGrants.length > 0) {
+          const next = Object.fromEntries(
+            TOOL_CATEGORIES.map((category) => [category, { passive: false, active: false, manualTools: [] as string[] }]),
+          ) as GrantState;
+          for (const grant of existingGrants) {
+            const category = grant.tool_category as ToolCategory;
+            if (!TOOL_CATEGORIES.includes(category)) continue;
+            if (grant.mode === "passive") next[category].passive = true;
+            if (grant.mode === "active") { next[category].active = true; next[category].manualTools = grant.manual_tools; }
+          }
+          setGrants(next);
+          setManualDefaultsApplied(true); // the saved manual-approval choices win over the defaults
+        }
+        setStep(2);
+      } catch {
+        if (cancelled) return;
+        setSearchParams({}, { replace: true });
+        setError("Could not resume that draft. Start a new engagement instead.");
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftParam]);
 
   function addAssetRow() {
     setAssets((current) => [...current, { rule: "allow", asset_type: "domain", value: "", active_allowed: false, authorization_verified: false }]);
@@ -190,6 +282,36 @@ export default function EngagementWizard() {
     return "No passive tools in this category. Enable active only if target-touching checks are authorized.";
   }
 
+  // GitHub issue #46: POST /scope-assets does not deduplicate, so saving step 3
+  // a second time (after going back) used to duplicate every scope row. Only
+  // rows that are new or were edited since the last save are sent; a saved row
+  // that was edited is replaced (delete + add, there is no PATCH for scope
+  // rows). Progress is recorded even when a call fails part-way, so a retry
+  // never re-sends what already went through.
+  async function syncScopeAssets(id: string) {
+    const stale = [...savedAssets];
+    const toAdd: Partial<ScopeAsset>[] = [];
+    for (const asset of assets) {
+      if (!asset.value?.trim()) continue;
+      const at = stale.findIndex((saved) => saved.key === assetKey(asset));
+      if (at >= 0) stale.splice(at, 1); // saved and unchanged
+      else toAdd.push(asset);
+    }
+    let tracked = savedAssets;
+    try {
+      for (const old of stale) {
+        await api.deleteScopeAsset(id, old.id);
+        tracked = tracked.filter((saved) => saved.id !== old.id);
+      }
+      for (const asset of toAdd) {
+        const created = await api.addScopeAsset(id, asset);
+        tracked = [...tracked, { id: created.id, key: assetKey(asset) }];
+      }
+    } finally {
+      setSavedAssets(tracked);
+    }
+  }
+
   async function handleSaveAssetsAndGrants() {
     if (!engagementId) return;
     setError(null);
@@ -212,10 +334,7 @@ export default function EngagementWizard() {
       return;
     }
     try {
-      for (const asset of assets) {
-        if (!asset.value) continue;
-        await api.addScopeAsset(engagementId, asset);
-      }
+      await syncScopeAssets(engagementId);
       for (const category of TOOL_CATEGORIES) {
         const grant = grants[category];
         if (grant.passive && passiveToolsByCategory[category].length > 0) await api.addToolGrant(engagementId, { tool_category: category, mode: "passive", requires_manual_approval: false });
@@ -320,7 +439,7 @@ export default function EngagementWizard() {
             <p className="muted-line">This saves a draft. Nothing is scanned until you authorize and activate the engagement in step 5.</p>
             <div className="form-actions">
               <button onClick={handleCreateEngagement} disabled={isCreating || !title || !authorizedFrom || !authorizedUntil}>
-                {isCreating ? "Creating…" : "Save draft and continue"}
+                {isCreating ? (engagementId ? "Saving…" : "Creating…") : engagementId ? "Save changes and continue" : "Save draft and continue"}
               </button>
             </div>
           </section>

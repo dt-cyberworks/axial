@@ -7,6 +7,8 @@
 - [ ] Models, schemas, migrations, APIs, worker, and UI remain aligned.
 - [ ] Security invariants and trust boundaries remain intact.
 - [ ] Documentation touchpoints in `AGENTS.md` are updated.
+- [ ] A change to user-visible behavior updates the matching page of
+      `docs/manual/`, and `make manual-check` passes.
 - [ ] `make requirements-check` passes.
 - [ ] `make traceability` produces no diff.
 - [ ] `make verify` passes.

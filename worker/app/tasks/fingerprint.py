@@ -22,6 +22,7 @@ import time
 import uuid
 from urllib.parse import urlsplit
 
+from app.cancel_probe import CancelProbe
 from app.control_plane_client import client
 from app.discovery_parse import nuclei_candidate_urls, parse_katana_jsonl
 from app.ffuf_parse import is_catch_all, parse_ffuf_json
@@ -39,7 +40,7 @@ from app.surfaces import classify_open_port, redirect_alias_port
 from app.tech_profile import MAX_PROFILE_ENTRIES, build_profile
 from app.target_envelope import httpx_target, protocol_from_httpx_url, single_port_from_envelope, target_url
 from app.testssl_parse import parse_testssl_json, testssl_scan_problem
-from app.tool_runner_client import NUCLEI_OOB_PARTS, OOB_SERVER_URL, nuclei_select_budget_s, tool_runner
+from app.tool_runner_client import FFUF_WORDLISTS, NUCLEI_OOB_PARTS, OOB_SERVER_URL, nuclei_select_budget_s, tool_runner
 from app import scan_executor, tool_execution
 from app.wafw00f_parse import parse_wafw00f
 
@@ -148,8 +149,9 @@ def _propose(
         "tool": tool, "category": category, "mode": "active", "target": target, "args": args,
         "is_automated": True, "phase": phase, "scan_run_id": scan_run_id,
     }
+    cancel_probe = CancelProbe.for_run(scan_run_id) if scan_run_id else None
     for attempt in range(8):
-        if scan_run_id and client.is_cancel_requested(uuid.UUID(scan_run_id)):
+        if cancel_probe is not None and cancel_probe.is_cancelled():  # issue #49: raises when unreadable
             return None
         decision = client.authorize(uuid.UUID(engagement_id), payload)
         if decision["allowed"]:
@@ -613,7 +615,8 @@ _CONTENT_DISCOVERY_WORDLIST = "quickhits"
 
 
 def _content_discovery(engagement_id: str, asset_id: str, target: str, scan_run_id: str | None,
-                       single_port: int | None = None, confirmed_protocol: str | None = None) -> None:
+                       single_port: int | None = None, confirmed_protocol: str | None = None,
+                       wordlist: str = _CONTENT_DISCOVERY_WORDLIST) -> None:
     """ffuf: curated content discovery (fingerprint baseline, REQ-SCANQUAL-005).
 
     Previously ffuf only ran if the agent decided to call it mid-loop - the
@@ -624,7 +627,7 @@ def _content_discovery(engagement_id: str, asset_id: str, target: str, scan_run_
     confirmed issue the way the header check is."""
     url = _target_url(target, single_port, confirmed_protocol)
     port = single_port or 443
-    args = {"wordlist": _CONTENT_DISCOVERY_WORDLIST}
+    args = {"wordlist": wordlist}
     if _propose(engagement_id, "ffuf", "vuln", target, args, scan_run_id) is None:
         return
     try:
@@ -660,9 +663,9 @@ def _content_discovery(engagement_id: str, asset_id: str, target: str, scan_run_
         return
     _add_finding(
         engagement_id, asset_id=asset_id, category="exposure",
-        title=f"Content discovery: {len(hits)} path(s) found via ffuf ({_CONTENT_DISCOVERY_WORDLIST})",
+        title=f"Content discovery: {len(hits)} path(s) found via ffuf ({wordlist})",
         confidence="inferred",
-        evidence={"hits": hits, "wordlist": _CONTENT_DISCOVERY_WORDLIST, "tool": "ffuf", "port": port},
+        evidence={"hits": hits, "wordlist": wordlist, "tool": "ffuf", "port": port},
         exposure_factor=1.0, business_factor=0.4,
     )
 
@@ -1061,8 +1064,14 @@ def _h_testssl(r: CheckRun) -> None:
 
 
 def _h_ffuf(r: CheckRun) -> None:
+    """The quickhits check and the thorough profile's deep sweep (REQ-PIPE-017)
+    share this handler; the wordlist comes from the check's own stored args and
+    only a key the runner knows is used."""
+    wordlist = (r.check.get("args") or {}).get("wordlist")
+    known = isinstance(wordlist, str) and wordlist in FFUF_WORDLISTS
+    kwargs = {"wordlist": wordlist} if known and wordlist != _CONTENT_DISCOVERY_WORDLIST else {}
     _content_discovery(r.engagement_id, r.asset_id, r.host, r.scan_run_id, r.single_port,
-                       confirmed_protocol=r.protocol)
+                       confirmed_protocol=r.protocol, **kwargs)
 
 
 def _h_screenshot(r: CheckRun) -> None:

@@ -72,7 +72,8 @@ Acceptance criteria:
 - [Negative test] Running the built command against a local server with a
   range or list pattern in the path, for `GET`, `POST`, and `DELETE`,
   delivers exactly one request, with the path unchanged.
-- The in-app documentation's description of the command matches what runs.
+- The tool catalog's description of the command (`docs/security/tool-catalog.md`, the
+  single source the manual links to) matches what runs.
 
 ## REQ-APPROVAL-001: State-changing requests require per-command human approval
 
@@ -116,6 +117,11 @@ Acceptance criteria:
 - On approve, the request executes and its result is fed back to the agent, which
   continues; on reject or expiry, the agent records it and continues without it.
 - Multiple pending writes are presented individually (one popup per command).
+- The "What it will do" block shows the request line (method, path, target) on its
+  own line, with each header on a line of its own below it and the body after a blank
+  line, so the first header is never read as part of the target. (Found while
+  producing the manual's screenshots, GitHub issue #50: the line break was lost in
+  rendering, so the target and the first header ran together.)
 
 ## REQ-APPROVAL-005: The approval timeout is configurable (global default + per-engagement override)
 

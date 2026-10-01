@@ -146,3 +146,36 @@ def read_plan(db: Session, scan_run_id: uuid.UUID, *, internal: bool = False) ->
         "summary": {"checks": len(checks), "by_state": counts, "surfaces": len(surfaces)},
         "surfaces": [surface_out(s, by_surface.get(s.id, []), internal=internal) for s in surfaces],
     }
+
+
+# REQ-PIPE-018: what the Vector Agent is told about the run's own checks. Kept
+# small on purpose (LLM context) and free of anything the target returned.
+AGENT_CHECKS_PER_HOST = 60
+_AGENT_REASON_MAX = 80
+
+
+def agent_check_summary(db: Session, scan_run_id: uuid.UUID) -> dict[str, list[dict]]:
+    """host -> the run's finished or skipped checks, for the agent's evidence.
+
+    Only what the agent needs to avoid repeating work: port, tool, outcome and,
+    for ffuf, the wordlist key. A check that has not finished (planned or
+    running) is left out - it is still to come, not something to skip."""
+    rows = db.execute(
+        select(ScanSurface.host, ScanSurface.port, ScanCheck)
+        .join(ScanCheck, ScanCheck.surface_id == ScanSurface.id)
+        .where(ScanCheck.scan_run_id == scan_run_id, ScanCheck.state.in_(TERMINAL_STATES))
+        .order_by(ScanSurface.host, ScanSurface.port, ScanCheck.seq)
+    ).all()
+    out: dict[str, list[dict]] = {}
+    for host, port, check in rows:
+        items = out.setdefault(str(host).lower(), [])
+        if len(items) >= AGENT_CHECKS_PER_HOST:
+            continue
+        item = {"port": port, "check_id": check.check_id, "tool": check.tool, "state": check.state}
+        wordlist = (check.args or {}).get("wordlist") if check.tool == "ffuf" else None
+        if isinstance(wordlist, str):
+            item["wordlist"] = wordlist[:40]
+        if check.state == "skipped":
+            item["reason"] = str(check.reason or "")[:_AGENT_REASON_MAX]
+        items.append(item)
+    return out

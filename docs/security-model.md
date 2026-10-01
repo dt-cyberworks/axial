@@ -120,6 +120,15 @@ Tool grants step:
 | Active | Allows target-touching tools in a category, but only after scope, time window, allowlist, and argument checks pass. | Stored as `tool_grant(mode='active')`; checked by the Scope Gateway. |
 | Manual approval | Marks concrete active tools, such as `nmap` or `nuclei`, that must pause for an operator approval before execution. | Stored in `tool_approval_policy`; creates an `approval_request` when the otherwise-allowed call reaches the gateway. |
 
+Grants can be changed until an engagement is completed or revoked, not only in draft
+(REQ-TOOL-006..008). The gateway reads them on every call, so a change applies from the next
+call. Granting an ACTIVE category after the engagement left draft widens its authority and
+requires an explicit confirmation; nothing is added while a scan is running (removing is always
+possible, it only narrows); every addition and removal is written to the hash-chained audit log
+with the acting user. Only the owner or an admin can change them (REQ-IAM-007). A campaign's
+per-tool switches (Edit engagement) can only narrow what the grants allow: "Force on" never
+replaces a grant, and saving grants never resets those switches.
+
 Manual approval is not a separate permission to run a category. If a category is
 not active, selected tools in that category cannot run and no manual approval is
 requested. The approval prompt only appears after the gateway has already

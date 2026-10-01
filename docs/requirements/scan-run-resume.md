@@ -24,7 +24,8 @@ replaced worker cannot write.
 **Security review:** approved by johannes (project/security owner) on
 2026-09-29 ("I approve all changes"), after the negative tests and the
 mutation checks listed in the linked test cases. Live verification on the
-dev stack is still owed at deploy time and is recorded in the test case.
+dev stack is recorded in the test case (a real kill mid-fingerprint, resumed by
+the reaper, on 2026-09-30/10-01).
 
 Tests must verify these requirements directly. Do not weaken tests to match
 implementation; update implementation when it violates this document.

@@ -84,6 +84,22 @@ def test_ci_builds_every_image_and_emits_an_sbom_for_each():
     assert "format: cyclonedx" in CI and "actions/upload-artifact" in CI
 
 
+def test_ci_frees_disk_before_the_tool_runner_is_built_and_scanned():
+    """The ~5 GB tool-runner image plus Trivy's export tar under /tmp did not fit
+    on the stock runner ("no space left on device" at the tool-runner SBOM), so
+    disk is freed first and the five small images leave the store before the big
+    one is built; the tool-runner is built and scanned last."""
+    free = CI.index("Free runner disk space")
+    rm_small = CI.index("docker image rm asm/control-plane:ci")
+    build_runner = CI.index("-t asm/tool-runner:ci")
+    sbom_runner = CI.index("image-ref: asm/tool-runner:ci")
+    assert free < CI.index("-t asm/control-plane:ci")
+    assert rm_small < build_runner < sbom_runner
+    assert "docker builder prune" in CI[build_runner:sbom_runner]
+    for small in ("control-plane", "worker", "egress-proxy", "raw-egress-gateway", "edge"):
+        assert CI.index(f"image-ref: asm/{small}:ci") < rm_small, f"{small} SBOM must run before its image is removed"
+
+
 def _lock_version(name: str) -> tuple[int, ...]:
     for entry in _lock_entries():
         if entry.lower().startswith(f"{name}=="):

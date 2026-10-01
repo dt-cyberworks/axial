@@ -33,7 +33,7 @@ import time
 import uuid
 from urllib.parse import urlsplit
 
-from app.audit_client import reserve_rate_slot, submit_audit
+from app.audit_client import AuditBatcher, reserve_rate_slot, submit_audit_batch
 from app.ssrf_guard import BlockedAddressError, vet_target_host
 from app.db import (
     active_engagements_for_materialized_ip,
@@ -286,11 +286,17 @@ async def _read_request_line_and_headers(reader: asyncio.StreamReader) -> tuple[
         raise RequestTooSlowError("header_read_timeout") from exc
 
 
+# GitHub issue #49: audit events are committed in batches (one request, one lock,
+# one commit on the control plane) but every request still waits for its batch.
+# Looked up late so a test can replace submit_audit_batch.
+_audit_batcher = AuditBatcher(lambda engagement_id, events: submit_audit_batch(engagement_id, events))
+
+
 async def _submit_audit_or_deny(
     writer: asyncio.StreamWriter, engagement_id: str, decision: str, reason: str, payload: dict
 ) -> bool:
     try:
-        await asyncio.to_thread(submit_audit, engagement_id, decision, reason, payload)
+        await _audit_batcher.submit(engagement_id, decision, reason, payload)
         return True
     except Exception as exc:  # noqa: BLE001 - audit is a fail-closed legal control
         logger.error("audit submission failed for engagement %s: %s", engagement_id, exc)

@@ -2,13 +2,14 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
-import { api, isNotFound, type ReportJob, type ToolCapability } from "../api/client";
+import { api, isNotFound, type ReportJob } from "../api/client";
 import NotFound from "./NotFound";
 import ChunkErrorBoundary from "../components/ChunkErrorBoundary";
 import DnsSection from "../components/DnsSection";
 import DiscoverySection from "../components/DiscoverySection";
 import { discoveryFlagSummary } from "../components/DiscoverySwitches";
 import FindingsSection from "../components/FindingsSection";
+import ToolGrantsEditor from "../components/ToolGrantsEditor";
 import { fmtDuration, fmtTime, runStatePill } from "../lib/runs";
 
 // REQ-CONSOLE-015: the graph library is large and only this tab uses it.
@@ -23,20 +24,6 @@ const ENGAGEMENT_TABS = [
 type EngagementTab = typeof ENGAGEMENT_TABS[number]["id"];
 function parseEngagementTab(value: string | null): EngagementTab {
   return ENGAGEMENT_TABS.some((tab) => tab.id === value) ? (value as EngagementTab) : "findings";
-}
-
-const TOOL_CATEGORIES = ["recon", "fingerprint", "vuln", "cred", "exploit"] as const;
-type ToolCategory = typeof TOOL_CATEGORIES[number];
-type GrantState = Record<ToolCategory, { passive: boolean; active: boolean; manualTools: string[] }>;
-
-function emptyGrants(): GrantState {
-  return {
-    recon: { passive: false, active: false, manualTools: [] },
-    fingerprint: { passive: false, active: false, manualTools: [] },
-    vuln: { passive: false, active: false, manualTools: [] },
-    cred: { passive: false, active: false, manualTools: [] },
-    exploit: { passive: false, active: false, manualTools: [] },
-  };
 }
 
 /** REQ-CONSOLE-012: the highest open severity in English, instead of the API's
@@ -105,93 +92,10 @@ export default function EngagementDetail() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["scan-runs", id] }),
   });
 
-  // GitHub issue #16: granting tool categories and activating were only
-  // reachable inside the one-time creation wizard - a draft engagement that
-  // never finished the wizard (browser refresh, tab close, created via
-  // API/script) had no GUI path forward at all. This mirrors
-  // EngagementWizard.tsx's Tools/Authorize steps, but reads back what is
-  // already granted instead of assuming a blank slate.
+  // GitHub issue #16 / #48: a draft that never finished the wizard is activated from
+  // here; its tool grants use the shared ToolGrantsEditor (also on the Edit page, where
+  // grants can be changed after activation).
   const isDraft = engagement?.status === "draft";
-  const { data: toolCapabilities } = useQuery({
-    queryKey: ["tool-capabilities"], queryFn: api.listToolCapabilities, enabled: isDraft,
-  });
-  const { data: existingGrants } = useQuery({
-    queryKey: ["tool-grants", id], queryFn: () => api.listToolGrants(id!), enabled: engagementLoaded && isDraft,
-  });
-  const [grants, setGrants] = useState<GrantState>(emptyGrants());
-  const [grantsInitialized, setGrantsInitialized] = useState(false);
-
-  const toolsByCategory = useMemo(() => {
-    const grouped: Record<ToolCategory, ToolCapability[]> = { recon: [], fingerprint: [], vuln: [], cred: [], exploit: [] };
-    for (const tool of toolCapabilities?.tools ?? []) {
-      if ((TOOL_CATEGORIES as readonly string[]).includes(tool.category) && tool.enabled) {
-        grouped[tool.category as ToolCategory].push(tool);
-      }
-    }
-    for (const category of TOOL_CATEGORIES) grouped[category].sort((a, b) => a.name.localeCompare(b.name));
-    return grouped;
-  }, [toolCapabilities]);
-
-  const passiveToolsByCategory = useMemo(() => {
-    const grouped: Record<ToolCategory, ToolCapability[]> = { recon: [], fingerprint: [], vuln: [], cred: [], exploit: [] };
-    for (const category of TOOL_CATEGORIES) {
-      grouped[category] = toolsByCategory[category].filter((tool) => tool.execution_class === "passive");
-    }
-    return grouped;
-  }, [toolsByCategory]);
-
-  useEffect(() => {
-    if (!existingGrants || grantsInitialized) return;
-    const next = emptyGrants();
-    for (const grant of existingGrants) {
-      const category = grant.tool_category as ToolCategory;
-      if (!(TOOL_CATEGORIES as readonly string[]).includes(category)) continue;
-      if (grant.mode === "passive") next[category].passive = true;
-      if (grant.mode === "active") { next[category].active = true; next[category].manualTools = grant.manual_tools; }
-    }
-    setGrants(next);
-    setGrantsInitialized(true);
-  }, [existingGrants, grantsInitialized]);
-
-  function toggleManualTool(category: ToolCategory, toolName: string, checked: boolean) {
-    setGrants((current) => {
-      const existing = new Set(current[category].manualTools);
-      if (checked) existing.add(toolName);
-      else existing.delete(toolName);
-      return { ...current, [category]: { ...current[category], manualTools: [...existing].sort() } };
-    });
-  }
-
-  function categoryGrantSummary(category: ToolCategory) {
-    const grant = grants[category];
-    const passiveTools = passiveToolsByCategory[category];
-    if (grant.active) {
-      const manual = grant.manualTools.length;
-      return `${toolsByCategory[category].length} active tool${toolsByCategory[category].length === 1 ? "" : "s"} available, ${manual} require${manual === 1 ? "s" : ""} approval`;
-    }
-    if (passiveTools.length > 0) return `Passive available: ${passiveTools.map((tool) => tool.name).join(", ")}.`;
-    return "No passive tools in this category. Enable active only if target-touching checks are authorized.";
-  }
-
-  const saveGrants = useMutation({
-    mutationFn: async () => {
-      for (const category of TOOL_CATEGORIES) {
-        const grant = grants[category];
-        if (grant.passive && passiveToolsByCategory[category].length > 0) {
-          await api.addToolGrant(id!, { tool_category: category, mode: "passive", requires_manual_approval: false });
-        }
-        if (grant.active) {
-          await api.addToolGrant(id!, {
-            tool_category: category, mode: "active", requires_manual_approval: false, manual_tools: grant.manualTools,
-          });
-        }
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["tool-grants", id] });
-      queryClient.invalidateQueries({ queryKey: ["scan-readiness", id] });
-    },
-  });
 
   const activateEngagementMutation = useMutation({
     mutationFn: () => api.activateEngagement(id!),
@@ -277,89 +181,10 @@ export default function EngagementDetail() {
         </section>
       )}
 
+      {isDraft && <ToolGrantsEditor engagementId={id!} status="draft" />}
+
       {isDraft && (
         <section className="form-panel settings-panel">
-          <h2>Tool grants</h2>
-          <p className="muted-line">
-            This draft engagement has no other GUI path to grant tool categories or activate outside the
-            one-time creation wizard. Checked rows reflect what is already granted; saving only adds grants,
-            it never revokes one.
-          </p>
-          <div className="responsive-table">
-            <table className="data-table tool-grant-table">
-              <thead>
-                <tr>
-                  <th>Category</th>
-                  <th>Allow passive</th>
-                  <th>Allow active</th>
-                  <th>Require approval for these active tools</th>
-                </tr>
-              </thead>
-              <tbody>
-                {TOOL_CATEGORIES.map((category) => (
-                  <tr key={category}>
-                    <td>
-                      <strong>{category}</strong>
-                      <span className="muted-line">{categoryGrantSummary(category)}</span>
-                    </td>
-                    <td>
-                      {passiveToolsByCategory[category].length > 0 ? (
-                        <label className="grant-toggle">
-                          <input
-                            type="checkbox"
-                            checked={grants[category].passive}
-                            onChange={(e) => setGrants((g) => ({ ...g, [category]: { ...g[category], passive: e.target.checked } }))}
-                          />
-                          <span>Passive allowed</span>
-                          <small>{passiveToolsByCategory[category].map((tool) => tool.name).join(", ")}</small>
-                        </label>
-                      ) : (
-                        <span className="muted-line">No passive tools</span>
-                      )}
-                    </td>
-                    <td>
-                      <label className="grant-toggle">
-                        <input
-                          type="checkbox"
-                          checked={grants[category].active}
-                          onChange={(e) => setGrants((g) => ({ ...g, [category]: { ...g[category], active: e.target.checked } }))}
-                        />
-                        <span>Active allowed</span>
-                      </label>
-                    </td>
-                    <td>
-                      {grants[category].active ? (
-                        <div className="tool-approval-grid">
-                          {toolsByCategory[category].map((tool) => (
-                            <label key={tool.name}>
-                              <input
-                                type="checkbox"
-                                checked={grants[category].manualTools.includes(tool.name)}
-                                onChange={(e) => toggleManualTool(category, tool.name, e.target.checked)}
-                              />
-                              <span>{tool.name}</span>
-                              {!tool.dispatched && <small>catalog</small>}
-                            </label>
-                          ))}
-                          {toolsByCategory[category].length === 0 && <span className="muted-line">No enabled tools in this category.</span>}
-                        </div>
-                      ) : (
-                        <span className="muted-line">Not applicable until active is allowed.</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="form-actions">
-            <button disabled={saveGrants.isPending} onClick={() => saveGrants.mutate()}>
-              {saveGrants.isPending ? "Saving…" : "Save tool grants"}
-            </button>
-          </div>
-          {saveGrants.isError && <div className="error-block">Save failed: {(saveGrants.error as Error).message}</div>}
-          {saveGrants.isSuccess && <div className="success-block">Tool grants saved.</div>}
-
           <h2 style={{ marginTop: 18 }}>Activate engagement</h2>
           <div className="warning-block">
             Activation checks the same requirements as the wizard's authorization step (allow-scope assets,
@@ -389,7 +214,18 @@ export default function EngagementDetail() {
           ) : !readiness.ready ? (
             <div className="warning-block">
               This engagement cannot scan yet. Resolve these first:
-              <ul>{readiness.blockers.map((b) => <li key={b.code}><strong>{b.code}</strong> — {b.message}</li>)}</ul>
+              <ul>
+                {readiness.blockers.map((b) => (
+                  <li key={b.code} title={b.code}>
+                    {b.message}
+                    {b.action === "tool_grants" && (
+                      isDraft
+                        ? <> <a href="#tool-grants">Go to tool grants</a></>
+                        : <> <Link to={`/engagements/${id}/edit#tool-grants`}>Open tool grants</Link></>
+                    )}
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : (
             <div className="success-block">All pre-flight checks pass. A new run will start the pipeline (discovery → report).</div>

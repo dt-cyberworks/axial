@@ -6,11 +6,13 @@ protokolliert (Live-View der Operator-Konsole, UI Kap. 3.1)."""
 
 import json
 import logging
+import time
 import uuid
 
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app import tool_execution
+from app.cancel_probe import CancelProbe, CancellationStatusUnavailable
 from app.celery_app import celery_app
 from app.control_plane_client import ScanRunNotClaimable, ScanRunSuperseded, client
 from app.tasks import agent, asset_review, correlate, discovery, fingerprint, report, score
@@ -118,9 +120,16 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
         current = _coverage_warning(scan_run_id)
         return current if current == carried_coverage else _combine_reasons(carried_coverage, current)
 
+    cancel_probe = CancelProbe.for_run(scan_run_id)
+    phase = PHASES[start]  # the phase being worked on, for the failure cause
+
     def _stopped() -> bool:
-        """Kooperativer Stopp (REQ-RUN-001): an jeder Phasengrenze geprueft."""
-        if client.is_cancel_requested(scan_run_id):
+        """Kooperativer Stopp (REQ-RUN-001): an jeder Phasengrenze geprueft.
+
+        GitHub issue #49: an unreadable answer is never "not cancelled"; the probe
+        retries within REQ-FIDELITY-001's tolerance and raises
+        CancellationStatusUnavailable beyond it (handled below, fail closed)."""
+        if cancel_probe.is_cancelled():
             logger.info("scan_run %s cancelled by operator", scan_run_id)
             client.update_scan_run(scan_run_id, state="aborted", state_reason="cancelled_by_operator")
             return True
@@ -131,6 +140,7 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
 
     try:
         if start <= 0:
+            phase = "discovery"
             if _stopped():
                 return _aborted()
             # REQ-CIDRDISC-001: discovery includes an active, run-bound step
@@ -144,6 +154,7 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
                                    checkpoint={"discovered": _plain(discovered), "review_done": False})
 
         if start <= 1:
+            phase = "fingerprint"
             if _stopped():
                 return _aborted()
             if not review_done:
@@ -167,6 +178,7 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
                                    checkpoint={"services": _plain(services), "coverage_warning": _coverage()})
 
         if start <= 2:
+            phase = "correlate"
             if _stopped():
                 return _aborted()
             correlate.run(engagement_id, services=services)
@@ -175,6 +187,7 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
             client.update_scan_run(scan_run_id, phase="agent")
 
         if start <= 3:
+            phase = "agent"
             if _stopped():
                 return _aborted()
             # scan_run_id to the agent: it records steps + checks the stop itself.
@@ -193,11 +206,13 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
                                    checkpoint={"agent_warning": agent_warning, "coverage_warning": _coverage()})
 
         if start <= 4:
+            phase = "score"
             if _stopped():
                 return _aborted()
             score.run(engagement_id)
             client.update_scan_run(scan_run_id, phase="report")
 
+        phase = "report"
         if _stopped():
             return _aborted()
         report.run(engagement_id, scan_run_id=str(scan_run_id))
@@ -220,9 +235,16 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
         logger.exception("scan_run %s exceeded the task time limit", scan_run_id)
         _mark_failed(scan_run_id, "task_time_limit_exceeded")
         raise
-    except Exception:
+    except CancellationStatusUnavailable:
+        # GitHub issue #49: the control plane would not say whether the operator
+        # cancelled, so target-facing work stops (fail closed, like the per-tool
+        # loop) and the run ends with that reason - not as a bare pipeline_error.
+        logger.error("scan_run %s stopped: cancel status unavailable in phase %s", scan_run_id, phase)
+        _end_run(scan_run_id, "aborted", "cancellation_status_unavailable")
+        return _aborted()
+    except Exception as exc:
         logger.exception("scan_run %s failed", scan_run_id)
-        _mark_failed(scan_run_id, "pipeline_error")
+        _mark_failed(scan_run_id, pipeline_error_reason(exc, phase))
         raise
     finally:
         # REQ-SCAN-014: the per-run coverage accumulator is in-process state and
@@ -234,8 +256,33 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
     return {"scan_run_id": str(scan_run_id)}
 
 
+def pipeline_error_reason(exc: BaseException, phase: str) -> str:
+    """`pipeline_error:<ExceptionType>:<phase>` - the cause an operator needs without
+    opening the worker log. Only the class name, never the message (it can carry a
+    URL or a credential)."""
+    return f"pipeline_error:{type(exc).__name__}:{phase}"
+
+
+# GitHub issue #49: ending a run is a write to the control plane, which is exactly
+# what may be unavailable when a run ends abnormally. A few short retries; if they
+# all fail the run stays claimed and the reaper resumes or aborts it (REQ-RESUME-003).
+_END_RUN_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+
+
+def _end_run(scan_run_id: uuid.UUID, state: str, reason: str) -> None:
+    for attempt, delay in enumerate((*_END_RUN_BACKOFF_SECONDS, None)):
+        try:
+            client.update_scan_run(scan_run_id, state=state, state_reason=reason)
+            return
+        except ScanRunSuperseded:
+            return  # a newer attempt owns the run; it decides how the run ends
+        except Exception as exc:  # noqa: BLE001
+            if delay is None:
+                logger.error("scan_run %s could not be marked %s/%s: %s", scan_run_id, state, reason, exc)
+                return
+            logger.warning("marking scan_run %s %s failed (attempt %d): %s", scan_run_id, state, attempt + 1, exc)
+            time.sleep(delay)
+
+
 def _mark_failed(scan_run_id: uuid.UUID, reason: str) -> None:
-    try:
-        client.update_scan_run(scan_run_id, state="failed", state_reason=reason)
-    except ScanRunSuperseded:
-        pass  # a newer attempt owns the run; it decides how the run ends
+    _end_run(scan_run_id, "failed", reason)

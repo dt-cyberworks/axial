@@ -125,6 +125,9 @@ _SKIP_TEXT = {
     "oob_unavailable": "interaction server not deployed",
     "materialized_ip_missing": "the name did not resolve",
     "cancelled_by_operator": "stopped by the operator",
+    # GitHub issue #49: a safety stop, NOT an operator stop - the control plane could
+    # not say whether the operator had cancelled, so the check was stopped.
+    "cancellation_status_unavailable": "stopped as a safety measure: the cancel status could not be read",
 }
 
 

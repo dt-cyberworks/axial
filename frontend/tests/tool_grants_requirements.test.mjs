@@ -65,3 +65,53 @@ if (failed) {
   process.exit(1);
 }
 console.log(`${tests.length} requirement test(s) passed`);
+
+// REQ-TOOL-006..008 (GitHub issue #48): grants after creation, removal, audit, explanation.
+for (const id of ["REQ-TOOL-006", "REQ-TOOL-007", "REQ-TOOL-008"]) requirement(id);
+{
+  const editor = read("frontend/src/components/ToolGrantsEditor.tsx");
+  const detail = read("frontend/src/pages/EngagementDetail.tsx");
+  const edit = read("frontend/src/pages/EngagementEdit.tsx");
+  const client = read("frontend/src/api/client.ts");
+  const engagements = read("control-plane/app/api/engagements.py");
+
+  // one editor, on the draft's page and on the Edit page for every status that can still change
+  contains(detail, /<ToolGrantsEditor engagementId=\{id!\} status="draft" \/>/, "a draft keeps its grants editor");
+  contains(edit, /engagement\.status !== "completed" && engagement\.status !== "revoked"[\s\S]{0,80}<ToolGrantsEditor/, "the Edit page offers grants until the engagement ends");
+  contains(editor, /id="tool-grants"/, "the blocker link needs an anchor");
+
+  // unticking a saved box takes the grant away; saving used to only add
+  contains(editor, /api\.removeToolGrant\(/, "a saved grant can be removed");
+  contains(client, /removeToolGrant: \(id: string, category: string, mode: string\)/);
+  contains(editor, /removals\.push/, "the editor computes what to take away");
+
+  // widening asks; a running scan blocks additions but never removals
+  contains(editor, /confirm_widening: addition\.widening && confirmed/, "the confirmation is sent, never implied");
+  contains(editor, /Confirm: this widens what the engagement is authorized to do/);
+  contains(editor, /const lockedForAdding = \(isChecked: boolean\) => scanActive && !isChecked/, "while a scan runs only adding is locked");
+
+  // the blocker says where to fix it
+  contains(detail, /Go to tool grants/);
+  contains(detail, /Open tool grants/);
+  assert.doesNotMatch(detail, /<strong>\{b\.code\}<\/strong>/, "the raw blocker code is no longer the headline");
+
+  // the Edit page explains the layers and why a tool cannot run
+  contains(edit, /checked in this order/);
+  contains(edit, /"Force on" cannot grant a category, cannot add scope and cannot enable a tool that is not\s+installed/);
+  assert.doesNotMatch(edit, /capability registry floor/, "the unexplained phrase is gone");
+  contains(edit, /category_not_granted: "Its category is not granted"/);
+  contains(edit, /Grant \{t\.category\}/, "a tool with no grant links to the grants");
+
+  // server side: confirmation, running-scan rule, audit actions, and the wipe fix
+  contains(engagements, /confirmation_required:/);
+  contains(engagements, /scan_run_active:/);
+  contains(engagements, /action="tool_grant_added"/);
+  contains(engagements, /action="tool_grant_removed"/);
+  assert.doesNotMatch(engagements.slice(engagements.indexOf("def add_tool_grant"), engagements.indexOf("def remove_tool_grant")),
+    /delete\(\s*ToolApprovalPolicy\s*\)/, "saving grants must not delete the campaign's per-tool rows");
+
+  // the audit page explains the reasons and shows who changed a grant
+  contains(audit, /tool_disabled: "The tool is switched off/);
+  contains(audit, /case "tool_grant_added":/);
+  contains(audit, /Grant it under Edit engagement/);
+}

@@ -250,3 +250,84 @@ proposal above, and why:
 | Out-of-band pass | Unchanged: still five fixed parts behind its switch. Making it evidence-driven is an open follow-up. |
 | TLS on other services | `testssl` on `tls_service` surfaces; `--starttls` protocol is a fixed set validated by the gateway. It follows the engagement's tool list: selected means it runs with no further approval, switched off means the plan skips it (`tool_disabled`, from `disabled_tools` in the scan settings; the gateway refuses it regardless). |
 | Product keys at the gateway | Format-checked only (which blocks shell metacharacters); membership in the index is not checked - an unknown key selects nothing (johannes, 2026-09-30). |
+
+## 10. Deep content discovery and agent awareness (REQ-PIPE-017, REQ-PIPE-018)
+
+Found on int, 2026-09-30, while watching a live run: the Vector Agent asked for
+ffuf with `raft-medium-dirs` right after the fingerprint phase had run ffuf with
+`quickhits`. Two facts made that call poor. The list has 29,999 entries and ffuf
+runs at 20 requests per second, so one pass needs about 25 minutes, while an
+agent call is capped at 240 s: it could try about 15 % of the list. And the
+observation the agent got back read "no hits" after the run had been stopped by
+that limit, because the agent path only parsed output of runs that ended cleanly
+and the v2 pipeline (correctly) records a run that reached its own deadline as
+`partial`. That second point is a defect of section 9's partial outcome, not of
+the agent.
+
+| Requirement | Design |
+|---|---|
+| REQ-PIPE-017 | `planner.py`: under `thorough`, a web surface plans `ffuf:deep` (`{"wordlist": "raft-medium-dirs"}`) after its nuclei checks; skipped as `duplicate_vhost_of`, `web_alias_of` or `tool_disabled` like its siblings; nothing changes under `standard`. `tool_runner_client.py`: `FFUF_WORDLIST_ENTRIES` (one count per allowed key, a test keeps the keys in step with `FFUF_WORDLISTS` and with the gateway's set) and `ffuf_budget_s` = entries / rate x 1.1 + 30 s calibration + 20 s margin, at least the fixed 240 s, at most the runner's 1,800 s (raft-medium-dirs: 1,700 s; ffuf then gets `-maxtime` 1,680 s, more than the 1,500 s a full pass needs). `check_budget_s("ffuf", args)` uses it. `fingerprint._h_ffuf` serves both checks and passes the stored wordlist on only when it is a string the runner knows; `_content_discovery` names the wordlist in the finding title and evidence. A cut-short run stays `partial` through the existing `budget_reached` path. |
+| REQ-PIPE-018 | Control plane: `scan_plan.agent_check_summary` and `GET /internal/engagements/{id}/agent-context` add `hosts[].checks` (port, check id, tool, state, ffuf wordlist, skip reason; finished or skipped checks of the running run only; 60 per host; reasons cut at 80 characters). Worker: `agent._render_pipeline_checks` renders it into the evidence block (nuclei collapsed to one count per outcome, a redirect-only port names where its coverage lives). `dispatch._dispatch_ffuf` parses the output of any run `usable_output` accepts, appends a `[PARTIAL ...]` note with an upper bound of the entries tried (duration x the 20 requests-per-second ceiling, because the rate can only be lowered) and keeps the agent's own 240 s cap (`AGENT_FFUF_BUDGET_S`). The default agent prompt and the `content_discovery` tool description say what the baseline already covers and what a four-minute call can and cannot do. |
+
+Not changed: the gateway (same tool, same wordlist keys, same envelope, same rate),
+the egress proxy, the runner's 1,800 s maximum, the agent's tool list, the
+`standard` plan. A thorough scan now sends about 30,000 more requests per web
+surface; that is the point of the profile and is bounded by the same 20
+requests-per-second rate (a bug-bounty program's cap only lowers it).
+
+Open follow-ups, not part of this change: the `directory-list-medium` key is
+allowed by the gateway but its file is not installed in the runner image (an
+agent call naming it fails), and the OOB pass is still five fixed parts.
+
+## 11. Control-plane load and cancel resilience (REQ-PIPE-019, -020, -021)
+
+GitHub issue #49, 2026-09-30: a `standard` scan failed twice as `pipeline_error`.
+
+| Layer | Before | Now |
+|---|---|---|
+| Proxy audit | one blocking POST per proxied request, one pooled connection and one lock acquisition each | adaptive group commit: `AuditBatcher` sends the first event at once and batches what arrives during a send; the request still waits for its batch |
+| Control-plane write | `append_audit_log` per event | `append_audit_logs`: one lock, one commit, strictly increasing timestamps, all or nothing; `verify_audit_chain` added |
+| Pool | SQLAlchemy default 5+10, 30 s | `DB_POOL_SIZE` 10, `DB_MAX_OVERFLOW` 10, `DB_POOL_TIMEOUT_SECONDS` 10; bulk callers capped at `INTERNAL_BULK_DB_SLOTS` 4 (503 when none frees up) |
+| Live stream | `async` generator with blocking DB calls on the event loop, session open across `yield` | each poll in a worker thread, session closed before rows are yielded, busy pool skips one poll |
+| Heartbeat | every cancel poll commits an UPDATE | only when older than 15 s |
+| Cancel check (worker) | tolerant only in the per-tool loop | `CancelProbe` everywhere: unknown is never "not cancelled", sustained silence raises `CancellationStatusUnavailable` |
+| Run end | bare `pipeline_error`, tool stops recorded as operator stops | `aborted / cancellation_status_unavailable`, or `pipeline_error:<Type>:<phase>`; check `failed / cancellation_status_unavailable` |
+
+Fail-closed is preserved at every step: an audit record that cannot be committed denies the
+proxied request; a cancel status that cannot be read stops target-facing work; a bulk caller
+refused a database slot fails closed. Only a 503 answered before any write is retried.
+
+Rollout: control-plane, worker and egress-proxy are rebuilt together. The single-event audit
+endpoint stays for one release so a proxy image built before this change keeps working.
+Rollback: redeploy the previous images; no migration is involved.
+
+### 11.1 Rollout record: int, 2026-10-01 (REQ-PIPE-017..021, REQ-TOOL-006..008, REQ-ENGCREATE-002)
+
+Rolled out to int on johannes's explicit instruction, ahead of the human security review of the
+R3 items (REQ-PIPE-019..021, REQ-TOOL-006..008), as for REQ-PIPE-017/018 the day before. Prod
+stays stopped. The review is still owed.
+
+- Source: `b149360` (clean tree), synced with `rsync --delete` excluding `.env*`, `backups/`,
+  `edge-shared/`, `Documentation/`, `frontend/dist`; marker `/opt/asm/DEPLOYED_FROM_HEAD.txt`. No migration.
+- Order (matters): control-plane first (it keeps the single-event audit endpoint for the old proxy
+  and adds the batch endpoint), then egress-proxy, then worker. A new proxy against an old control
+  plane would be refused by the missing batch endpoint and deny every request (fail closed).
+  `tool-runner` and `raw-egress-gateway` were not touched.
+- Frontend built with `VITE_API_BASE_URL=""` and synced only to `edge-shared/frontend-int/`.
+- Before: database dump `/opt/asm/backups/int-before-issues-49-46-48-20260930T214845Z.dump`, compose
+  files in `/opt/asm/backups/pre-issues-49-46-48/`, previous images tagged
+  `asm_int-{control-plane,worker,egress-proxy}:rollback-pre-49-46-48`.
+- Verified: control-plane settings in the container (production, pool 10/10/10 s, 4 bulk slots);
+  `make uat`-equivalent golden path and scan journey on int (real scan of the project's own confirmed-safe external target, run
+  `done`); the #48 console flow on int (12/12); after the scan no `QueuePool` line in the
+  control-plane log, 1,135 batch audit requests and none through the single-event endpoint, and
+  `verify_audit_chain` passes over all 25,460 rows of the UAT engagement, most of them written by
+  the previous code (the chain format is unchanged).
+- Rollback: `cd /opt/asm && for s in control-plane worker egress-proxy; do docker tag
+  asm_int-$s:rollback-pre-49-46-48 asm_int-$s:latest; done`, then
+  `docker compose -p asm_int --env-file .env.int -f docker-compose.yml -f docker-compose.prod-noedge.yml
+  --profile runner up -d --no-deps --force-recreate worker egress-proxy control-plane` (proxy and worker
+  first, so the old proxy never meets a control plane without its single-event endpoint - which the new
+  control plane keeps anyway). Restore the previous `docker-compose.yml` from the backup directory
+  only if the new environment variables are a problem. No data migration is involved, so no dump
+  restore is needed; the dump is for disaster recovery.
