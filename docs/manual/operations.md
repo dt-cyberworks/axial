@@ -26,7 +26,7 @@ Plan for roughly 4 CPU cores, 8 GB of memory and 40 GB of disk for one host to s
 | Egress proxy | the only way the web tools reach a target; re-checks every request against the scope |
 | Tool runner | the isolated place where the scanning tools run |
 | Raw egress gateway | gives network scans (nmap) a short-lived, scope-bound network permission |
-| Postgres, Redis, MinIO | database, queue, object storage for evidence and reports |
+| Postgres, Redis, SeaweedFS | database, queue, object storage for evidence and reports (the object store has no console and no published port) |
 | Caddy (production) | HTTPS and the public routes; only the public API prefixes are reachable, never the internal ones |
 
 The tool runner and the raw egress gateway start only with the `runner` profile; without it the console works but a scan has nothing to run with. Why they are separated: [`docs/security-model.md`](../security-model.md).
@@ -39,7 +39,7 @@ The tool runner and the raw egress gateway start only with the `runner` profile;
 
 ## Back up
 
-Back up the Postgres volume and the MinIO volume, **and keep an encrypted copy of the `.env` file**, especially the MFA encryption key and the signing keys. A database backup without those keys cannot recover enrolled authenticators. Test a full restore on a separate host. See [Backups](../../INSTALL.md#backups).
+Back up the Postgres volume and the object-store volume (`seaweedfsdata`), **and keep an encrypted copy of the `.env` file**, especially the MFA encryption key and the signing keys. A database backup without those keys cannot recover enrolled authenticators. Test a full restore on a separate host. See [Backups](../../INSTALL.md#backups).
 
 ## Upgrade
 

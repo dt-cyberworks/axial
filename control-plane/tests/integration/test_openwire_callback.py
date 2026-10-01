@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
+from tests.integration.owners import make_owner
 from app.api.internal import internal_create_openwire_callback_token, internal_get_openwire_callback_status
 from app.db.base import get_db
 from app.main import app
@@ -57,6 +58,7 @@ def test_negative_a_scan_run_from_another_engagement_is_rejected(db, lab_engagem
     from app.models.scan_run import ScanRun
 
     other = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Other", source="lab", status="active",
         authorized_from=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1),
         authorized_until=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1),
@@ -86,6 +88,7 @@ def test_negative_polling_a_token_from_another_engagement_404s(db, lab_engagemen
     from app.models.engagement import Engagement
 
     other = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Other2", source="lab", status="active",
         authorized_from=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1),
         authorized_until=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1),

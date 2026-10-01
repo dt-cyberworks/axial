@@ -1,18 +1,22 @@
-# Install ASM on a Host
+# Install Axial on a Host
 
-This guide takes you from a clean host to a working ASM installation. It
+This guide takes you from a clean host to a working Axial installation. It
 covers two Docker Compose setups:
 
 - **Local evaluation** — API and operator console on a private workstation.
 - **Single-host production** — a persistent server with the UI and API behind
   Caddy and automatic HTTPS.
 
-Docker Compose supplies Postgres, Redis, MinIO, the control plane, worker,
-egress proxy, and isolated execution services. A production host does not
-need separate Python, PostgreSQL, Redis, or Node.js installations.
+Docker Compose supplies Postgres, Redis, the object store, the control plane,
+worker, egress proxy, and isolated execution services. A production host does
+not need separate Python packages, PostgreSQL, Redis, or Node.js installations.
+
+Every release is tested by following this guide on a fresh machine
+(`scripts/install_smoke.sh`, run by the release workflow), so an instruction
+that stops working is found before you are.
 
 > [!WARNING]
-> Install ASM only on infrastructure you control. Do not scan a system until
+> Install Axial only on infrastructure you control. Do not scan a system until
 > you have written authorization, an explicit scope, and an active test
 > window. See [docs/legal.md](docs/legal.md).
 
@@ -37,14 +41,16 @@ single-host installation, start with:
 - 40 GB free SSD storage
 - a 64-bit Linux host
 
+The first build downloads about 9 GB of images, most of it the scanning tools.
 Monitor storage as evidence and scan history accumulate. Production data is
 stored in Docker volumes and survives normal container restarts.
 
 ### Software
 
 Install Git, GNU Make, Docker Engine, Docker Compose v2 (the `docker compose`
-command), and curl. Local UI development also requires Node.js 20; production
-does not.
+command), curl, and Python 3.8 or newer (the standard library is enough; the
+setup scripts use no packages). Local UI development also requires Node.js 20;
+production does not.
 
 Use Docker's installation instructions for your Linux distribution, then
 confirm that the current user can access it:
@@ -56,6 +62,7 @@ docker run --rm hello-world
 git --version
 make --version
 curl --version
+python3 --version
 ```
 
 If Docker reports a permission error, follow Docker's post-installation
@@ -64,28 +71,33 @@ root-level control of the host, so restrict it to trusted administrators.
 
 ### Get the source
 
-Clone the repository URL supplied by your administrator:
-
 ```bash
-git clone <repository-url> asm-scanner
-cd asm-scanner
+git clone https://github.com/dt-cyberworks/axial.git
+cd axial
 ```
 
-If you already have the source, run every command below from the directory
-containing `docker-compose.yml` and `Makefile`.
+To install a specific release, check out its tag first (for example
+`git checkout v0.3.1`). If you already have the source, run every command below
+from the directory containing `docker-compose.yml` and `Makefile`.
 
 ## 3. Local evaluation
 
 ### Create the configuration
 
 ```bash
-cp .env.example .env
+make env
 ```
 
-The development defaults are suitable only for a private local evaluation.
-Do not use them on a shared or internet-reachable host. An LLM provider is
-optional: leave `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` empty to skip
-the agent phase, or configure the provider later under **Settings**.
+This creates `.env` from `.env.example` and generates the two encryption keys
+(for MFA secrets and for stored provider API keys) that Axial deliberately
+does not ship. It never changes a value that is already set, so it is safe to
+run again, and `make up` runs it first. Do not use `.env` on a shared or
+internet-reachable host: the remaining values are public development defaults,
+and production refuses to start with them (see [section 4](#4-single-host-production)).
+
+An LLM provider is optional: leave `LLM_BASE_URL`, `LLM_API_KEY`, and
+`LLM_MODEL` empty to skip the agent phase, or configure the provider later
+under **Settings**.
 
 ### Start and verify the backend
 
@@ -104,8 +116,8 @@ request should print:
 ```
 
 Open <http://localhost:8000/docs> for the interactive API documentation. The
-MinIO administration console is at <http://localhost:9001> for local
-diagnostics.
+object store has no web console and publishes no port; it is reachable only by
+the control plane.
 
 ### Start the operator console
 
@@ -119,6 +131,24 @@ npm run dev
 
 Open <http://localhost:5173> and keep that command running while using the UI.
 
+### Create the first administrator and sign in
+
+There is no public sign-up; the first account is created from the command
+line, once. Use a real address (a reserved name such as `.test`, `.local`, or
+`localhost` is refused, because the sign-in form would reject it):
+
+```bash
+INITIAL_ADMIN_EMAIL=you@example.com make bootstrap-admin
+```
+
+It prints a one-time temporary password. Sign in at <http://localhost:5173>
+with it, choose a new password, enroll an authenticator app (TOTP), and store
+the ten backup codes. The [user manual](docs/manual/quickstart.md) continues
+from here: your first engagement, scan, and report.
+
+If enrollment answers `503` and names `MFA_ENCRYPTION_KEY`, the key is missing
+from `.env`: run `make env` and restart with `make up`.
+
 ### Enable active scanning
 
 The basic stack does not start the offensive execution layer. Enable it only
@@ -129,16 +159,15 @@ docker compose --profile runner up -d --build
 docker compose --profile runner ps
 ```
 
-Before a real scan, prove that the safety boundary blocks an unauthorized
-target:
+Before a real scan, prove that the safety boundary denies what it must:
 
 ```bash
-make lab-test
+make scope-check
 ```
 
-The lab uses intentionally vulnerable targets on isolated networks. It checks
-both the permitted path and the more important out-of-scope denial. See
-[docs/testing.md](docs/testing.md).
+This runs the Scope Gateway's deny-path tests (out-of-scope targets, unsafe
+arguments, raw-egress policy, rate limits) inside the built image. It needs no
+lab, no database, and starts nothing. See [docs/testing.md](docs/testing.md).
 
 ### Stop the local installation
 
@@ -154,9 +183,9 @@ delete local data: that target runs `docker compose down -v`.
 ## 4. Single-host production
 
 This setup builds the frontend, serves it through Caddy, obtains and renews a
-TLS certificate, and binds the direct control-plane and MinIO ports to
-loopback. Production refuses to start while required secrets contain
-development defaults.
+TLS certificate, and binds the direct control-plane port to loopback. The
+object store publishes no port at all. Production refuses to start while
+required secrets contain development defaults.
 
 ### Prepare DNS and the firewall
 
@@ -165,76 +194,34 @@ development defaults.
    name such as `asm.example.com`.
 3. Confirm that DNS resolves to this host.
 4. Allow inbound TCP ports 80 and 443 for HTTPS issuance and traffic.
-5. Do not expose ports 8000, 9001, 5432, 6379, 3128, 8765, or 8888 publicly.
+5. Do not expose ports 8000, 5432, 6379, 3128, 8765, or 8888 publicly.
 
-### Create production secrets
+A DNS name is required; the bare IP address of the host does not work.
+Browsers and curl send no server name for an IP address, so Caddy cannot pick a
+certificate and the TLS handshake fails, and no public certificate authority
+issues one for the address. For a short test without your own domain, a
+wildcard-DNS name such as `203-0-113-10.sslip.io` resolves to that IP and gets a
+real certificate.
 
-Copy the template and restrict access:
-
-```bash
-cp .env.example .env
-chmod 600 .env
-```
-
-Generate an independent value for every secret. Use this command for tokens,
-passwords, and signing secrets, running it once per value:
+### Generate the production configuration
 
 ```bash
-openssl rand -hex 32
+python3 scripts/gen_production_env.py --domain asm.example.com --out .env
 ```
 
-Generate the Fernet-compatible MFA encryption key separately:
+This writes `.env` (mode `0600`) with every secret and setting production
+needs, each generated fresh: database and proxy-database passwords, the S3
+credentials, the API, scope-signing, runner, raw-egress and interaction-server
+tokens, two different encryption keys, the loopback binding of the control-plane
+port, and `PUBLIC_BASE_URL` (`https://` plus your domain). It refuses to
+overwrite an existing file unless you add `--force`. Production validation
+checks all of it; a value left at a development default stops the stack
+instead of running it insecurely.
 
-```bash
-openssl rand -base64 32 | tr '+/' '-_'
-```
-
-Edit `.env` and replace every value inside angle brackets (without retaining
-the brackets):
-
-```dotenv
-ENVIRONMENT=production
-ASM_DOMAIN=asm.example.com
-
-POSTGRES_USER=asm
-POSTGRES_PASSWORD=<database-password>
-POSTGRES_DB=asm
-DATABASE_URL=postgresql+psycopg://asm:<database-password>@postgres:5432/asm
-
-PROXY_DB_PASSWORD=<proxy-database-password>
-PROXY_DATABASE_URL=postgresql+psycopg://asm_proxy_ro:<proxy-database-password>@postgres:5432/asm
-
-S3_ENDPOINT=http://minio:9000
-S3_ACCESS_KEY=asm-storage
-S3_SECRET_KEY=<s3-secret>
-S3_BUCKET=asm-evidence
-
-INTERNAL_API_TOKEN=<internal-api-token>
-OPERATOR_API_TOKEN=<operator-compatibility-token>
-SCOPE_SIGNING_SECRET=<scope-signing-secret>
-RAW_EGRESS_SIGNING_SECRET=<raw-egress-signing-secret>
-RUNNER_API_TOKEN=<runner-api-token>
-MFA_ENCRYPTION_KEY=<fernet-key>
-
-CONTROL_PLANE_PUBLISH_HOST=127.0.0.1
-MINIO_CONSOLE_PUBLISH_HOST=127.0.0.1
-```
-
-`OPERATOR_API_TOKEN` must be non-default because production validation checks
-it, but users authenticate with individual accounts and MFA; shared-token
-login is disabled. Hexadecimal database passwords are safe in these connection
-URLs without extra URL encoding.
-
-Optionally configure an OpenAI-compatible LLM provider:
-
-```dotenv
-LLM_BASE_URL=https://provider.example/v1
-LLM_API_KEY=<provider-api-key>
-LLM_MODEL=<provider-model-name>
-```
-
-You can instead configure it after login under **Settings**. Never commit
-`.env`; keep an encrypted copy in your secrets manager.
+The file contains no LLM provider on purpose; configure it after login under
+**Settings** (or add `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`). Never
+commit `.env`, and keep an encrypted copy in your secrets manager: without
+`MFA_ENCRYPTION_KEY`, enrolled MFA secrets cannot be recovered.
 
 ### Validate and start
 
@@ -265,8 +252,8 @@ curl --fail --show-error https://asm.example.com/
 ```
 
 The command should return the operator-console HTML. A TLS, connection, proxy,
-or HTTP error is not acceptable. Production intentionally disables `/docs`, `/redoc`, and
-the OpenAPI document.
+or HTTP error is not acceptable. Production intentionally disables `/docs`,
+`/redoc`, and the OpenAPI document.
 
 ### Create the first administrator
 
@@ -284,9 +271,10 @@ is no public sign-up.
 - The browser reports a valid certificate for the expected hostname.
 - Login requires both password and TOTP.
 - Compose reports the expected services running.
-- Ports 8000 and 9001 are unreachable from another host.
+- Only ports 80 and 443 answer from another host; 8000 is bound to loopback
+  and the object store publishes nothing.
 - Backups are configured and a restore has been tested.
-- `make lab-test` passes on an isolated test installation.
+- `make scope-check` passes.
 - The engagement records authorization, scope, window, and emergency contacts.
 
 ## 5. Operations
@@ -313,16 +301,16 @@ target details, tokens, and evidence before sharing them.
 
 ### Backups
 
-Back up the Postgres `pgdata` volume and MinIO `miniodata` volume. Also retain
-an encrypted copy of `.env`, especially `MFA_ENCRYPTION_KEY` and signing keys;
-a database backup without the encryption key cannot recover enrolled MFA
-secrets. Use your organization's encrypted volume-snapshot or backup tooling
-and test a full restore on a separate host.
+Back up the Postgres `pgdata` volume and the object-store `seaweedfsdata`
+volume. Also retain an encrypted copy of `.env`, especially `MFA_ENCRYPTION_KEY`
+and the signing keys; a database backup without the encryption key cannot
+recover enrolled MFA secrets. Use your organization's encrypted volume-snapshot
+or backup tooling and test a full restore on a separate host.
 
 ### Upgrade
 
 1. Announce maintenance and stop new scan runs.
-2. Create and verify Postgres, MinIO, and secret backups.
+2. Create and verify Postgres, object-store, and secret backups.
 3. Record the deployed Git commit for rollback.
 4. Fetch and check out the approved release.
 5. Review its release notes and migration files.
@@ -331,6 +319,33 @@ and test a full restore on a separate host.
 
 Migrations run automatically. Rollback may require restoring the pre-upgrade
 database and evidence snapshots; older code alone may not be sufficient.
+
+#### From v0.3.0 to v0.3.1
+
+- **The object store changed from MinIO to SeaweedFS**, because the MinIO images
+  were withdrawn upstream and a fresh install could no longer pull them. Nothing
+  in Axial stores objects there yet (evidence and reports live in Postgres), so
+  there is nothing to migrate. The old `miniodata` volume is left untouched; after
+  the upgrade, `docker volume ls` shows it as `<project>_miniodata` and
+  `docker volume rm` removes it. The MinIO console and its published port no
+  longer exist.
+- **Local installs**: run `make env` (or `make up`, which runs it). It repairs an
+  existing `.env` that has the empty encryption keys the v0.3.0 guide left behind.
+- **Production installs**: your `.env` keeps working. Change `S3_ENDPOINT` to
+  `http://seaweedfs:8333`; the old `MINIO_CONSOLE_PUBLISH_HOST` and
+  `MINIO_CONSOLE_PUBLISH_PORT` are no longer used. Any S3 credential you
+  generated yourself stays valid.
+- **Every engagement now has an owner, and every signed-in user can read every
+  engagement** (read-only). Changing, scanning, activating, deleting, and deciding
+  tool-call approvals stay with the owner and administrators; anyone else gets a
+  `403`. Migration `0038` runs automatically on upgrade: it gives each engagement
+  that has no owner to the oldest active administrator (an administrator can
+  reassign it) and makes the owner mandatory. If such engagements exist and there
+  is **no active administrator**, it stops with an error and changes nothing;
+  create an administrator with the first-administrator command of
+  [section 3](#create-the-first-administrator-and-sign-in) or
+  [section 4](#create-the-first-administrator) and start again. A fresh install
+  is not affected.
 
 ### Stop or restart safely
 
@@ -364,12 +379,14 @@ a port already in use.
 
 ### Production rejects the configuration
 
-Confirm that all tokens and signing secrets are unique and non-default;
+Regenerate the file with `scripts/gen_production_env.py` (add `--force` to
+replace the old one) rather than editing values by hand. If you did edit it,
+confirm that all tokens and signing secrets are unique and non-default;
 `DATABASE_URL` matches `POSTGRES_PASSWORD`; `PROXY_DATABASE_URL` matches
-`PROXY_DB_PASSWORD`; S3 credentials are not `minioadmin`;
-`MFA_ENCRYPTION_KEY` is valid; and `CONTROL_PLANE_PUBLISH_HOST` is
-`127.0.0.1`. Do not share `docker compose config` output because it may contain
-resolved secrets.
+`PROXY_DB_PASSWORD`; the S3 credentials are not a development default;
+both encryption keys are valid and different; `PUBLIC_BASE_URL` is an
+`https://` address; and `CONTROL_PLANE_PUBLISH_HOST` is `127.0.0.1`. Do not
+share `docker compose config` output because it may contain resolved secrets.
 
 ### HTTPS certificate issuance fails
 
@@ -382,6 +399,13 @@ exposing port 8000.
 Inspect `caddy` and `control-plane`. Production uses the same hostname for UI
 and API; do not set a separate public `VITE_API_BASE_URL`. Caddy intentionally
 blocks `/internal/*`.
+
+### MFA enrollment or sign-in answers 503
+
+`MFA_ENCRYPTION_KEY` is empty or not a valid key. Locally, run `make env` and
+restart; in production, never replace the key of an installation that already
+has enrolled users (their MFA secrets would become unreadable) — restore it from
+your secrets backup.
 
 ### The agent phase does nothing
 
@@ -407,14 +431,14 @@ backup, and policy integration before production use. See
 ## 8. Security checklist
 
 - [ ] Only ports 80 and 443 are public.
-- [ ] Control-plane and MinIO ports bind to `127.0.0.1`.
+- [ ] The control-plane port binds to `127.0.0.1`; the object store publishes no port.
 - [ ] Credentials are unique, non-default, and stored securely.
 - [ ] Docker access is limited to trusted administrators.
 - [ ] Host and container security updates are scheduled.
-- [ ] Postgres, MinIO, and secret backups are encrypted and restore-tested.
+- [ ] Postgres, object-store, and secret backups are encrypted and restore-tested.
 - [ ] Runner images are pinned and scanned.
 - [ ] The audit log is backed up and protected from update or deletion.
-- [ ] Lab isolation and the negative out-of-scope test pass.
+- [ ] `make scope-check` passes and every engagement's scope was reviewed.
 - [ ] Every engagement has written authorization and deterministic scope.
 
 Architecture and security rationale:

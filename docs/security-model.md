@@ -125,7 +125,7 @@ Grants can be changed until an engagement is completed or revoked, not only in d
 call. Granting an ACTIVE category after the engagement left draft widens its authority and
 requires an explicit confirmation; nothing is added while a scan is running (removing is always
 possible, it only narrows); every addition and removal is written to the hash-chained audit log
-with the acting user. Only the owner or an admin can change them (REQ-IAM-007). A campaign's
+with the acting user. Only the owner or an admin can change them (REQ-IAM-023). A campaign's
 per-tool switches (Edit engagement) can only narrow what the grants allow: "Force on" never
 replaces a grant, and saving grants never resets those switches.
 
@@ -139,6 +139,28 @@ In the current capability registry, passive execution is available only for
 recon tools such as `subfinder` and `amass`. Fingerprint, vuln, cred, and
 exploit tools are target-touching in this build and therefore require active
 permission when they are used.
+
+## Who may see and change an engagement
+
+This boundary answers "may this person look at, or change, this engagement at all"; it never
+answers "may this tool call run", which stays the Scope Gateway's job alone.
+
+- Every engagement has exactly one **owner** (`engagement.owner_user_id`, `NOT NULL`;
+  REQ-IAM-021).
+- Every signed-in user can **read** every engagement in the installation: scope, findings and
+  evidence, runs and agent steps, reports, the audit log and the live stream (REQ-IAM-022). The
+  boundary is the installation; there are no tenants inside it. Global settings, API keys and user
+  management are not part of an engagement and stay admin-only (REQ-IAM-013).
+- Only the **owner or an admin** can **change** it: any non-read request under
+  `/engagements/{id}/...` answers `403` to anyone else, before the body is read and before
+  anything is written; the same holds for deciding an approval (REQ-IAM-023). An id that does not
+  exist is `404` for everyone. The pending-approval queue is the owner's own.
+- The rule is one dependency, `enforce_engagement_access`, wired once on the public router, so
+  every present and future route gets it. A test sweeps every route of the real application and
+  fails for a route that lacks it or lets a non-owner change something.
+- Reassigning an owner is admin-only. A migration gave every legacy ownerless engagement to the
+  oldest active administrator; the benchmark harness's engagements belong to that administrator
+  too.
 
 ## Audit trail: hash-chained and append-only
 

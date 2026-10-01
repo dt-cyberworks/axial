@@ -26,7 +26,7 @@ Version 2.1 · Developer-ready (bug-bounty integration)
 | Time series/diff | PostgreSQL (temporal tables) | history & diff without an extra system |
 | Tool execution | MCP server (in-house) | controlled tool registry per engagement |
 | LLM (reasoning) | Claude (tool use) | reliable structured tool use |
-| Object storage | S3-compatible (MinIO) | raw output, report PDFs, evidence |
+| Object storage | S3-compatible (SeaweedFS) | raw output, report PDFs, evidence |
 | Secrets | Vault / SOPS | scope signing key, API keys |
 
 ### 1.2 Process topology

@@ -50,7 +50,7 @@ Internet targets       ▲   only authorized targets — via egress proxy
    └────▲──────────────────────────────┘
         │ commissioned (internally) by
    ┌────┴──────────────────────────────┐        ┌───────────────────────────┐
-   │  CONTROL PLANE + SCOPE GATEWAY     │──write─▶│ postgres · audit · minio  │
+   │  CONTROL PLANE + SCOPE GATEWAY     │──write─▶│ postgres · audit · s3     │
    │  (long-lived, no tools)            │        │ (long-lived · isolated)   │
    └────▲──────────────────────────────┘        └───────────────────────────┘
         │ reasoning via API (sees only permitted tools)
@@ -67,7 +67,7 @@ Internet targets       ▲   only authorized targets — via egress proxy
 | `worker` | long-lived | Celery; orchestrates scans, executes nothing itself | no |
 | `postgres` | long-lived | primary DB + audit log (append-only) | no |
 | `redis` | long-lived | task queue / broker | no |
-| `minio` | long-lived | object storage: raw output, report PDFs, evidence | no |
+| `seaweedfs` | long-lived | S3-compatible object storage: raw output, report PDFs, evidence; on its own network that only the control-plane joins, publishes no port | no |
 | `vault` | long-lived | secrets: scope signing key, API keys | no |
 | `egress-proxy` | long-lived | network-level scope enforcement + ident header | no |
 | `tool-runner` (HexStrike) | ephemeral / per job | offensive execution; fresh per engagement, destroyed afterward | YES (isolated) |

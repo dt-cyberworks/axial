@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { api, type ScanProfile, type ScopeAsset } from "../api/client";
 import DiscoverySwitches, { DEFAULT_DISCOVERY_FLAGS, discoveryFlagSummary, type DiscoveryFlags } from "../components/DiscoverySwitches";
+import ReadOnlyNotice from "../components/ReadOnlyNotice";
 import ScanDepth from "../components/ScanDepth";
 import ToolGrantsEditor from "../components/ToolGrantsEditor";
 
@@ -276,6 +277,23 @@ export default function EngagementEdit() {
   if (error) return <div className="error-block">Failed to load engagement: {(error as Error).message}</div>;
   if (!engagement || !id) return null;
 
+  // REQ-IAM-025: only the owner or an admin edits an engagement (the server answers 403 to anyone else);
+  // everyone else gets the notice instead of a form that could not be saved.
+  if (!engagement.can_manage) {
+    return (
+      <section className="page-stack">
+        <header className="page-header">
+          <div>
+            <span className="eyebrow">Engagement settings</span>
+            <h1>Edit engagement</h1>
+            <p>{engagement.title}</p>
+          </div>
+        </header>
+        <ReadOnlyNotice engagement={engagement} />
+        <div className="form-actions"><Link className="secondary-action" to={`/engagements/${id}`}>Back to the engagement</Link></div>
+      </section>
+    );
+  }
 
   return (
     <section className="page-stack">

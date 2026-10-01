@@ -32,6 +32,7 @@ export default function AllFindings() {
   const severityParam = searchParams.get("severity") ?? "";
   const severity = SEVERITIES.includes(severityParam) ? severityParam : "";
   const engagementId = searchParams.get("engagement") ?? "";
+  const mine = searchParams.get("mine") === "1";
   const q = searchParams.get("q") ?? "";
   const page = Math.max(1, Number.parseInt(searchParams.get("page") ?? "1", 10) || 1);
   const [searchText, setSearchText] = useState(q);
@@ -64,9 +65,9 @@ export default function AllFindings() {
 
   const { data: engagements = [], isSuccess: engagementsLoaded } = useQuery({ queryKey: ["engagements"], queryFn: api.listEngagements });
   const findingsQuery = useQuery({
-    queryKey: ["all-findings", status, severity, engagementId, q, page],
+    queryKey: ["all-findings", status, severity, engagementId, mine, q, page],
     queryFn: () => api.allFindings({
-      status, severity: severity || undefined, engagement_id: engagementId || undefined, q: q || undefined,
+      status, severity: severity || undefined, engagement_id: engagementId || undefined, mine: mine || undefined, q: q || undefined,
       limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE,
     }),
     placeholderData: keepPreviousData,
@@ -80,7 +81,9 @@ export default function AllFindings() {
   const from = result && items.length > 0 ? result.offset + 1 : 0;
   const to = result ? result.offset + items.length : 0;
   const updating = findingsQuery.isPlaceholderData;
-  const filtered = !!(severity || engagementId || q);
+  const filtered = !!(severity || engagementId || mine || q);
+  // REQ-IAM-025: the findings of other people's engagements are readable, not changeable.
+  const canManageById = new Map(engagements.map((engagement) => [engagement.id, engagement.can_manage]));
 
   function emptyMessage() {
     if (engagementsLoaded && engagements.length === 0) {
@@ -89,7 +92,7 @@ export default function AllFindings() {
     if (total > 0) return <>This page is past the end of the list. <button onClick={() => update({})}>Go to the first page</button></>;
     if (filtered) return "No findings match these filters.";
     return status === "open"
-      ? "No open findings in any of your engagements."
+      ? (mine ? "No open findings in your engagements." : "No open findings in any engagement.")
       : `No findings marked as ${STATUS_LABEL[status].toLowerCase()}.`;
   }
 
@@ -99,7 +102,7 @@ export default function AllFindings() {
         <div>
           <span className="eyebrow">Findings</span>
           <h1>All findings</h1>
-          <p>Findings from every engagement you can see, most severe first. Open one to triage it, or to have the Lens Agent explain it.</p>
+          <p>Findings from every engagement in this installation, most severe first. Open one to read its evidence; the owner of an engagement can triage it and have the Lens Agent explain it.</p>
         </div>
       </header>
 
@@ -131,6 +134,10 @@ export default function AllFindings() {
               {engagements.map((engagement) => <option key={engagement.id} value={engagement.id}>{engagement.title}</option>)}
             </select>
           </label>
+          <label className="checkbox-filter">
+            <input type="checkbox" checked={mine} onChange={(e) => update({ mine: e.target.checked ? "1" : null })} />
+            Only my engagements
+          </label>
           <label className="search-filter">
             Search
             <input type="search" value={searchText} placeholder="Finding or target" maxLength={200}
@@ -153,14 +160,17 @@ export default function AllFindings() {
                     <tr className={`finding-row ${expanded ? "expanded" : ""}`} onClick={() => setExpandedId(expanded ? null : finding.id)}>
                       <td><span className={`severity-badge ${severityClass(finding.severity)}`}>{finding.severity ?? "info"}</span></td>
                       <td><strong>{finding.title}</strong><span className="muted-line">{problemSummary(finding)}</span><span className="row-hint">Click for evidence, explanation, and triage</span></td>
-                      <td><Link to={`/engagements/${finding.engagement_id}`} onClick={(e) => e.stopPropagation()}>{finding.engagement_title}</Link></td>
+                      <td>
+                        <Link to={`/engagements/${finding.engagement_id}`} onClick={(e) => e.stopPropagation()}>{finding.engagement_title}</Link>
+                        {finding.engagement_owner && <span className="muted-line">Owner: {finding.engagement_owner}</span>}
+                      </td>
                       <td><strong>{targetLabel(finding)}</strong><span className="muted-line">{observedLocationLabel(finding)}</span></td>
                       <td>{finding.last_seen ? new Date(finding.last_seen).toLocaleString() : "-"}</td>
                     </tr>
                     {expanded && (
                       <tr className="finding-detail-row"><td colSpan={5}>
                         <Link className="finding-open-link" to={engagementFindingLink(finding)}>Open in engagement →</Link>
-                        <FindingDetail finding={finding} onTriaged={() => setExpandedId(null)} />
+                        <FindingDetail finding={finding} canManage={canManageById.get(finding.engagement_id) ?? false} onTriaged={() => setExpandedId(null)} />
                       </td></tr>
                     )}
                   </Fragment>

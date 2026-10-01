@@ -14,6 +14,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.orm import sessionmaker
 
+from tests.integration.owners import make_owner
 from app.api.internal import create_scan_run
 from app.models.engagement import Engagement
 from app.models.scan_run import ScanRun
@@ -24,6 +25,7 @@ from app.schemas.internal import ScanRunCreate
 def _engagement(db) -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Scan-start race test", source="lab", status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1),
     )

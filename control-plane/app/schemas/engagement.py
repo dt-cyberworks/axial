@@ -109,7 +109,13 @@ class EngagementOut(BaseModel):
     authorized_until: datetime.datetime
     emergency_contact: str | None = None
     created_at: datetime.datetime
-    owner_user_id: uuid.UUID | None = None
+    owner_user_id: uuid.UUID
+    # REQ-IAM-022/025: who owns it, and whether the caller may change it. Filled
+    # per request by the API (they are not columns); the server stays the
+    # authority - a console that hides a control is a convenience only.
+    owner_name: str | None = None
+    owner_email: str | None = None
+    can_manage: bool = False
 
 
 class EngagementOwnerIn(BaseModel):

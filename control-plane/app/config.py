@@ -4,6 +4,14 @@ from cryptography.fernet import Fernet
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Public development defaults for the object store (REQ-INSTALL-002):
+# docker-compose.yml falls back to the first pair, `minioadmin` is what v0.3.0
+# and earlier shipped. Production rejects every one of them, and an empty value.
+DEV_S3_ACCESS_KEY = "asm-dev-access"
+DEV_S3_SECRET_KEY = "asm-dev-secret-change-me"
+_PUBLIC_S3_ACCESS_KEYS = {"", "minioadmin", DEV_S3_ACCESS_KEY}
+_PUBLIC_S3_SECRET_KEYS = {"", "minioadmin", DEV_S3_SECRET_KEY}
+
 
 class Settings(BaseSettings):
     # protected_namespaces=(): pydantic's default "model_"/"settings_" guard
@@ -49,9 +57,11 @@ class Settings(BaseSettings):
     # cookie-authenticated state-changing requests are accepted - the dev console.
     csrf_trusted_origins: str = "http://localhost:5173"
 
-    s3_endpoint: str = "http://localhost:9000"
-    s3_access_key: str = "minioadmin"
-    s3_secret_key: str = "minioadmin"
+    # S3-compatible object store (SeaweedFS, REQ-INSTALL-002). The defaults are
+    # public development values; production rejects them (see the validator).
+    s3_endpoint: str = "http://localhost:8333"
+    s3_access_key: str = DEV_S3_ACCESS_KEY
+    s3_secret_key: str = DEV_S3_SECRET_KEY
     s3_bucket: str = "asm-evidence"
 
     # Vector Agent (Phase 4) and Lens Agent: OpenAI-kompatibler LLM-Provider (z. B. OpenAI, Eden
@@ -131,9 +141,9 @@ class Settings(BaseSettings):
     # REQ-IAM-004: encrypts TOTP secrets at rest (Fernet key, urlsafe-base64
     # 32 bytes). Separate from the DB credential on purpose - a compromised
     # DB dump alone must not yield usable MFA secrets. No key ships in source:
-    # provide MFA_ENCRYPTION_KEY via the environment (.env in dev, see
-    # .env.example for how to generate one). Empty is rejected in production
-    # (see the guard below) and unusable in dev (Fernet needs a real key).
+    # provide MFA_ENCRYPTION_KEY via the environment (`make env` generates one
+    # into .env for local use). Empty is rejected in production (see the guard
+    # below); in dev MFA answers 503 until it is set (REQ-INSTALL-004).
     mfa_encryption_key: str = ""
 
     # GitHub issue #25: encrypts LLM/NVD provider API keys at rest in
@@ -193,7 +203,13 @@ class Settings(BaseSettings):
             insecure.append("internal_bulk_db_slots")
         if "asm:asm@" in self.database_url or "localhost" in self.database_url:
             insecure.append("database_url")
-        if self.s3_access_key == "minioadmin" or self.s3_secret_key == "minioadmin":
+        # REQ-INSTALL-002: both the current development default and the one
+        # v0.3.0 and earlier shipped (`minioadmin`) are public; an empty value
+        # would also leave the store without a credential.
+        if (
+            self.s3_access_key in _PUBLIC_S3_ACCESS_KEYS
+            or self.s3_secret_key in _PUBLIC_S3_SECRET_KEYS
+        ):
             insecure.append("s3_credentials")
         # GitHub issue #21: an unreachable-from-outside public_base_url (the
         # dev default, or any http:// / localhost / 127.0.0.1 value) makes

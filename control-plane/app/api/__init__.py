@@ -12,21 +12,22 @@ from app.api.portfolio import router as portfolio_router
 from app.api.settings import router as settings_router
 from app.api.stream import router as stream_router
 from app.api.tools import router as tools_router
-from app.security import enforce_engagement_ownership, require_admin, require_user
+from app.security import enforce_engagement_access, require_admin, require_user
 
 api_router = APIRouter()
 api_router.include_router(auth_router)
-# REQ-IAM-002/007: every route here requires an authenticated user, and every
-# route whose path carries an engagement_id is additionally ownership-checked
-# (admin bypasses) - both wired once, covering every current and future route
-# in these routers without per-endpoint changes.
-public_router = APIRouter(dependencies=[Depends(require_user), Depends(enforce_engagement_ownership)])
+# REQ-IAM-002/022/023: every route here requires an authenticated user, and every
+# route whose path carries an engagement_id is additionally access-checked: any
+# signed-in user may read it, only its owner or an admin may change it - both
+# wired once, covering every current and future route in these routers without
+# per-endpoint changes.
+public_router = APIRouter(dependencies=[Depends(require_user), Depends(enforce_engagement_access)])
 public_router.include_router(engagements_router)
 public_router.include_router(approvals_router)
 public_router.include_router(findings_router)
 public_router.include_router(discovery_artifacts_router)
-# REQ-PORTFOLIO-001: no engagement_id in its path, so the ownership check above
-# does not apply - the handler filters by owner in its own queries.
+# REQ-PORTFOLIO-001: no engagement_id in its path, so the access check above
+# does not apply (and it only reads: every signed-in user sees every engagement).
 public_router.include_router(portfolio_router)
 public_router.include_router(stream_router)
 public_router.include_router(tools_router)

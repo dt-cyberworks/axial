@@ -9,6 +9,7 @@ authorization outcome.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -184,7 +185,8 @@ def _client(engine) -> TestClient:
 
 
 def test_operator_endpoint_is_owner_scoped(engine, db):
-    """REQ-GRAPH-005: the owner reads the graph; a non-owner gets 404, not a leak."""
+    """REQ-GRAPH-005 / REQ-IAM-022: the graph is readable by every signed-in user (the same data
+    the owner sees); an unauthenticated request and an unknown engagement are refused."""
     owner = _user(db, email="graph-owner@example.com")
     other = _user(db, email="graph-other@example.com")
     eng = _seed(db, owner)
@@ -199,7 +201,10 @@ def test_operator_endpoint_is_owner_scoped(engine, db):
         assert body["nodes"] and body["edges"]
 
         other_token, _ = auth_service.create_session(db, other, ip=None, user_agent=None)
-        denied = client.get(f"/engagements/{eng.id}/surface-graph", headers={"Authorization": f"Bearer {other_token}"})
-        assert denied.status_code == 404
+        other_view = client.get(f"/engagements/{eng.id}/surface-graph", headers={"Authorization": f"Bearer {other_token}"})
+        assert other_view.status_code == 200 and other_view.json() == body
+        assert client.get(f"/engagements/{eng.id}/surface-graph").status_code == 401
+        missing = client.get(f"/engagements/{uuid.uuid4()}/surface-graph", headers={"Authorization": f"Bearer {other_token}"})
+        assert missing.status_code == 404
     finally:
         app.dependency_overrides.clear()

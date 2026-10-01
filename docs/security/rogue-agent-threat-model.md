@@ -35,7 +35,8 @@ authorization boundary and fails closed.
 
 | Zone | Components | Trust | Reaches |
 |---|---|---|---|
-| Control | control-plane, postgres, redis, minio | Trusted (sole DB writer, holds secrets) | `ctrl` (internal) |
+| Control | control-plane, postgres, redis | Trusted (sole DB writer, holds secrets) | `ctrl` (internal) |
+| Object store | seaweedfs | Trusted; only the control-plane may reach it | `objstore` (internal, control-plane only) |
 | Orchestration | worker | Semi-trusted (holds INTERNAL_API_TOKEN; no DB creds) | `ctrl`, `egress`, `control` |
 | Execution | tool-runner (HexStrike), raw-egress-gateway | **Untrusted** (touches targets, parses hostile output) | `runner`, `egress`, shared netns |
 | Egress enforcement | egress-proxy | **Untrusted-facing** (parses hostile target responses) | `ctrl` (RO DB), `runner`, `egress` |
@@ -167,6 +168,23 @@ no target). Bounded by the iteration budget and clearly attributed
 (`reported_by: vector_agent`). This is a data-quality issue, not a boundary
 escape; the audit log itself remains append-only and hash-chained (tamper-
 evident). Accepted; noted for a future confidence/label control.
+
+### S13 — Reaching the object store's unauthenticated interfaces (Info Disclosure / Tampering)
+*A compromised worker or proxy reaches the evidence store without the S3 credentials.*
+**Blocked (REQ-INSTALL-002).** SeaweedFS' default single-node mode also starts
+master, volume and filer HTTP/gRPC interfaces with **no authentication**; from
+any host on its network the filer lets anyone read and write every stored
+object, bypassing the S3 credentials entirely (verified against the image
+before adopting it). So: those interfaces are bound to the container's loopback
+and the optional Iceberg/Lance endpoints are off, leaving only the S3 gateway
+(which requires credentials) on the network; the one port that cannot be bound
+separately (the gateway's own gRPC port) is protected by network isolation -
+the store sits on a dedicated internal `objstore` network that only the
+control-plane joins, so the worker (semi-trusted) and the egress proxy
+(untrusted-facing) cannot even resolve it; it publishes no host port in any
+profile. The install smoke test asserts all of this against the running stack.
+Residual: a compromised **control-plane** can reach the gRPC port - it already
+holds the S3 credentials and is the trusted zone, so nothing is gained.
 
 ## 4. Hardening implemented by this change (`REQ-HARDEN-*`)
 

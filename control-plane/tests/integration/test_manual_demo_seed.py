@@ -112,6 +112,11 @@ def test_seed_plan_shows_ran_skipped_and_partial_checks(db, seeded):
     assert {"web", "web_alias"} <= classes
 
 
+def test_seed_gives_every_engagement_an_owner_and_shows_two_different_owners(db, seeded):
+    owners = {e.owner_user_id for e in db.scalars(select(Engagement))}
+    assert None not in owners and len(owners) == 2  # the console can show a read-only view of someone else's
+
+
 def test_seed_has_a_running_run_and_a_draft_but_no_pending_approval(db, seeded):
     running = db.get(ScanRun, seeded["runs"]["retail_running"])
     assert running.state == "running" and running.current_tool

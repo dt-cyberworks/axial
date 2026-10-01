@@ -283,6 +283,7 @@ SHOTS: list[Shot] = [
     Shot("all-findings", "operator", "/findings", "h1:has-text('All findings')"),
     Shot("wizard-step-1", "operator", "/new", "h1:has-text('New engagement')"),
     Shot("engagement-findings", "operator", "/engagements/{main}", "tr.finding-row"),
+    Shot("engagement-read-only", "analyst", "/engagements/{main}", ".read-only-notice"),
     Shot("finding-detail", "operator", "/engagements/{main}", "tr.finding-row",
          act=_open_finding("Exposed .git directory"), viewport=TALL),
     Shot("engagement-assets", "operator", "/engagements/{main}?tab=assets", "h1", viewport=TALL),
@@ -350,7 +351,8 @@ def run(stack: Stack, only: set[str] | None) -> list[Path]:
     from playwright.sync_api import sync_playwright
 
     accounts = {a["email"]: a for a in stack.seeded["accounts"]}
-    roles = {"admin": accounts["demo.admin@example.com"], "operator": accounts["demo.operator@example.com"]}
+    roles = {"admin": accounts["demo.admin@example.com"], "operator": accounts["demo.operator@example.com"],
+             "analyst": accounts["sam.analyst@example.com"]}
     IMG.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     with sync_playwright() as pw:

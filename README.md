@@ -96,15 +96,16 @@ Details: [docs/architecture.md](docs/architecture.md) ·
 ## Quick start
 
 Use this path for a local evaluation on a machine with Docker Engine, Docker
-Compose v2, Git, Make, Node.js 20, and curl. From the repository root:
+Compose v2, Git, Make, Python 3, Node.js 20, and curl. From the repository root:
 
 ```bash
-cp .env.example .env
 make up
 curl --fail http://localhost:8000/health
 ```
 
-The health request should return `{"status":"ok"}`. The API is available at
+`make up` first runs `make env`, which creates `.env` and generates the
+encryption keys Axial deliberately does not ship. The health request should
+return `{"status":"ok"}`. The API is available at
 <http://localhost:8000> and its interactive documentation at
 <http://localhost:8000/docs>.
 

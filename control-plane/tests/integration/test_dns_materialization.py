@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 
+from tests.integration.owners import make_owner
 from app.gateway import dns_materialization
 from app.gateway.dns_materialization import materialize, materialized_ips
 from app.gateway.raw_egress_policy import render_for_engagement
@@ -32,6 +33,7 @@ def _active_domain_engagement(db):
 
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="dns-mat", source="own_domain", status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1),
     )
@@ -110,7 +112,7 @@ def test_materialize_requires_active_engagement(db):
     from app.models.engagement import Engagement
 
     now = dt.datetime.now(dt.timezone.utc)
-    eng = Engagement(title="draft", source="own_domain", status="draft",
+    eng = Engagement(owner_user_id=make_owner(db).id, title="draft", source="own_domain", status="draft",
                      authorized_from=now, authorized_until=now + dt.timedelta(days=1))
     db.add(eng)
     db.commit()

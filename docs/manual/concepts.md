@@ -120,4 +120,8 @@ Every gateway decision, every network request, every state change and every agen
 
 ## Roles and ownership
 
-There are two roles. An **operator** creates and runs engagements and sees only their own. An **admin** also manages users, sees and manages every engagement, can reassign ownership, and configures the AI provider and the global tool policy. There is no shared password and no public sign-up; see [Users and two-factor authentication](guides/users-and-mfa.md).
+There are two roles. An **operator** creates and runs engagements. An **admin** also manages users, can reassign ownership, and configures the AI provider and the global tool policy. There is no shared password and no public sign-up; see [Users and two-factor authentication](guides/users-and-mfa.md).
+
+Every engagement has exactly one **owner**, the person who created it (an administrator can hand it to someone else). **Everyone who is signed in can read every engagement** in the installation: its scope, findings and evidence, runs, reports and audit log. **Only the owner, or an administrator, can change it**: edit it, activate it, start or stop a scan, change tools, triage findings, ask for a report or an explanation, and decide a tool-call approval. Someone else who tries gets a refusal (`403`), and nothing changes. The queue of pending approvals is the owner's own: nobody else sees it. An engagement you may read but not change shows a notice that names its owner, so you know whom to ask. Global settings, the AI provider and user management are not part of any engagement and stay with administrators.
+
+This is the only boundary inside an installation. There are no separate tenants: if two organisations must not see each other's engagements, run two installations.

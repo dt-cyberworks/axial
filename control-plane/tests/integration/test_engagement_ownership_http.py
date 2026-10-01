@@ -1,5 +1,5 @@
 """REQ-IAM-002/007 at the HTTP layer: require_user and
-enforce_engagement_ownership are wired as ROUTER-LEVEL dependencies
+enforce_engagement_access are wired as ROUTER-LEVEL dependencies
 (app/api/__init__.py), so they only actually run through the real FastAPI
 routing pipeline - a TestClient is required to prove them, unlike the rest
 of this suite which calls handler functions directly."""
@@ -80,17 +80,30 @@ def test_owner_can_see_their_own_engagement(engine, db):
         app.dependency_overrides.clear()
 
 
-def test_non_owner_gets_404_not_403(engine, db):
+def test_non_owner_can_read_but_gets_403_on_a_change_and_404_on_an_unknown_id(engine, db):
+    """REQ-IAM-022/023 (GitHub issue #47, amends REQ-IAM-007): every signed-in user reads every
+    engagement; a change by a non-owner is 403 (the engagement is visible, so there is nothing to
+    hide); an id that does not exist is 404 for everyone."""
+    import uuid
+
     owner = _user(db, email="owner-a@example.com")
     other = _user(db, email="owner-b@example.com")
     eng = _engagement(db, owner)
     raw_token, _ = auth_service.create_session(db, other, ip=None, user_agent=None)
+    headers = {"Authorization": f"Bearer {raw_token}"}
     client = _client(engine)
     try:
-        resp = client.get(f"/engagements/{eng.id}", headers={"Authorization": f"Bearer {raw_token}"})
-        assert resp.status_code == 404
+        seen = client.get(f"/engagements/{eng.id}", headers=headers)
+        assert seen.status_code == 200 and seen.json()["id"] == str(eng.id)
+        assert seen.json()["can_manage"] is False
+        changed = client.patch(f"/engagements/{eng.id}", headers=headers, json={"title": "taken over"})
+        assert changed.status_code == 403
+        assert client.get(f"/engagements/{uuid.uuid4()}", headers=headers).status_code == 404
+        assert client.patch(f"/engagements/{uuid.uuid4()}", headers=headers, json={"title": "x"}).status_code == 404
     finally:
         app.dependency_overrides.clear()
+    db.expire_all()
+    assert db.get(Engagement, eng.id).title == "Owned"
 
 
 def test_admin_can_see_any_engagement(engine, db):
@@ -106,18 +119,22 @@ def test_admin_can_see_any_engagement(engine, db):
         app.dependency_overrides.clear()
 
 
-def test_list_engagements_is_scoped_to_owner_unless_admin(engine, db):
+def test_list_engagements_shows_every_engagement_with_its_owner_and_whether_the_caller_may_change_it(engine, db):
     owner = _user(db, email="owner-d@example.com")
     other = _user(db, email="owner-e@example.com")
-    mine = _engagement(db, owner, title="Mine")
+    _engagement(db, owner, title="Mine")
     _engagement(db, other, title="Theirs")
     raw_token, _ = auth_service.create_session(db, owner, ip=None, user_agent=None)
     client = _client(engine)
     try:
         resp = client.get("/engagements", headers={"Authorization": f"Bearer {raw_token}"})
         assert resp.status_code == 200
-        titles = {e["title"] for e in resp.json()}
-        assert titles == {"Mine"}
+        by_title = {e["title"]: e for e in resp.json()}
+        assert set(by_title) == {"Mine", "Theirs"}
+        assert by_title["Mine"]["can_manage"] is True and by_title["Theirs"]["can_manage"] is False
+        assert by_title["Theirs"]["owner_email"] == "owner-e@example.com"
+        assert by_title["Theirs"]["owner_name"] == "HTTP Test User"
+        assert by_title["Theirs"]["owner_user_id"] == str(other.id)
     finally:
         app.dependency_overrides.clear()
 

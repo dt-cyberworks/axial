@@ -11,6 +11,10 @@
 
 The hub of one engagement. At the top: the title, links to **Edit**, **Audit** and the **Authorization PDF**, and a status band. Below it the readiness panel with the **Start run** button, then three tabs.
 
+**On someone else's engagement the page is read-only.** Everyone can read every engagement, but only its owner and administrators can change it. When you are neither, a notice at the top says whose it is (name and email), and the controls that change it are not offered: **Edit**, activation, **Attest authorization**, tool grants, **Start run**, **Generate report**, triage and the Lens request in the findings, and stopping a run. The tabs, the filters, the downloads (**Authorization PDF**, **Download PDF**) and the **Audit** log all work. See [Roles and ownership](../concepts.md#roles-and-ownership).
+
+![An engagement owned by someone else: a notice names the owner and the controls that change it are not offered](../img/engagement-read-only.png)
+
 ### The status band
 
 | Item | Meaning |
@@ -54,6 +58,8 @@ The selected tab is part of the page address, so a link, a reload or the browser
 - **Reports.** **Generate report** creates the customer-facing PDF; the list shows when it was generated, which run it covers, its status and size, and **Download PDF**. See [Reports](../guides/reports.md).
 
 ## Edit engagement (`/engagements/:id/edit`)
+
+Only the engagement's owner and administrators can open the form; anyone else sees the read-only notice and a link back to the engagement.
 
 All settings of an engagement. Everything below can be changed at any status unless it says otherwise.
 

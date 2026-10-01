@@ -9,8 +9,8 @@ import {
 const NOTE_REQUIRED: FindingStatus[] = ["accepted_risk", "false_positive"];
 
 /** REQ-TRIAGE-001: decide what a finding is. Dismissing it needs a reason. */
-function TriagePanel({ finding, pending, error, onDecide }: {
-  finding: Finding; pending: boolean; error: Error | null;
+function TriagePanel({ finding, canManage, pending, error, onDecide }: {
+  finding: Finding; canManage: boolean; pending: boolean; error: Error | null;
   onDecide: (status: FindingStatus, note?: string) => void;
 }) {
   const [choice, setChoice] = useState<FindingStatus | null>(null);
@@ -28,15 +28,19 @@ function TriagePanel({ finding, pending, error, onDecide }: {
         {finding.status_changed_at && <span className="muted-line">Changed by {changedBy} on {new Date(finding.status_changed_at).toLocaleString()}</span>}
       </p>
       {finding.status_note && <blockquote className="triage-note-text">{finding.status_note}</blockquote>}
-      <div className="triage-actions">
-        {actions.map((action) => (
-          <button key={action.status} disabled={pending}
-            onClick={() => (NOTE_REQUIRED.includes(action.status) ? setChoice(action.status) : onDecide(action.status))}>
-            {action.label}
-          </button>
-        ))}
-      </div>
-      {choice && (
+      {canManage ? (
+        <div className="triage-actions">
+          {actions.map((action) => (
+            <button key={action.status} disabled={pending}
+              onClick={() => (NOTE_REQUIRED.includes(action.status) ? setChoice(action.status) : onDecide(action.status))}>
+              {action.label}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="muted-line">Only the owner of this engagement or an administrator can change the status.</p>
+      )}
+      {canManage && choice && (
         <div className="triage-reason">
           <label>
             {choice === "accepted_risk"
@@ -125,7 +129,7 @@ function renderLensAnalysis(text: string) {
  * Used on the engagement page and on the all-findings page (REQ-CONSOLE-016);
  * triage always goes through the engagement's own endpoint (REQ-TRIAGE-001).
  */
-export default function FindingDetail({ finding, onTriaged }: { finding: Finding; onTriaged?: () => void }) {
+export default function FindingDetail({ finding, canManage, onTriaged }: { finding: Finding; canManage: boolean; onTriaged?: () => void }) {
   const queryClient = useQueryClient();
   const engagementId = finding.engagement_id;
   const [lensTextByFinding, setLensTextByFinding] = useState<Record<string, string>>({});
@@ -157,9 +161,11 @@ export default function FindingDetail({ finding, onTriaged }: { finding: Finding
       <section className="lens-panel">
         <div className="lens-heading">
           <div><h3>Lens Agent analysis</h3><p>Explains the finding, impact, and practical remediation from the recorded evidence.</p></div>
-          <button onClick={(e) => { e.stopPropagation(); lensMutation.mutate(); }} disabled={lensMutation.isPending}>
-            {lensMutation.isPending ? "Asking Lens..." : (lensText ? "Show Lens analysis" : "Explain with Lens Agent")}
-          </button>
+          {canManage && (
+            <button onClick={(e) => { e.stopPropagation(); lensMutation.mutate(); }} disabled={lensMutation.isPending}>
+              {lensMutation.isPending ? "Asking Lens..." : (lensText ? "Show Lens analysis" : "Explain with Lens Agent")}
+            </button>
+          )}
         </div>
         <div className="lens-output">
           {(finding.id in lensTruncatedByFinding ? lensTruncatedByFinding[finding.id] : cachedLensTruncated(finding)) && (
@@ -169,11 +175,13 @@ export default function FindingDetail({ finding, onTriaged }: { finding: Finding
               incomplete.
             </div>
           )}
-          {lensText ? renderLensAnalysis(lensText) : <p className="muted-line">Lens Agent has not explained this finding yet.</p>}
+          {lensText
+            ? renderLensAnalysis(lensText)
+            : <p className="muted-line">Lens Agent has not explained this finding yet.{!canManage && " Only the owner of the engagement or an administrator can ask for an explanation."}</p>}
           {lensMutation.isError && <div className="error-block">Lens Agent failed: {(lensMutation.error as Error).message}</div>}
         </div>
       </section>
-      <TriagePanel finding={finding} pending={triageMutation.isPending}
+      <TriagePanel finding={finding} canManage={canManage} pending={triageMutation.isPending}
         error={triageMutation.isError ? (triageMutation.error as Error) : null}
         onDecide={(status, note) => triageMutation.mutate({ status, note })} />
       <dl className="finding-facts">

@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
+from tests.integration.owners import make_owner
 from app.api.engagements import decide_asset_review
 from app.api.internal import create_asset_review
 from app.gateway.authorize import ToolCall, authorize
@@ -24,6 +25,7 @@ from app.schemas.internal import AssetReviewCreateIn
 def _mixed_engagement(db, *, source="own_domain") -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Mixed scope test", source=source, status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1),
     )

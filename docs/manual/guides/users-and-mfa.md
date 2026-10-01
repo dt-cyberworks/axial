@@ -11,8 +11,10 @@ Axial uses individual accounts with mandatory two-factor authentication (a time-
 
 | Role | Can |
 |---|---|
-| **operator** | create engagements and run scans; sees and manages **only their own** engagements and their findings |
+| **operator** | create engagements and run scans; **reads** every engagement in the installation and **changes** only the ones they own |
 | **admin** | everything an operator can, on **every** engagement; also manages users, the AI provider, the scan rate and the global tool policy under **Admin**, and reads the account audit |
+
+See [Roles and ownership](../concepts.md#roles-and-ownership) for what reading and changing cover.
 
 Keep the number of admins small. Give people the operator role unless they administer the installation.
 
@@ -68,7 +70,7 @@ Under **Account**:
 
 On **Admin → Users**, **Disable** an account to stop it signing in at once without losing its engagements and history, and **Enable** to restore it. You can change a role from the same list. Disabling is the right step when someone leaves.
 
-An engagement belongs to the operator who created it. Reassigning an engagement to another user is an administrator action through the API (`PUT /engagements/{id}/owner`, see [`docs/api.md`](../../api.md)); the console has no screen for it.
+An engagement belongs to the person who created it, and it always has an owner. Reassigning an engagement to another user is an administrator action through the API (`PUT /engagements/{id}/owner`, see [`docs/api.md`](../../api.md)); the console has no screen for it.
 
 ## What is recorded
 

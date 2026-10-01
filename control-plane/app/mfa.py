@@ -19,8 +19,28 @@ from app.crypto import InvalidToken, build_cipher, decrypt as _crypto_decrypt, e
 ISSUER = "ASM Console"
 
 
+class MfaKeyUnavailable(RuntimeError):
+    """MFA_ENCRYPTION_KEY is empty or not a valid Fernet key (REQ-INSTALL-004).
+
+    Raised instead of letting the cipher's ValueError escape as an HTTP 500. The
+    message names the setting and the fix; it never contains a key."""
+
+
+_KEY_HELP = (
+    "MFA cannot be enrolled or verified until it is set: run `make env` (or put a "
+    "Fernet key in .env; INSTALL.md shows how) and restart the control-plane."
+)
+
+
 def _fernet() -> MultiFernet:
-    return build_cipher(get_settings().mfa_encryption_key)
+    key = get_settings().mfa_encryption_key
+    if not key.strip():
+        raise MfaKeyUnavailable(f"MFA_ENCRYPTION_KEY is not configured. {_KEY_HELP}")
+    try:
+        return build_cipher(key)
+    except ValueError:
+        # `from None`: do not chain the original error, whatever it might echo.
+        raise MfaKeyUnavailable(f"MFA_ENCRYPTION_KEY is not a valid Fernet key. {_KEY_HELP}") from None
 
 
 def generate_secret() -> str:

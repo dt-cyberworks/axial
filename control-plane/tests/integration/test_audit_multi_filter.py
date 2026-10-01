@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from tests.integration.owners import make_owner
 from app.api.stream import _MAX_FACET_FILTER_VALUES, audit_facets, list_audit
 from app.gateway.audit import append_audit_log
 from app.models.audit import AuditLog
@@ -26,6 +27,7 @@ ROWS = [
 def _engagement(db) -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Audit filter test", source="own_domain", status="active",
         authorized_from=now - dt.timedelta(days=1), authorized_until=now + dt.timedelta(days=1),
     )

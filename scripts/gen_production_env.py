@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Generate a hardened production .env for the ASM stack (REQ-PRODDEPLOY-002).
 
-Produces every secret the production credential gate
-(control-plane/app/config.py::reject_insecure_production_defaults) demands,
-plus the loopback publish bindings and matching backing-service credentials so
-Postgres / MinIO / the egress-proxy read-only role all agree. Standard library
-only - no dependency on `cryptography` (the MFA key is a Fernet-compatible
-urlsafe-base64 of 32 random bytes, exactly what Fernet.generate_key() emits).
+Produces every secret and setting the production credential gate
+(control-plane/app/config.py::reject_insecure_production_defaults) and the
+production compose files demand, plus the loopback publish bindings and
+matching backing-service credentials so Postgres / the object store / the
+egress-proxy read-only role all agree. REQ-INSTALL-003: control-plane's own
+test builds Settings from this output, so the generator cannot fall behind the
+gate again (it had: SETTINGS_ENCRYPTION_KEY and PUBLIC_BASE_URL were missing).
+Standard library only - no dependency on `cryptography` (the encryption keys are
+Fernet-compatible urlsafe-base64 of 32 random bytes, exactly what
+Fernet.generate_key() emits).
 
-Usage (single environment - docs/deployment-ionos.md):
-    python3 scripts/gen_production_env.py --domain scan.example.com
-    python3 scripts/gen_production_env.py --domain scan.example.com --out .env.production --force
+Usage (single environment - INSTALL.md section 4):
+    python3 scripts/gen_production_env.py --domain scan.example.com --out .env
 
 Usage (multi-environment / shared edge, REQ-MULTIENV-002 - one call per named
 environment on the host, e.g. "prod" and "int"):
@@ -18,13 +21,13 @@ environment on the host, e.g. "prod" and "int"):
     python3 scripts/gen_production_env.py --domain scan-int.example.com --env-name int --out .env.int
 
 --env-name picks non-colliding defaults (COMPOSE_PROJECT_NAME, Postgres user/db,
-CONTROL_PLANE_PUBLISH_PORT, MINIO_CONSOLE_PUBLISH_PORT) so two environments'
-generated files never collide on a shared host; override any of them explicitly
-if you need a third environment or different ports.
+CONTROL_PLANE_PUBLISH_PORT) so two environments' generated files never collide
+on a shared host; override any of them explicitly if you need a third
+environment or different ports.
 
-The output file is chmod 600 and must NEVER be committed. Copy it to the
-production host as `.env` (compose auto-loads `.env` for both interpolation and
-the services' env_file), then follow docs/deployment-ionos.md.
+The output file is chmod 600 and must NEVER be committed. It is refused if it
+already exists (--force overwrites). Compose auto-loads `.env` for both
+interpolation and the services' env_file.
 """
 
 from __future__ import annotations
@@ -50,18 +53,16 @@ def _fernet_key() -> str:
 # REQ-MULTIENV-002: non-colliding defaults per named environment. A third
 # environment (or different ports) can always be set explicitly via the CLI flags.
 _ENV_PORT_DEFAULTS = {
-    "prod": {"api_port": 8000, "minio_console_port": 9001},
-    "int": {"api_port": 8001, "minio_console_port": 9002},
+    "prod": {"api_port": 8000},
+    "int": {"api_port": 8001},
 }
 
 
 def build_env(
-    domain: str, *, env_name: str = "prod",
-    api_port: int | None = None, minio_console_port: int | None = None,
+    domain: str, *, env_name: str = "prod", api_port: int | None = None,
 ) -> dict[str, str]:
     defaults = _ENV_PORT_DEFAULTS.get(env_name, _ENV_PORT_DEFAULTS["prod"])
     api_port = api_port if api_port is not None else defaults["api_port"]
-    minio_console_port = minio_console_port if minio_console_port is not None else defaults["minio_console_port"]
 
     pg_user = f"asm_{env_name}"
     pg_db = f"asm_{env_name}"
@@ -73,7 +74,7 @@ def build_env(
     return {
         "ENVIRONMENT": "production",
         # REQ-MULTIENV-002: distinct project name -> distinct containers/
-        # volumes (pgdata, miniodata, ...) even on the same host/repo
+        # volumes (pgdata, seaweedfsdata, ...) even on the same host/repo
         # checkout. Compose reads this from --env-file as a project-name
         # fallback; the runbook also passes an explicit -p for clarity.
         "COMPOSE_PROJECT_NAME": f"asm_{env_name}",
@@ -95,8 +96,11 @@ def build_env(
         # ports to loopback-only, and the PORT keeps two environments distinct.
         "CONTROL_PLANE_PUBLISH_HOST": "127.0.0.1",
         "CONTROL_PLANE_PUBLISH_PORT": str(api_port),
-        "MINIO_CONSOLE_PUBLISH_HOST": "127.0.0.1",
-        "MINIO_CONSOLE_PUBLISH_PORT": str(minio_console_port),
+        # The object store publishes no host port at all (REQ-INSTALL-002), so
+        # unlike earlier versions there is no console binding to configure.
+        # REQ-AGENT-027 / issue #21: the address a probed target must be able
+        # to call back; the gate rejects http:// and localhost values.
+        "PUBLIC_BASE_URL": f"https://{domain}",
         # --- Postgres (container creds + app URL must match) ---
         "POSTGRES_USER": pg_user,
         "POSTGRES_PASSWORD": pg_password,
@@ -105,10 +109,10 @@ def build_env(
         # --- egress-proxy read-only role (rotated by the migrate service) ---
         "PROXY_DB_PASSWORD": proxy_password,
         "PROXY_DATABASE_URL": f"postgresql+psycopg://asm_proxy_ro:{proxy_password}@postgres:5432/{pg_db}",
-        # --- object store (MinIO root creds come from these) ---
+        # --- object store (the store's credentials come from these) ---
         "S3_ACCESS_KEY": s3_access,
         "S3_SECRET_KEY": s3_secret,
-        "S3_ENDPOINT": "http://minio:9000",
+        "S3_ENDPOINT": "http://seaweedfs:8333",
         "S3_BUCKET": "asm-evidence",
         # --- application secrets (all gate-checked) ---
         "OPERATOR_API_TOKEN": _token(32),  # gate-required though the shared path is rejected in prod
@@ -119,6 +123,10 @@ def build_env(
         "RAW_EGRESS_API_TOKEN": _token(32),  # docker-compose.prod.yml requires it (issue #22)
         "OOB_TOKEN": _token(32),  # REQ-COVER-004: interaction-server token (prod overlay requires it)
         "MFA_ENCRYPTION_KEY": _fernet_key(),
+        # Issue #25: encrypts provider API keys stored in the database. A
+        # DIFFERENT key from the MFA one - a leak of one must not expose the
+        # other - and required by the production gate.
+        "SETTINGS_ENCRYPTION_KEY": _fernet_key(),
         # --- bounded operational values (must stay within the gate's ranges) ---
         "RAW_EGRESS_LEASE_TTL_SECONDS": "900",
         "NMAP_MAX_RATE": "1000",
@@ -134,7 +142,7 @@ HEADER = """\
 # ASM production environment - generated by scripts/gen_production_env.py
 # DO NOT COMMIT. Copy to the production host as `.env` (chmod 600).
 # The LLM provider is intentionally blank; configure it in Settings after login.
-# See docs/deployment-ionos.md for the full deployment runbook.
+# See INSTALL.md for the installation steps.
 """
 
 
@@ -156,21 +164,28 @@ def main() -> int:
              "Picks non-colliding defaults for the project name, Postgres db/user, and ports.",
     )
     parser.add_argument("--api-port", type=int, default=None, help="Override CONTROL_PLANE_PUBLISH_PORT.")
-    parser.add_argument("--minio-console-port", type=int, default=None, help="Override MINIO_CONSOLE_PUBLISH_PORT.")
+    # Accepted and ignored so existing runbooks keep working: the object store
+    # no longer has a console or any published port (REQ-INSTALL-002).
+    parser.add_argument("--minio-console-port", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.minio_console_port is not None:
+        print("note: --minio-console-port is ignored; the object store publishes no port any more", file=sys.stderr)
 
     out = Path(args.out)
     if out.exists() and not args.force:
         print(f"refusing to overwrite existing {out} (use --force)", file=sys.stderr)
         return 1
 
-    env = build_env(args.domain, env_name=args.env_name, api_port=args.api_port,
-                    minio_console_port=args.minio_console_port)
-    out.write_text(render(env), encoding="utf-8")
-    out.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    env = build_env(args.domain, env_name=args.env_name, api_port=args.api_port)
+    # Create the file 0600 from the start: writing first and chmod-ing after
+    # would leave the secrets world-readable for a moment (umask 022).
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(render(env))
+    out.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600 even when --force overwrote a looser file
 
     print(f"wrote {out} (0600) with {len(env)} entries for domain {args.domain!r} (env-name={args.env_name!r})")
-    print("Next: review it, copy to the production host, then follow docs/deployment-ionos.md.")
+    print("Next: review it and keep an encrypted copy outside this host; follow INSTALL.md section 4.")
     print("The LLM provider is blank - set it in Settings after the first admin logs in.")
     return 0
 

@@ -32,11 +32,11 @@ Click a row (**Click for evidence and explanation**) to expand it. You see:
 
 ## Get an explanation
 
-Choose **Explain with Lens Agent** (it needs an AI provider; see [Configure the AI provider](configure-the-llm.md)). The **Lens Agent analysis** explains in plain language what the finding is, what it could mean for you and how to fix it, using only the evidence that was recorded. Once generated it is kept; **Show Lens analysis** shows it again. If the provider cut the answer off, the page says so and some sections may be missing. A report includes an explanation only if one was already generated, so explain the findings you want in the report *before* you generate it; see [Reports](reports.md).
+Choose **Explain with Lens Agent** (it needs an AI provider; see [Configure the AI provider](configure-the-llm.md)). Asking is for the engagement's owner and administrators; on someone else's engagement you can read an explanation that already exists, but not request one. The **Lens Agent analysis** explains in plain language what the finding is, what it could mean for you and how to fix it, using only the evidence that was recorded. Once generated it is kept; **Show Lens analysis** shows it again. If the provider cut the answer off, the page says so and some sections may be missing. A report includes an explanation only if one was already generated, so explain the findings you want in the report *before* you generate it; see [Reports](reports.md).
 
 ## Decide what to do
 
-Under **Triage**, choose one:
+Under **Triage**, the engagement's owner or an administrator chooses one. On someone else's engagement you see the status, who set it and why, but not the buttons; ask the owner.
 
 | Action | Status | Reason required? | Use it when |
 |---|---|---|---|

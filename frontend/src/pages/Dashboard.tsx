@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api, type Engagement } from "../api/client";
@@ -33,6 +34,10 @@ export default function Dashboard() {
     refetchInterval: 5000,
   });
 
+  const { data: me } = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
+  // REQ-IAM-025: every engagement is listed; "Only mine" narrows it (and the numbers above it) to the user's own.
+  const [onlyMine, setOnlyMine] = useState(false);
+
   const deleteEngagement = useMutation({
     mutationFn: (id: string) => api.deleteEngagement(id),
     onSuccess: (_result, deletedId) => {
@@ -53,9 +58,10 @@ export default function Dashboard() {
     if (confirmed) deleteEngagement.mutate(e.id);
   }
 
-  const active = engagements.filter((e) => e.status === "active").length;
-  const agentReady = engagements.filter((e) => e.ai_testing_allowed).length;
-  const drafts = engagements.filter((e) => e.status === "draft" || e.status === "awaiting_signature").length;
+  const shown = onlyMine ? engagements.filter((e) => e.owner_user_id === me?.id) : engagements;
+  const active = shown.filter((e) => e.status === "active").length;
+  const agentReady = shown.filter((e) => e.ai_testing_allowed).length;
+  const drafts = shown.filter((e) => e.status === "draft" || e.status === "awaiting_signature").length;
 
   return (
     <section className="page-stack">
@@ -70,7 +76,7 @@ export default function Dashboard() {
       <div className="metric-strip">
         <div className="metric-cell">
           <span>Engagements</span>
-          <strong>{engagements.length}</strong>
+          <strong>{shown.length}</strong>
         </div>
         <div className="metric-cell">
           <span>Active scans</span>
@@ -109,14 +115,19 @@ export default function Dashboard() {
         <div className="panel-heading">
           <div>
             <h2>Engagement queue</h2>
-            <p>Live entry point for scope, scan state, agent readiness, and results.</p>
+            <p>Every engagement in this installation. You can read all of them; only an engagement's owner or an administrator can change it.</p>
           </div>
+          <label className="checkbox-filter">
+            <input type="checkbox" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} />
+            Only mine
+          </label>
         </div>
         <div className="responsive-table">
           <table className="data-table">
             <thead>
               <tr>
                 <th>Engagement</th>
+                <th>Owner</th>
                 <th>Status</th>
                 <th>Agent</th>
                 <th>Authorized window</th>
@@ -124,25 +135,26 @@ export default function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              {engagements.map((e) => (
+              {shown.map((e) => (
                 <tr key={e.id}>
                   <td>
                     <strong>{e.title}</strong>
                     <span className="muted-line">{e.id}</span>
                   </td>
+                  <td title={e.owner_email ?? undefined}>{e.owner_name ?? "-"}</td>
                   <td><span className={`pill ${statusClass(e.status)}`}>{STATUS_LABEL[e.status] ?? e.status}</span></td>
                   <td><span className={`pill ${e.ai_testing_allowed ? "good" : "neutral"}`}>{e.ai_testing_allowed ? "Enabled" : "Disabled"}</span></td>
                   <td>{formatWindow(e)}</td>
                   <td className="row-actions">
                     <Link to={`/engagements/${e.id}`} className="primary-action">Open</Link>
-                    <Link to={`/engagements/${e.id}/edit`}>Edit</Link>
+                    {e.can_manage && <Link to={`/engagements/${e.id}/edit`}>Edit</Link>}
                     <Link to={`/engagements/${e.id}/audit`}>Audit</Link>
-                    <button className="danger-button" onClick={() => requestDelete(e)} disabled={deleteEngagement.isPending}>Delete</button>
+                    {e.can_manage && <button className="danger-button" onClick={() => requestDelete(e)} disabled={deleteEngagement.isPending}>Delete</button>}
                   </td>
                 </tr>
               ))}
-              {engagements.length === 0 && (
-                <tr><td colSpan={5} className="empty-cell">No engagements yet — create one above.</td></tr>
+              {shown.length === 0 && (
+                <tr><td colSpan={6} className="empty-cell">{onlyMine ? "You do not own an engagement yet." : "No engagements yet — create one above."}</td></tr>
               )}
             </tbody>
           </table>

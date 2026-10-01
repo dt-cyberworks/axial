@@ -1,10 +1,23 @@
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api import api_router
 from app.config import get_settings
+from app.mfa import MfaKeyUnavailable
 
 settings = get_settings()
+log = logging.getLogger("uvicorn.error")
+
+if not settings.mfa_encryption_key.strip():
+    # REQ-INSTALL-004: without this the stack is healthy and /health is green, yet
+    # nobody can finish MFA enrollment. Say so in the logs where an installer looks.
+    log.warning(
+        "MFA_ENCRYPTION_KEY is empty: MFA enrollment and sign-in will answer 503 until it is set. "
+        "Run `make env` (or set a Fernet key in .env) and restart the control-plane."
+    )
 app = FastAPI(
     title="ASM Control Plane",
     description="Orchestrator + Scope Gateway. See docs/spec/ for the full architecture specification.",
@@ -25,6 +38,14 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+
+
+@app.exception_handler(MfaKeyUnavailable)
+async def _mfa_key_unavailable(_request: Request, exc: MfaKeyUnavailable) -> JSONResponse:
+    # REQ-INSTALL-004: a missing or malformed MFA key is a configuration problem the
+    # operator can fix, not a server bug: 503 with an actionable message (it names
+    # the setting, never a key or secret), and nothing is stored.
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.get("/health")

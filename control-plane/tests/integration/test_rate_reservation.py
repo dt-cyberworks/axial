@@ -14,6 +14,7 @@ import threading
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
+from tests.integration.owners import make_owner
 from app.api.internal import reserve_proxy_rate_slot
 from app.gateway.authorize import ToolCall, authorize
 from app.gateway.rate_reservation import reserve
@@ -141,7 +142,7 @@ def test_the_gateway_and_the_proxy_have_their_own_counter(db, lab_engagement):
 def test_engagements_are_counted_separately(db, lab_engagement):
     from app.models.engagement import Engagement
     now = dt.datetime.now(dt.timezone.utc)
-    other = Engagement(title="Other", source="lab", status="active",
+    other = Engagement(owner_user_id=make_owner(db).id, title="Other", source="lab", status="active",
                        authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1))
     db.add(other)
     db.flush()

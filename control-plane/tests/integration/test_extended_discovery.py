@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from app import auth_service
+from tests.integration.owners import make_owner
 from app.api import engagements as engagements_api
 from app.api import internal as internal_api
 from app.api.settings import SubfinderKeysIn, read_subfinder_keys, update_subfinder_keys
@@ -224,6 +225,7 @@ def test_negative_screenshot_denied_when_bounty_program_requires_identification(
     from app.models.engagement import ScopeAsset, ToolGrant
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="bounty", source="bug_bounty", status="active", screenshots_enabled=True,
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(hours=1),
     )
@@ -393,10 +395,10 @@ def test_screenshot_image_ownership_and_headers(engine, db, lab_engagement, test
         assert "no-store" in ok.headers["cache-control"]
         assert len(client.get(f"/engagements/{lab_engagement.id}/endpoints",
                               headers={"Authorization": f"Bearer {owner_tok}"}).json()) == 1
-        # Negative: another user's engagement is a 404 on every route; no credentials is 401.
+        # REQ-IAM-022: another signed-in user may read them too (read-only); no credentials is 401.
         for path in ("endpoints", "screenshots", f"screenshots/{shot.id}/image"):
             assert client.get(f"/engagements/{lab_engagement.id}/{path}",
-                              headers={"Authorization": f"Bearer {other_tok}"}).status_code == 404
+                              headers={"Authorization": f"Bearer {other_tok}"}).status_code == 200
             assert client.get(f"/engagements/{lab_engagement.id}/{path}").status_code == 401
     finally:
         app.dependency_overrides.clear()

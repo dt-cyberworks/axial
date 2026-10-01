@@ -4,6 +4,7 @@ import json
 
 from sqlalchemy import select
 
+from tests.integration.owners import make_owner
 from app.api.internal import internal_raw_egress_lease
 from app.models.audit import AuditLog
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset, ToolGrant
@@ -607,6 +608,7 @@ def _bug_bounty_engagement(
 ) -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Bounty raw discovery", source="bug_bounty", status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1),
         # REQ-PORTSCOPE-001 ceiling: wide enough that configured_tcp/full_tcp

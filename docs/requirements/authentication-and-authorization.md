@@ -145,13 +145,19 @@ Acceptance criteria:
 
 ## REQ-IAM-007: Per-user engagement ownership with admin oversight
 
+> **Amended by REQ-IAM-021..025 (johannes, 2026-10-01, GitHub issue #47, `docs/requirements/engagement-visibility.md`).**
+> Ownership now decides who may *change* an engagement, not who may *see* it: every
+> signed-in user reads every engagement, only the owner or an admin changes it (`403`
+> otherwise, `404` only for an id that does not exist), and no engagement is ownerless.
+> The criteria below are the current text.
+
 Acceptance criteria:
-- `engagement.owner_user_id` (not null after migration) records who
+- `engagement.owner_user_id` (`NOT NULL`, migration 0038) records who
   created/owns it.
-- An `operator`-role user can list, view, and manage (start scans, edit
-  scope, etc.) only engagements they own; any attempt to access another
-  user's engagement by id returns 404 (not 403 — existence is not
-  disclosed to a non-owner).
+- An `operator`-role user can list and read every engagement, and manage
+  (start scans, edit scope, etc.) only engagements they own; a change to
+  another user's engagement is refused with 403 (REQ-IAM-022/023). An id
+  that does not exist is 404.
 - An `admin`-role user can list, view, and manage every engagement
   regardless of owner, and can reassign an engagement's owner.
 - Creating an engagement sets `owner_user_id` to the creating user

@@ -11,6 +11,7 @@ the user back in.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -134,18 +135,28 @@ def _approval(db, owner: User, *, state: str = "requested", expired: bool = Fals
 
 @pytest.mark.parametrize("action", ["approve", "reject"])
 @pytest.mark.parametrize("state", ["requested", "approved", "rejected"])
-def test_negative_non_owner_gets_404_whatever_the_approval_state(client, db, action, state):
+def test_negative_non_owner_gets_403_whatever_the_approval_state(client, db, action, state):
+    """REQ-IAM-014 as amended by REQ-IAM-023: refused before the approval's state is revealed,
+    and the engagement is visible to everyone, so it is 403, not 404."""
     approval = _approval(db, _user(db, role="operator"), state=state)
     other = _auth(db, _user(db, role="operator"))
     resp = client.post(f"/approvals/{approval.id}/{action}", json={}, headers=other)
-    assert resp.status_code == 404
-    assert resp.json()["detail"] == "approval not found"
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "only the owner of this engagement or an administrator can change it"
+    db.expire_all()
+    assert db.get(ApprovalRequest, approval.id).state == state
+
+
+def test_an_approval_that_does_not_exist_is_404_for_everyone(client, db):
+    other = _auth(db, _user(db, role="operator"))
+    resp = client.post(f"/approvals/{uuid.uuid4()}/approve", json={}, headers=other)
+    assert resp.status_code == 404 and resp.json()["detail"] == "approval not found"
 
 
 def test_negative_non_owner_cannot_mark_an_approval_expired(client, db):
     approval = _approval(db, _user(db, role="operator"), expired=True)
     other = _auth(db, _user(db, role="operator"))
-    assert client.post(f"/approvals/{approval.id}/approve", json={}, headers=other).status_code == 404
+    assert client.post(f"/approvals/{approval.id}/approve", json={}, headers=other).status_code == 403
     db.expire_all()
     assert db.get(ApprovalRequest, approval.id).state == "requested"
 

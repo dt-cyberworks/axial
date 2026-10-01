@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from tests.integration.owners import make_owner
 from app.gateway.authorize import ToolCall, authorize
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset, ToolGrant
 from app.scan_readiness import evaluate
@@ -18,6 +19,7 @@ from app.scan_readiness import evaluate
 def _bounty_engagement(db, *, with_program: bool, ident_header_value: str | None = None) -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title="Bounty ident-optional test", source="bug_bounty", status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1),
     )

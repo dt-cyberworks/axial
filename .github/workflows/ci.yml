@@ -171,6 +171,9 @@ jobs:
           image-ref: asm/tool-runner:ci
           format: cyclonedx
           output: sbom/tool-runner.cdx.json
+          # The image is ~5 GB; Trivy's default 5 minute limit was hit on a slow runner
+          # ("semaphore acquire: context deadline exceeded" in layer analysis).
+          timeout: 30m
       - name: Upload SBOMs
         uses: actions/upload-artifact@v4
         with:

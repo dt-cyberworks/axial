@@ -9,6 +9,7 @@ import DnsSection from "../components/DnsSection";
 import DiscoverySection from "../components/DiscoverySection";
 import { discoveryFlagSummary } from "../components/DiscoverySwitches";
 import FindingsSection from "../components/FindingsSection";
+import ReadOnlyNotice from "../components/ReadOnlyNotice";
 import ToolGrantsEditor from "../components/ToolGrantsEditor";
 import { fmtDuration, fmtTime, runStatePill } from "../lib/runs";
 
@@ -110,7 +111,7 @@ export default function EngagementDetail() {
   // that does not exist (or is not the caller's) - that page used to claim
   // "All pre-flight checks pass" for an id like "new".
   if (engagementQuery.isError && isNotFound(engagementQuery.error)) {
-    return <NotFound title="Engagement not found" message="This engagement does not exist, or it belongs to another user." />;
+    return <NotFound title="Engagement not found" message="This engagement does not exist." />;
   }
   if (engagementQuery.isError) {
     return (
@@ -121,6 +122,9 @@ export default function EngagementDetail() {
     );
   }
   if (!engagement) return <section className="page-stack"><p className="muted-line">Loading engagement…</p></section>;
+  // REQ-IAM-025: everyone reads every engagement; only the owner or an admin changes it.
+  // The server refuses a change from anyone else, so this only hides what would be refused.
+  const canManage = engagement.can_manage;
 
   return (
     <section className="page-stack">
@@ -133,7 +137,7 @@ export default function EngagementDetail() {
           <p>Status {engagement?.status ?? "?"} · Vector Agent {engagement?.ai_testing_allowed ? "enabled" : "disabled"} · Discovery extras: {engagement ? discoveryFlagSummary(engagement) : "?"} · {id}</p>
         </div>
         <div className="header-actions">
-          <Link to={`/engagements/${id}/edit`} className="secondary-action">Edit</Link>
+          {canManage && <Link to={`/engagements/${id}/edit`} className="secondary-action">Edit</Link>}
           <button
             className="secondary-action"
             disabled={downloadAuthorizationPdf.isPending}
@@ -144,6 +148,8 @@ export default function EngagementDetail() {
           <Link to={`/engagements/${id}/audit`} className="secondary-action">Audit</Link>
         </div>
       </header>
+
+      {!canManage && <ReadOnlyNotice engagement={engagement} />}
 
       {downloadAuthorizationPdf.isError && (
         <div className="error-block">
@@ -158,7 +164,7 @@ export default function EngagementDetail() {
         <div><span>Scan readiness</span><strong>{readiness ? (readiness.ready ? "Ready" : "Blocked") : "…"}</strong></div>
       </div>
 
-      {authorizationBlockers.length > 0 && (
+      {canManage && authorizationBlockers.length > 0 && (
         <section className="form-panel settings-panel">
           <h2>Authorization not attested</h2>
           <div className="warning-block">
@@ -181,9 +187,9 @@ export default function EngagementDetail() {
         </section>
       )}
 
-      {isDraft && <ToolGrantsEditor engagementId={id!} status="draft" />}
+      {canManage && isDraft && <ToolGrantsEditor engagementId={id!} status="draft" />}
 
-      {isDraft && (
+      {canManage && isDraft && (
         <section className="form-panel settings-panel">
           <h2 style={{ marginTop: 18 }}>Activate engagement</h2>
           <div className="warning-block">
@@ -218,7 +224,7 @@ export default function EngagementDetail() {
                 {readiness.blockers.map((b) => (
                   <li key={b.code} title={b.code}>
                     {b.message}
-                    {b.action === "tool_grants" && (
+                    {canManage && b.action === "tool_grants" && (
                       isDraft
                         ? <> <a href="#tool-grants">Go to tool grants</a></>
                         : <> <Link to={`/engagements/${id}/edit#tool-grants`}>Open tool grants</Link></>
@@ -232,13 +238,15 @@ export default function EngagementDetail() {
           )}
         </div>
         <div className="start-run-actions">
-          <button
-            className="primary-action"
-            disabled={!readiness?.ready || !!activeRun || startScan.isPending}
-            onClick={() => startScan.mutate()}
-          >
-            {activeRun ? "A run is already active" : startScan.isPending ? "Starting…" : "Start run"}
-          </button>
+          {canManage && (
+            <button
+              className="primary-action"
+              disabled={!readiness?.ready || !!activeRun || startScan.isPending}
+              onClick={() => startScan.mutate()}
+            >
+              {activeRun ? "A run is already active" : startScan.isPending ? "Starting…" : "Start run"}
+            </button>
+          )}
           {activeRun && <Link className="secondary-action" to={`/engagements/${id}/runs/${activeRun.id}`}>Open active run →</Link>}
         </div>
         {startScan.isError && <div className="error-block start-run-error">Start failed: {(startScan.error as Error).message}</div>}
@@ -258,7 +266,7 @@ export default function EngagementDetail() {
 
       {/* Only the shown tab is mounted, so only its data is requested. */}
       <div id="engagement-tab-panel" role="tabpanel" aria-labelledby={`engagement-tab-${activeTab}`} className="page-stack">
-        {activeTab === "findings" && <FindingsSection engagementId={id} />}
+        {activeTab === "findings" && <FindingsSection engagementId={id} canManage={canManage} />}
 
         {activeTab === "assets" && (
           <>
@@ -311,9 +319,11 @@ export default function EngagementDetail() {
                     findings, asset inventory, and the methodology &amp; scope section that documents what was authorized.
                   </p>
                 </div>
-                <button disabled={generateReport.isPending} onClick={() => generateReport.mutate()}>
-                  {generateReport.isPending ? "Generating…" : "Generate report"}
-                </button>
+                {canManage && (
+                  <button disabled={generateReport.isPending} onClick={() => generateReport.mutate()}>
+                    {generateReport.isPending ? "Generating…" : "Generate report"}
+                  </button>
+                )}
               </div>
               {generateReport.isError && (
                 <div className="error-block">Report generation failed: {(generateReport.error as Error).message}</div>

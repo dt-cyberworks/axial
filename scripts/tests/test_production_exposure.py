@@ -1,8 +1,10 @@
 """REQ-PRODDEPLOY-001: on a public host the production compose profile must
-publish ONLY Caddy (80/443). Every other service - control-plane, MinIO
-console, Postgres, everything - must be bound to loopback or not published at
-all, and backing-service credentials must actually be the injected secrets
-(not the dev defaults).
+publish ONLY Caddy (80/443). Every other service - control-plane, Postgres,
+everything - must be bound to loopback or not published at all, and
+backing-service credentials must actually be the injected secrets (not the dev
+defaults). REQ-INSTALL-002 tightens this for the object store: it publishes
+NO port at all (the old rule only bound its console to loopback), sits on a
+network only the control-plane joins, and runs with the injected credentials.
 
 This renders the real merged config via `docker compose config` with a
 production-shaped env and asserts the exposure. It is skipped when Docker/compose
@@ -11,6 +13,7 @@ is unavailable so the unit suite stays runnable without infra."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,7 +26,6 @@ PROD_ENV = {
     "ENVIRONMENT": "production",
     "ASM_DOMAIN": "scan.example.test",
     "CONTROL_PLANE_PUBLISH_HOST": "127.0.0.1",
-    "MINIO_CONSOLE_PUBLISH_HOST": "127.0.0.1",
     "POSTGRES_USER": "asm_prod",
     "POSTGRES_PASSWORD": "prod-pg-secret-xyz",
     "POSTGRES_DB": "asm_prod",
@@ -92,10 +94,12 @@ def test_only_caddy_is_publicly_published(prod_config):
     assert published_ports <= {"80", "443"}, f"caddy publishes unexpected ports: {published_ports}"
 
 
-def test_control_plane_and_minio_bind_loopback(prod_config):
+def test_control_plane_binds_loopback_and_the_object_store_publishes_nothing(prod_config):
     binds = {n: hip for (n, hip, _) in _published(prod_config)}
     assert binds.get("control-plane") == "127.0.0.1", binds
-    assert binds.get("minio") == "127.0.0.1", binds
+    # [Negative test] REQ-INSTALL-002: stricter than the former console rule - not even loopback.
+    assert "seaweedfs" not in binds, binds
+    assert not prod_config["services"]["seaweedfs"].get("ports"), prod_config["services"]["seaweedfs"].get("ports")
 
 
 def test_backing_services_use_injected_credentials(prod_config):
@@ -103,11 +107,33 @@ def test_backing_services_use_injected_credentials(prod_config):
     pg = svcs["postgres"]["environment"]
     assert pg["POSTGRES_PASSWORD"] == "prod-pg-secret-xyz"
     assert pg["POSTGRES_USER"] == "asm_prod"
-    mi = svcs["minio"]["environment"]
-    # MinIO root must be the injected S3 secret, never minioadmin.
-    assert mi["MINIO_ROOT_USER"] == "asm-prod-access"
-    assert mi["MINIO_ROOT_PASSWORD"] == "prod-object-secret-xyz"
-    assert mi["MINIO_ROOT_PASSWORD"] != "minioadmin"
+    store = svcs["seaweedfs"]["environment"]
+    # The store's credentials must be the injected S3 secret, never a public default.
+    assert store["AWS_ACCESS_KEY_ID"] == "asm-prod-access"
+    assert store["AWS_SECRET_ACCESS_KEY"] == "prod-object-secret-xyz"
+    for default in ("minioadmin", "asm-dev-access", "asm-dev-secret-change-me"):
+        assert default not in (store["AWS_ACCESS_KEY_ID"], store["AWS_SECRET_ACCESS_KEY"])
+
+
+def test_object_store_is_isolated_pinned_and_hardened_in_production(prod_config):
+    """REQ-INSTALL-002: only the control-plane may reach the store; its unauthenticated
+    admin interfaces are never exposed; the image is pinned; it is hardened like its
+    neighbours as far as the image allows."""
+    svcs = prod_config["services"]
+    store = svcs["seaweedfs"]
+    assert set(store["networks"]) == {"objstore"}, store["networks"]
+    assert prod_config["networks"]["objstore"]["internal"] is True
+    members = {n for n, s in svcs.items() if "objstore" in (s.get("networks") or {})}
+    assert members == {"seaweedfs", "control-plane"}, f"who can reach the object store: {members}"
+    assert re.fullmatch(r"chrislusf/seaweedfs:\d+\.\d+@sha256:[0-9a-f]{64}", store["image"]), store["image"]
+    assert store["cap_drop"] == ["ALL"] and set(store.get("cap_add", [])) <= {"CHOWN", "SETUID", "SETGID"}
+    assert store["read_only"] is True
+    assert "no-new-privileges:true" in store["security_opt"]
+    assert store.get("healthcheck"), "the object store needs a health check"
+    # The unauthenticated master/volume/filer interfaces must stay on the loopback, the optional ones off.
+    command = " ".join(str(c) for c in store["command"])
+    for needed in ("-ip.bind=127.0.0.1", "-s3.ip.bind=0.0.0.0", "-s3.port.iceberg=0", "-s3.port.lance=0"):
+        assert needed in command, f"{needed} missing from the object store command"
 
 
 # GitHub issue #17: docker-compose.prod.yml set ENVIRONMENT=production on
@@ -144,7 +170,9 @@ def _render_missing(tmp_path_factory, missing_key: str) -> subprocess.CompletedP
 
 
 @pytest.mark.parametrize("missing_key", [
-    "RUNNER_API_TOKEN", "RAW_EGRESS_API_TOKEN", "OOB_TOKEN", "CONTROL_PLANE_PUBLISH_HOST", "MINIO_CONSOLE_PUBLISH_HOST",
+    "RUNNER_API_TOKEN", "RAW_EGRESS_API_TOKEN", "OOB_TOKEN", "CONTROL_PLANE_PUBLISH_HOST",
+    # REQ-INSTALL-002: production must not run the object store with the public development credential.
+    "S3_ACCESS_KEY", "S3_SECRET_KEY",
 ])
 def test_negative_config_fails_closed_when_a_required_prod_var_is_missing(tmp_path_factory, missing_key):
     """GitHub issue #17: these three vars previously had only a documented,
@@ -157,16 +185,19 @@ def test_negative_config_fails_closed_when_a_required_prod_var_is_missing(tmp_pa
     assert missing_key in result.stderr
 
 
-def test_dev_config_still_exposes_console_locally():
-    """Guard: the dev profile is unchanged - MinIO console stays on 0.0.0.0 and
-    Postgres keeps the asm default, so local development is not disrupted."""
+def test_dev_config_keeps_the_local_defaults_and_still_hides_the_object_store():
+    """Guard: the dev profile keeps Postgres' asm default (local development is not
+    disrupted), and even in development the object store publishes no port
+    (REQ-INSTALL-002: the filer UI it would offer has no login)."""
     if not _docker_available():
         pytest.skip("docker/compose not available")
     cfg = _render(ROOT / ".env.example", "docker-compose.yml", profiles=("runner",)) \
         if (ROOT / ".env.example").exists() else _render_empty()
     binds = {n: hip for (n, hip, _) in _published(cfg)}
-    assert binds.get("minio") == "0.0.0.0"
+    assert "seaweedfs" not in binds, binds
     assert cfg["services"]["postgres"]["environment"]["POSTGRES_PASSWORD"] == "asm"
+    members = {n for n, s in cfg["services"].items() if "objstore" in (s.get("networks") or {})}
+    assert members == {"seaweedfs", "control-plane"}, members
 
 
 def _render_empty() -> dict:

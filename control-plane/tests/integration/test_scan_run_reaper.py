@@ -11,6 +11,7 @@ import datetime as dt
 
 import uuid as uuid_module
 
+from tests.integration.owners import make_owner
 from app.api.internal import create_scan_run, heartbeat_scan_run, internal_reap_all_stale_runs
 from app.models.engagement import Engagement
 from app.models.scan_run import ScanRun
@@ -21,6 +22,7 @@ from app.schemas.internal import ScanRunCreate
 def _second_engagement(db) -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
+        owner_user_id=make_owner(db).id,
         title=f"Reaper test {uuid_module.uuid4().hex[:8]}", source="lab", status="active",
         authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1),
     )

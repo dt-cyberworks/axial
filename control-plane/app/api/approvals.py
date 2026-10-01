@@ -11,20 +11,22 @@ from app.models.approval import ApprovalRequest
 from app.models.engagement import Engagement
 from app.models.user import User
 from app.schemas.approval import ApprovalDecision, ApprovalOut
-from app.security import require_user
+from app.security import NOT_OWNER_DETAIL, can_manage_engagement, require_user
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
 
 def _require_engagement_owner(db: Session, engagement_id: uuid.UUID, user: User) -> None:
     """approvals.py routes key on approval_id, not engagement_id, so the
-    router-wide path-param ownership check (enforce_engagement_ownership)
-    doesn't see them - enforced explicitly here instead (REQ-IAM-007)."""
-    if user.role == "admin":
-        return
+    router-wide path-param access check (enforce_engagement_access) doesn't see
+    them - enforced explicitly here instead. Deciding an approval is changing
+    the engagement: owner or admin only (REQ-IAM-023); the engagement is visible
+    to everyone now, so a non-owner gets 403, not 404."""
     eng = db.get(Engagement, engagement_id)
-    if eng is None or eng.owner_user_id != user.id:
+    if eng is None:
         raise HTTPException(404, "approval not found")
+    if not can_manage_engagement(user, eng):
+        raise HTTPException(403, NOT_OWNER_DETAIL)
 
 
 @router.get("", response_model=list[ApprovalOut])
@@ -33,7 +35,8 @@ def list_approvals(
 ):
     """Operator-Queue (UI Kap. 3.2): bleibt meist leer, fuellt sich nur bei
     requires_manual_approval=true (cred/exploit) oder Scope-Grenzfaellen.
-    REQ-IAM-007: scoped to the caller's own engagements unless admin."""
+    REQ-IAM-007/022: the owner's action queue - scoped to the caller's own
+    engagements unless admin, even though every engagement is readable."""
     stmt = select(ApprovalRequest).where(ApprovalRequest.state == state)
     if user.role != "admin":
         stmt = stmt.join(Engagement, Engagement.id == ApprovalRequest.engagement_id).where(
@@ -43,8 +46,9 @@ def list_approvals(
 
 
 def _get_pending_or_404(db: Session, approval_id: uuid.UUID, user: User) -> ApprovalRequest:
-    """REQ-IAM-014: a non-owner gets the same 404 as for a non-existent
-    approval, before its state is revealed (409) or written (expired)."""
+    """REQ-IAM-014 (amended by REQ-IAM-023): a non-owner is refused (403) before
+    the approval's state is revealed (409) or written (expired); an approval that
+    does not exist is 404."""
     approval = db.get(ApprovalRequest, approval_id)
     if approval is None:
         raise HTTPException(404, "approval not found")

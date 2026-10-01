@@ -9,15 +9,14 @@
 
 ## 1. Install and start (about 10 minutes)
 
-You need a 64-bit Linux host with Docker Engine and Docker Compose v2, Git, `make`, `curl` and Node.js 20, plus roughly 4 CPU cores, 8 GB of memory and 40 GB of free disk. The full list and the production setup are in [`INSTALL.md`](../../INSTALL.md); the short version for a local try-out:
+You need a 64-bit Linux host with Docker Engine and Docker Compose v2, Git, `make`, `curl`, Python 3 and Node.js 20, plus roughly 4 CPU cores, 8 GB of memory and 40 GB of free disk. The full list and the production setup are in [`INSTALL.md`](../../INSTALL.md); the short version for a local try-out:
 
 ```bash
-cp .env.example .env
 make up
 docker compose --profile runner up -d --build
 ```
 
-`make up` starts the control plane, database and queue. The second command adds the *runner*, the isolated part that actually runs the scanning tools; without it a scan has nothing to run with. Check that the backend answers:
+`make up` first creates your `.env` and generates the encryption keys Axial does not ship, then starts the control plane, database and queue. The second command adds the *runner*, the isolated part that actually runs the scanning tools; without it a scan has nothing to run with. Check that the backend answers:
 
 ```bash
 curl --fail http://localhost:8000/health

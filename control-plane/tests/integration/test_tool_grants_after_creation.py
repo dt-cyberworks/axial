@@ -325,7 +325,9 @@ def test_negative_a_non_owner_can_neither_add_nor_remove_a_grant(engine, db, tes
         added = client.post(f"/engagements/{eng.id}/tool-grants", headers=headers,
                             json={"tool_category": "recon", "mode": "active", "confirm_widening": True})
         removed = client.delete(f"/engagements/{eng.id}/tool-grants/vuln/active", headers=headers)
-        assert added.status_code == 404 and removed.status_code == 404
+        # REQ-IAM-023: the engagement is readable by everyone, so a refused change is 403.
+        assert added.status_code == 403 and removed.status_code == 403
+        assert client.get(f"/engagements/{eng.id}/tool-grants", headers=headers).status_code == 200
     finally:
         app.dependency_overrides.clear()
     assert _grants(db, eng) == {("vuln", "active")}

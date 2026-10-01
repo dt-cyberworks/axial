@@ -64,8 +64,15 @@ def test_a_real_https_public_base_url_is_accepted():
     ("scope_signing_secret", "change-me-in-dev"),
     ("raw_egress_signing_secret", "raw-egress-change-me-in-dev"),
     ("mfa_encryption_key", ""),
+    # REQ-INSTALL-002: the object-store default that v0.3.0 shipped, the
+    # current public development default, and an empty credential are all
+    # refused - production must carry its own generated S3 credential.
     ("s3_access_key", "minioadmin"),
     ("s3_secret_key", "minioadmin"),
+    ("s3_access_key", "asm-dev-access"),
+    ("s3_secret_key", "asm-dev-secret-change-me"),
+    ("s3_access_key", ""),
+    ("s3_secret_key", ""),
 ])
 def test_negative_each_preexisting_dev_default_fails_closed(field, bad_value):
     with pytest.raises(ValueError, match="insecure production configuration"):

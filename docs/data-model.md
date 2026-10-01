@@ -30,6 +30,7 @@ erDiagram
         enum source "lab|own_domain|bug_bounty|customer"
         enum status "draft..active..revoked"
         char scope_doc_sha256 "signature reference (customer)"
+        uuid owner_user_id FK "app_user, NOT NULL: who may change it (REQ-IAM-021)"
         timestamptz authorized_from
         timestamptz authorized_until
         int tcp_port_from "1..65535"

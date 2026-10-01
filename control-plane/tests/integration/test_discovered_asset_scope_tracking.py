@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from tests.integration.owners import make_owner
 from app.api.internal import add_discovered_asset, list_discovered_assets
 from app.models.asset import DiscoveredAsset
 from app.models.engagement import Engagement
@@ -19,7 +20,7 @@ from app.schemas.internal import DiscoveredAssetIn
 
 def _engagement(db) -> Engagement:
     now = dt.datetime.now(dt.timezone.utc)
-    eng = Engagement(title="Scope tracking", source="own_domain", status="active",
+    eng = Engagement(owner_user_id=make_owner(db).id, title="Scope tracking", source="own_domain", status="active",
                      authorized_from=now - dt.timedelta(hours=1), authorized_until=now + dt.timedelta(days=1))
     db.add(eng)
     db.commit()

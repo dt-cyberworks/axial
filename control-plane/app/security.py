@@ -1,15 +1,19 @@
-"""Human authentication and authorization (REQ-IAM-002..007).
+"""Human authentication and authorization (REQ-IAM-002..007, REQ-IAM-021..023).
 
 Two dependencies, wired ONCE on the public router (app/api/__init__.py),
 cover every current and future public endpoint without per-route changes:
   - require_user: resolves the caller's session to a real User (or, only
     outside production, the legacy shared operator token) - REQ-IAM-002.
-  - enforce_engagement_ownership: for any request whose path carries an
-    engagement_id, checks the caller owns it (or is admin) BEFORE the
-    handler runs - REQ-IAM-007. It inspects request.path_params, which
-    Starlette populates during routing, before dependency resolution -
-    so this works for every /engagements/{engagement_id}/... route
-    (engagements, findings, stream) without touching those handlers.
+  - enforce_engagement_access: for any request whose path carries an
+    engagement_id, applies THE rule of who may do what with an engagement
+    BEFORE the handler (and before its body is parsed) runs. Every signed-in
+    user may READ every engagement (GET/HEAD/OPTIONS); only its owner or an
+    admin may change it (POST/PUT/PATCH/DELETE -> 403). An id that does not
+    exist is 404 for everyone. REQ-IAM-022/023 (GitHub issue #47). It inspects
+    request.path_params, which Starlette populates during routing, before
+    dependency resolution - so this works for every
+    /engagements/{engagement_id}/... route (engagements, findings, stream)
+    without touching those handlers.
 """
 
 from __future__ import annotations
@@ -142,7 +146,16 @@ def require_admin(user: User = Depends(require_user)) -> User:
     return user
 
 
-def enforce_engagement_ownership(
+READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+NOT_OWNER_DETAIL = "only the owner of this engagement or an administrator can change it"
+
+
+def can_manage_engagement(user: User, eng: Engagement) -> bool:
+    """The one rule for changing an engagement (REQ-IAM-023): its owner, or an admin."""
+    return user.role == "admin" or eng.owner_user_id == user.id
+
+
+def enforce_engagement_access(
     request: Request, user: User = Depends(require_user), db: Session = Depends(get_db),
 ) -> None:
     raw = request.path_params.get("engagement_id")
@@ -155,5 +168,9 @@ def enforce_engagement_ownership(
     if user.role == "admin":
         return
     eng = db.get(Engagement, engagement_id)
-    if eng is None or eng.owner_user_id != user.id:
+    if eng is None:
         raise HTTPException(404, "engagement not found")
+    if request.method in READ_METHODS:
+        return  # REQ-IAM-022: every signed-in user reads every engagement
+    if not can_manage_engagement(user, eng):
+        raise HTTPException(403, NOT_OWNER_DETAIL)

@@ -97,28 +97,58 @@ services:
     image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     networks: [ctrl]
 
-  minio:
-    # REQ-SUPPLY-001: pinned by digest. Bump with scripts/pin_images.sh.
-    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    command: server /data --console-address ":9001"
+  seaweedfs:
+    # REQ-INSTALL-002: S3-compatible object store (Apache-2.0). It replaced
+    # MinIO, whose images were withdrawn from Docker Hub and quay.io in 2025-26,
+    # so a fresh install could no longer pull the stack.
+    # REQ-SUPPLY-001: pinned by version and digest. Bump with scripts/pin_images.sh.
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    # `weed server` also starts master, volume and filer HTTP/gRPC interfaces
+    # that have NO authentication - anything that can reach the filer can read
+    # and write every object and bypass the S3 credentials. So they are bound to
+    # the container's loopback (-ip.bind) and only the S3 gateway listens on
+    # the network (-s3.ip.bind); the optional Iceberg/Lance endpoints are off.
+    # The S3 gateway's own gRPC port (18333) cannot be bound separately, which
+    # is why this service sits on a network only the control-plane joins.
+    command:
+      - server
+      - -ip=127.0.0.1
+      - -ip.bind=127.0.0.1
+      - -dir=/data
+      - -s3
+      - -s3.port=8333
+      - -s3.ip.bind=0.0.0.0
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
+      - -volume.max=0
+      - -master.volumeSizeLimitMB=1024
     environment:
-      # REQ-PRODDEPLOY-001: MinIO's root credentials come from the same values
-      # the control-plane uses for S3, so production runs a real secret (the
-      # production gate rejects the minioadmin default) and both sides agree.
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+      # The same values the control-plane uses for S3, so both sides agree and
+      # production runs a real secret (the production gate rejects the
+      # development defaults). Without them SeaweedFS would serve S3 with NO
+      # authentication, so the defaults below are never empty.
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-asm-dev-access}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-asm-dev-secret-change-me}
     volumes:
-      - miniodata:/data
-    networks: [ctrl, edge]        # edge nur, damit die Dev-Konsole (9001) erreichbar ist
-    ports:
-      # REQ-PRODDEPLOY-001: the console publish host is templated (like
-      # control-plane) so production binds it to 127.0.0.1 - reachable only via
-      # an SSH tunnel, never the public internet. Dev keeps 0.0.0.0. A compose
-      # overlay cannot REMOVE a base ports entry (lists merge), so it must be
-      # templated here rather than dropped in docker-compose.prod.yml.
-      # REQ-MULTIENV-002: the host-side PORT is also templated (default
-      # unchanged: 9001) so two named environments on one host never collide.
-      - "${MINIO_CONSOLE_PUBLISH_HOST:-0.0.0.0}:${MINIO_CONSOLE_PUBLISH_PORT:-9001}:9001"
+      - seaweedfsdata:/data
+    # Dedicated internal network: only the control-plane may reach the store.
+    # It publishes no host port in any profile (the filer UI it would offer
+    # has no login).
+    networks: [objstore]
+    # The entrypoint starts as root, fixes /data ownership and drops to its own
+    # unprivileged `seaweed` user (uid 1000) with su-exec: that needs exactly
+    # CHOWN, SETUID and SETGID. The server process itself holds no capability.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9333/cluster/healthz && nc -z 127.0.0.1 8333"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   control-plane:
     build: ./control-plane
@@ -163,12 +193,12 @@ services:
       RAW_EGRESS_LEASE_TTL_SECONDS: ${RAW_EGRESS_LEASE_TTL_SECONDS:-900}
       RAW_EGRESS_MATERIALIZATION_MAX_AGE_SECONDS: ${RAW_EGRESS_MATERIALIZATION_MAX_AGE_SECONDS:-900}
       # REQ-IAM-004: encrypts TOTP secrets at rest. No key ships in source -
-      # set MFA_ENCRYPTION_KEY in .env (see .env.example to generate one). Empty
-      # here is rejected in production and unusable in dev (Fernet needs a real key).
+      # `make env` generates MFA_ENCRYPTION_KEY into .env (REQ-INSTALL-003). Empty
+      # here is rejected in production; in dev enrollment answers 503 (REQ-INSTALL-004).
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
       # GitHub issue #25: encrypts LLM/NVD provider API keys at rest (same
       # pattern as MFA_ENCRYPTION_KEY, deliberately a DISTINCT key/variable).
-      # See .env.example to generate one. Empty is rejected in production.
+      # `make env` generates it too. Empty is rejected in production.
       SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       SETTINGS_ENCRYPTION_KEY_PREVIOUS: ${SETTINGS_ENCRYPTION_KEY_PREVIOUS:-}
       # 300 war zu niedrig: ein Full-Range-Scan (1-65535) eines ueberwiegend
@@ -189,11 +219,13 @@ services:
       INTERNAL_BULK_DB_SLOTS: ${INTERNAL_BULK_DB_SLOTS:-4}
       INTERNAL_BULK_WAIT_SECONDS: ${INTERNAL_BULK_WAIT_SECONDS:-3}
       ENVIRONMENT: ${ENVIRONMENT:-development}
-      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs:8333}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-asm-dev-access}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-asm-dev-secret-change-me}
       S3_BUCKET: ${S3_BUCKET:-asm-evidence}
-    networks: [ctrl, edge]        # ctrl: DB/Queue (intern). edge: API vom Host erreichbar.
+    # ctrl: DB/queue (internal). edge: the API is reachable from the host.
+    # objstore: the only service besides the object store itself on that network.
+    networks: [ctrl, edge, objstore]
     # REQ-HARDEN-003: least privilege. No capability is needed (ports > 1024,
     # no raw sockets), the root filesystem is read-only, and nothing may gain
     # privileges. Writable: /tmp only (temp files).
@@ -487,7 +519,11 @@ networks:
   control: { name: "${ASM_NETWORK_PREFIX:-asm}_control", internal: true }   # worker <-> tool-runner (Kontrollkanal, kein ctrl-Zugriff)
   oob:     { name: "${ASM_NETWORK_PREFIX:-asm}_oob", internal: true }       # REQ-COVER-004: nur oob-relay <-> raw-egress-gateway/tool-runner
   egress:  { name: "${ASM_NETWORK_PREFIX:-asm}_egress" }                    # kontrollierter Weg nach draussen (nur Proxy + worker-OSINT)
+  objstore: { name: "${ASM_NETWORK_PREFIX:-asm}_objstore", internal: true } # REQ-INSTALL-002: nur control-plane <-> object store (the store's gRPC port has no auth)
 
 volumes:
   pgdata: {}
-  miniodata: {}
+  # REQ-INSTALL-002: replaces the former `miniodata` volume. Nothing stored
+  # objects there (no code uses object storage yet), so nothing is migrated;
+  # the old volume is left untouched and can be removed after the upgrade.
+  seaweedfsdata: {}
