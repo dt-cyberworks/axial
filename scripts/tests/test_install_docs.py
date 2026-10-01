@@ -259,3 +259,23 @@ def test_the_workflow_is_part_of_the_public_export():
         pytest.skip("export rules are not part of the public tree")
     rules = allow.read_text().splitlines()
     assert ".github/" in rules and "scripts/" in rules
+
+
+def test_negative_the_guides_stop_command_includes_the_runner_profile():
+    """A plain `docker compose down` left tool-runner and raw-egress-gateway running after the
+    guide's own "enable active scanning" step (found by running the guide literally on a clean VM)."""
+    stop = INSTALL.split("### Stop the local installation")[1].split("## 4. Single-host production")[0]
+    commands = [line.strip() for block in _code_blocks(stop) for line in block.splitlines() if "docker compose" in line]
+    assert commands == ["docker compose --profile runner down"], commands
+    assert "docker compose down\n" not in stop.replace("`docker compose down`", "")      # only named as the thing NOT to type
+
+
+def test_negative_make_down_stops_the_runner_and_oob_profiles_too():
+    recipe = MAKEFILE.split("\ndown:", 1)[1].split("\n\n", 1)[0]
+    assert "--profile runner" in recipe and "--profile oob" in recipe and "down -v" in recipe
+
+
+def test_the_smoke_test_runs_the_guides_stop_command_and_asserts_nothing_keeps_running():
+    smoke = (ROOT / "scripts" / "install_smoke.sh").read_text()
+    assert "run docker compose --profile runner down\n" in smoke
+    assert "left containers of this installation running" in smoke

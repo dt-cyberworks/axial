@@ -108,8 +108,9 @@ curl --fail http://localhost:8000/health
 ```
 
 The first start builds images and downloads base layers, which may take
-several minutes. Compose waits for Postgres and applies migrations. The health
-request should print:
+several minutes. Compose waits for Postgres and applies migrations, and
+`make up` returns only once the control plane answers, so the health request
+works the first time you type it. It should print:
 
 ```json
 {"status":"ok"}
@@ -174,11 +175,15 @@ lab, no database, and starts nothing. See [docs/testing.md](docs/testing.md).
 Preserve the database and evidence volumes:
 
 ```bash
-docker compose down
+docker compose --profile runner down
 ```
 
+`--profile runner` makes `down` include the active-scanning services
+(`tool-runner` and `raw-egress-gateway`); a plain `docker compose down` leaves
+them running. It is harmless if you never enabled active scanning.
+
 Start again with `make up`. Do **not** use `make down` unless you intend to
-delete local data: that target runs `docker compose down -v`.
+delete local data: that target also removes the volumes (`down -v`).
 
 ## 4. Single-host production
 

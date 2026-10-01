@@ -27,8 +27,8 @@ property that is tested, not hoped for.
 **Risk class: R3.** The change generates and handles secrets, changes the
 authentication error path, and replaces a container image that holds the
 evidence store, including its network exposure. Per the SDLC an agent cannot
-approve this; the owner's human security review is recorded as pending in the
-decision log.
+approve this; the owner's human security review is recorded in the decision
+log (approved by johannes on 2026-10-01).
 
 Tests must verify these requirements directly. Do not weaken tests to match
 implementation; update implementation when it violates this document.
@@ -57,7 +57,29 @@ Decision log:
   has no authenticated console and its admin interfaces must never be
   reachable (REQ-INSTALL-002). This tightens, and does not weaken, the
   earlier exposure rule.
-- Pending: human security review of this record and its implementation.
+- 2026-10-01 - **security review: approved by johannes** (project and security
+  owner), on his explicit instruction "Yes record my signoff" after the clean-VM
+  and GitHub-runner verification, the threat-model assessment (S13) and the
+  list of open items were put in front of him. The approval is his; the
+  implementing agent could not give it. It covers this record and its
+  implementation as released in v0.3.1. Roll-out follows the usual order (dev,
+  then int, then prod).
+- 2026-10-01 - **roll-out.** Dev: the stack was updated in place (the object store replaced, data kept), the
+  object-store checks of the install smoke pass against it, and the UAT golden path is green. Int: updated in
+  place after a database dump, `migrate` then the new object store and control-plane, the console build shipped to
+  the shared edge, the idle MinIO container removed (its volume was never written to and is kept for now). On
+  the live stack the same object-store checks pass (anonymous and wrong-secret requests denied, the unauthenticated
+  interfaces unreachable, the worker cannot resolve the store), the control-plane log is clean, host memory is
+  unchanged, and the UAT golden path and scan journey are green. johannes confirmed that no data migration was
+  needed for the replacement of the object store. Prod is untouched (stopped by design).
+- 2026-10-01 - **second round, after the release.** The merged v0.3.1 was installed again from a fresh clone of the
+  public repository by typing the guide's commands verbatim: on a clean virtual machine (local evaluation), on a
+  cloud host with a real DNS name and a real Let's Encrypt certificate (single-host production, including the
+  guide's stop and restart), and by the install-smoke workflow on a GitHub runner. The production leg and the
+  runner passed. The local leg found two defects in the guide itself, which no smoke test had caught because the
+  smoke test was more forgiving than a reader: `make up` returned before the API accepted connections, so the
+  guide's next command (`curl --fail ...health`) failed; and `docker compose down` left the scanning services
+  running. Both are fixed in the next patch release (REQ-INSTALL-001), with tests that fail without the fix.
 
 ## REQ-INSTALL-001: The documented install is executed, end to end, from a clean checkout
 
@@ -82,6 +104,22 @@ Acceptance criteria:
 - Every make target and repository path that `INSTALL.md` instructs the reader
   to use exists in the public export. [Negative test] A guide that names a
   target or path the export omits fails the check.
+- The guide's first verification works the first time it is typed: `make up`
+  returns only once the control plane answers (`scripts/wait_for_api.sh`), so
+  `curl --fail http://localhost:8000/health` right after it succeeds. Found on
+  2026-10-01 by typing the published guide's commands one after another on a
+  clean machine ("Connection reset by peer"), which the smoke test had hidden
+  with a wait loop of its own; it now makes that check immediately, without
+  waiting. [Negative test] The wait gives up with a pointer to the logs when
+  the API never answers, and an error status is not "ready".
+- The guide's stop instruction stops everything the guide started. A plain
+  `docker compose down` left the active-scanning services (`tool-runner`,
+  `raw-egress-gateway`, in the `runner` profile) running after the guide's own
+  "enable active scanning" step, found by running the guide literally; the
+  guide now says `docker compose --profile runner down`, and `make down` covers
+  the runner and oob profiles. [Negative test] The guide's stop command is the
+  one with the profile, and the smoke test runs it and fails if any container of
+  the installation is left.
 
 ## REQ-INSTALL-002: The object store is obtainable, pinned, authenticated and isolated
 

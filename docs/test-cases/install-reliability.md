@@ -22,13 +22,15 @@ Requirements:
 Automated tests:
 
 - `scripts/tests/test_install_docs.py`
+- `scripts/tests/test_wait_for_api.py`
 - `scripts/install_smoke.sh`
 
 Objective:
 
-Confirm the guide and the tree agree on every command, and that the smoke script
+Confirm the guide and the tree agree on every command, that the smoke script
 follows the guide on a copy of the tree, cannot touch a stack it did not create,
-and carries its own negative checks.
+and carries its own negative checks, and that `make up` waits for the API so the
+guide's first health check passes the first time.
 
 Expected results:
 
@@ -39,6 +41,14 @@ Expected results:
   `test_the_smoke_scripts_are_valid_and_executable`,
   `test_the_smoke_script_cannot_touch_a_stack_it_did_not_create`,
   `test_the_smoke_script_contains_its_negative_checks`.
+- `test_it_waits_for_an_api_that_starts_late_and_then_returns_success` (a real HTTP server that
+  starts answering after a delay), `test_negative_it_gives_up_with_a_pointer_when_the_api_never_answers`,
+  `test_negative_a_server_that_answers_with_an_error_status_is_not_ready`,
+  `test_make_up_runs_the_wait_after_starting_the_stack`,
+  `test_the_smoke_test_checks_health_immediately_after_make_up_without_waiting`.
+- `test_negative_the_guides_stop_command_includes_the_runner_profile`,
+  `test_negative_make_down_stops_the_runner_and_oob_profiles_too`,
+  `test_the_smoke_test_runs_the_guides_stop_command_and_asserts_nothing_keeps_running`.
 - Run on a clean VM (`scripts/install_smoke.sh all`): every step passes; the result
   is recorded in the release evidence.
 

@@ -3,7 +3,8 @@
 Specifies how [`REQ-INSTALL-001..008`](../requirements/install-reliability.md)
 are met. Verification: [`TC-INSTALL-001..008`](../test-cases/install-reliability.md).
 Risk class **R3** (secrets generation, authentication error path, the evidence
-store's image and network exposure); human security review is pending.
+store's image and network exposure); human security review approved by johannes
+on 2026-10-01 (see the decision log of the requirement record).
 
 ## 1. What was wrong, and the shape of the fix
 

@@ -18,11 +18,14 @@ help:  ## Show this help
 env:  ## Create or complete .env for local evaluation (generates the encryption keys; never overwrites a set value)
 	python3 scripts/init_dev_env.py
 
-up: env  ## Start the scanner stack (control-plane, worker, egress-proxy, database)
+up: env  ## Start the scanner stack (control-plane, worker, egress-proxy, database) and wait until the API answers
 	docker compose up -d --build
+	@bash scripts/wait_for_api.sh
 
+# The runner and oob profiles are named on purpose: a plain `docker compose down` does not include
+# the services in a profile, so tool-runner and raw-egress-gateway kept running (REQ-INSTALL-001).
 down:  ## Stop the stack and DELETE its volumes - all engagements and findings are lost
-	docker compose down -v
+	docker compose --profile runner --profile oob down -v
 
 logs:  ## Follow the scanner stack's logs
 	docker compose logs -f
