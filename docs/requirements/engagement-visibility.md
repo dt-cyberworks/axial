@@ -171,3 +171,17 @@ Security invariants: none beyond REQ-IAM-023; hiding is not a control.
 - The benchmark seeding endpoint created its engagement under the oldest active administrator.
 - UAT golden path green on dev.
 
+
+2026-10-01, int (after johannes's approval of this requirement; deployed from the v0.3.1 release commit):
+
+- Pre-checks on the live database: no scan run in flight, 3 engagements of which none ownerless, 2 active
+  administrators. A database dump was taken first and the previous control-plane image kept for rollback.
+- Migration 0038 applied by the `migrate` service (exit 0): `engagement.owner_user_id` is `NOT NULL`; engagements,
+  users and findings are unchanged (3, 4, 75). With no ownerless engagement it only tightened the column, so the
+  backfill and its fail-closed refusal are still proven by the integration test, not live.
+- Live, real HTTPS through the shared edge, with the operator UAT account (not an administrator): the list shows
+  all 3 engagements, the 2 it does not own with `can_manage=false` and their owners named; it reads all five
+  read routes of one of them (200); a no-op `PATCH` and an empty-body scope `POST` on it are `403` (an empty body
+  would have been `422` if the rule had not fired first); an unknown id is `404`; the findings page covers every
+  engagement.
+- UAT golden path and scan journey green on int (the journey scanned only its approved target).

@@ -121,8 +121,11 @@ stage_local() {
     say "INSTALL.md 3: start and verify the backend (make up)"
     run make up
     run docker compose ps
-    wait_for "the control-plane /health" 60 curl --fail --silent "http://localhost:$API_PORT/health"
-    [ "$(curl --fail --silent "http://localhost:$API_PORT/health")" = '{"status":"ok"}' ] || fail "/health did not return {\"status\":\"ok\"}"
+    # NO waiting here, on purpose: the guide's very next step is `curl --fail .../health`, typed by a
+    # person the moment `make up` returns. A wait loop in this script hid the race in which `make up`
+    # returned before the API accepted connections ("Connection reset by peer" on a clean machine).
+    [ "$(curl --fail --silent --show-error "http://localhost:$API_PORT/health")" = '{"status":"ok"}' ] \
+        || fail "the guide's first check (curl --fail .../health) did not pass right after make up"
 
     say "INSTALL.md 3: the first administrator (make bootstrap-admin)"
     # REQ-INSTALL-005 [negative]: an address the sign-in form would reject must not create an account.
@@ -178,7 +181,14 @@ stage_local() {
         docker compose --profile runner ps tool-runner --format '{{.Status}}' | grep -q '^Up' || fail "tool-runner is not running"
     fi
 
-    say "local stage done - removing this stack"
+    say "INSTALL.md 3: stop the local installation (verbatim) - nothing of it may keep running"
+    # A plain `docker compose down` left tool-runner and raw-egress-gateway running (they sit in the
+    # `runner` profile), found by running the guide literally; the guide now says --profile runner.
+    run docker compose --profile runner down
+    [ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")" ] \
+        || fail "the guide's stop command left containers of this installation running"
+
+    say "local stage done - removing this stack's volumes"
     docker compose --profile runner down -v --remove-orphans >/dev/null 2>&1 || true
 }
 
