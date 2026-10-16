@@ -3,14 +3,11 @@
 UI/UX specification of the web interface. Create an engagement · follow a
 scan live · present results.
 
-Operator view first · customer view as a read-only derivation
-
-Version 1.0 · Companion document to Architecture v2.1
+Operator view · live scan · results
 
 > [!NOTE]
 > **Baseline assumptions of this specification.** The primary user is the
-> operator (the internal operator console). A separate customer view comes
-> later as a reduced, read-only derivation of the same data (Ch. 7).
+> operator (the internal operator console).
 > Authorization model: authorize up front in the scope, then run
 > autonomously up to that boundary. The live view is predominantly
 > observation; an approval queue appears only when
@@ -54,8 +51,8 @@ template and the data model. Each step writes to the corresponding table.
 
 | Step | Input | Writes to |
 |---|---|---|
-| 1 · Type | `source` (lab/own_domain/bug_bounty/customer) | `engagement.source` |
-| 2 · Parties | title, customer, emergency contact, test window | `engagement` |
+| 1 · Type | `source` (lab/own_domain/bug_bounty) | `engagement.source` |
+| 2 · Parties | title, emergency contact, test window | `engagement` |
 | 3 · Assets | allow/deny lists, ownership | `scope_asset` |
 | 4 · Steps | `tool_grant` per category: passive/active, per-step approval | `tool_grant` |
 | 5 · BBP (conditional) | program, policy, ident header | `bounty_program` |
@@ -77,7 +74,7 @@ Fig. 2: The core — where the user picks domains AND the desired steps.
 │   [domain ▼] internal.customer.com /admin  Reason: prod login│
 ├─────────────────────────────────────────────────────────────┤
 │  Test steps (what the scanner may do)                        │
-│   Category       Passive Active⚖  Per-step approval          │
+│   Category       Passive Active   Per-step approval          │
 │   recon           [☑]     [☑]     [☐]                         │
 │   fingerprint     [☑]     [☑]     [☐]                         │
 │   vuln            [☑]     [☑]     [☐]                         │
@@ -89,12 +86,11 @@ Fig. 2: The core — where the user picks domains AND the desired steps.
 ```
 
 > [!IMPORTANT]
-> **⚖ LEGAL / CONTROL — the UI visibly enforces the rules.** Active
-> checkboxes (⚖) only become selectable once the corresponding asset is
+> **The UI visibly enforces the rules.** Active
+> checkboxes only become selectable once the corresponding asset is
 > "actively allowed". Deny rows are visually highlighted (precedence). The
 > "Next" button toward authorization is locked until ownership is verified
-> and — for `customer`/`bug_bounty` — the respective requirement (signature
-> or program policy) is satisfied. The UI cannot unlock anything the
+> and — for `bug_bounty` — the program policy is satisfied. The UI cannot unlock anything the
 > gateway would later reject.
 
 ## 3. Live scan: tracking progress
@@ -125,7 +121,7 @@ Fig. 3: Live view — phase bar, real-time log, approval area.
 │   14:02:04  GATEWAY ALLOW  fingerprint/nmap -sV  ✓           │
 │   14:01:58  GATEWAY DENY   masscan (not whitelisted) ✕       │
 ├─────────────────────────────────────────────────────────────┤
-│  ⚖ Pending approvals (0)     Everything pre-authorized       │
+│  Pending approvals (0)       Everything pre-authorized       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -148,7 +144,7 @@ Fig. 4: Approval card — a one-time, expiring authorization
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  ⚖ Approval required                                         │
+│  Approval required                                           │
 │  The agent wants to execute an active step:                  │
 │   Category:   cred (default-credential check)                │
 │   Target:     api.customer.com/login (in scope, active)      │
@@ -160,7 +156,7 @@ Fig. 4: Approval card — a one-time, expiring authorization
 ```
 
 > [!IMPORTANT]
-> **⚖ LEGAL / CONTROL — an approval is one-time and logged.** Clicking
+> **An approval is one-time and logged.** Clicking
 > "Approve" creates a consume-once authorization (`approval_request`), valid
 > only for that exact tool call and time-limited. Rejection or timeout stops
 > the step, not the whole scan. Every decision lands in `audit_log` with the
@@ -228,7 +224,7 @@ recommendation on the right.
 | State/data | React Query | server state, polling/cache |
 | Live updates | Server-sent events (SSE) | live log & progress from `audit_log` |
 | Charts | Recharts or similar | severity distribution, trend |
-| Auth | OIDC / session | operator login; a customer role later |
+| Auth | OIDC / session | operator login |
 
 ### 5.2 Integration with the existing API
 
@@ -245,13 +241,13 @@ POST /engagements/{id}/tool-grants     -> steps matrix
 POST /engagements/{id}/activate        -> after the authorization checklist
 GET  /engagements/{id}/stream  (SSE)   -> live log + phase progress
 GET  /approvals?state=requested        -> approval queue
-POST /approvals/{id}/approve|reject    -> one-time authorization ⚖
+POST /approvals/{id}/approve|reject    -> one-time authorization
 GET  /engagements/{id}/findings        -> results list/detail
 POST /engagements/{id}/report          -> PDF export (async)
 ```
 
 > [!IMPORTANT]
-> **⚖ LEGAL / CONTROL — the UI enforces nothing, it reflects.** The web
+> **The UI enforces nothing, it reflects.** The web
 > interface is convenient operation, but NOT a security boundary. All
 > authorizations, scope, and tool checks are still decided server-side by
 > the Scope Gateway. Even if the UI were manipulated, the gateway remains
@@ -272,30 +268,6 @@ POST /engagements/{id}/report          -> PDF export (async)
 - Budget display: tool calls/tokens/time spent against the run's budget —
   prevents cost surprises.
 
-## 7. Future customer view (read-only derivation)
-
-Once the customer later gets access, their interface is a reduced,
-read-only subset of the same data — not a second system.
-
-| Element | Operator view | Customer view |
-|---|---|---|
-| Create engagement | full | — (operator only) |
-| Live scan log | full (incl. gateway decisions) | reduced: phase + progress |
-| Approval queue | yes (authorize) | — |
-| Findings | all, incl. `inferred` | only `validated` + released |
-| Report | generate & edit | download the finished report |
-| Scope/methodology | fully editable | read-only (proof) |
-
-> [!IMPORTANT]
-> **⚖ LEGAL / CONTROL — separating the views = separating data ownership.**
-> The customer view shows only data from their own engagement, and only
-> released, validated findings. Internal gateway decisions, rejected
-> actions, and `inferred` findings stay in the operator view. Role-based
-> access control (RBAC) enforces this server-side, not the UI.
-
 ---
 
-**Note:** This UI/UX specification describes the interaction; the security
-and legal logic remains unchanged in the Scope Gateway (Architecture v2.1).
-The contractual/criminal-law safeguards should be secured with qualified
-advice.
+This is a technical document, not legal advice. Only test systems you are authorized to test; see `docs/legal.md`.

@@ -17,6 +17,16 @@ from app.models.engagement import (  # noqa: F401
     ToolGrant,
 )
 from app.models.finding import Finding, FindingObservation  # noqa: F401
+from app.models.mail import MailOutbox, PasswordResetToken  # noqa: F401
+from app.models.monitoring import (  # noqa: F401
+    AlertEvent,
+    ChangeEvent,
+    EngagementConsent,
+    EngagementSchedule,
+    InboxItem,
+    NotificationTarget,
+    RunInventorySnapshot,
+)
 from app.models.openwire_callback import OpenwireCallbackToken  # noqa: F401
 from app.models.rate_reservation import RateReservation  # noqa: F401
 from app.models.report import Report  # noqa: F401

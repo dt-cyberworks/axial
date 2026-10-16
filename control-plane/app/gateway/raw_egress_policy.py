@@ -1,10 +1,11 @@
-"""Raw egress policy rendering for tools that cannot use an HTTP proxy.
+"""Raw egress allowlist for tools that cannot use an HTTP proxy.
 
 The HTTP egress-proxy is still the preferred enforcement path for HTTP-aware
 tools. nmap is different: raw/TCP scans need a network-level allowlist. This
-module turns the already-authorized engagement scope into a Kubernetes
-NetworkPolicy fragment that allows direct runner egress only to active
-IP/CIDR scope assets.
+module turns the already-authorized engagement scope into the IP/CIDR blocks
+(allow minus deny) that a raw-egress lease may open, and that
+raw_egress_lease.py checks every requested target against before it signs
+anything. The lease gateway then enforces the blocks with nftables.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from app.models.engagement import Engagement, ScopeAsset
 
 @dataclass(frozen=True)
 class RawEgressPolicy:
-    policy: dict
     ip_blocks: list[dict]
     omitted_assets: list[dict]
     warnings: list[str]
@@ -69,16 +69,15 @@ def build_raw_egress_policy(
     engagement_id: uuid.UUID,
     assets: Iterable[ScopeAsset],
     *,
-    namespace: str | None = None,
     materialized_ips: Iterable[dict] | None = None,
 ) -> RawEgressPolicy:
-    """Build a deny-by-default NetworkPolicy for nmap/raw-scan egress.
+    """Build the deny-by-default IP/CIDR allowlist for nmap/raw-scan egress.
 
-    IP/CIDR allow assets are rendered directly. Domain and wildcard assets
-    cannot be expressed in a NetworkPolicy on their own; they are omitted here
+    IP/CIDR allow assets are used directly. Domain and wildcard assets
+    cannot be expressed as an IP block on their own; they are omitted here
     UNLESS an audited DNS materialization (app/gateway/dns_materialization.py)
     has resolved them to IPs, which are then passed in via ``materialized_ips``
-    and rendered as /32 (or /128) allow blocks. Names that are still
+    and used as /32 (or /128) allow blocks. Names that are still
     unresolved remain fail-closed.
     """
     allow_networks = []
@@ -127,41 +126,20 @@ def build_raw_egress_policy(
             continue
         ip_blocks.append(block)
 
-    egress = [{"to": [{"ipBlock": block}]} for block in ip_blocks]
-    policy = {
-        "apiVersion": "networking.k8s.io/v1",
-        "kind": "NetworkPolicy",
-        "metadata": {
-            "name": f"runner-raw-egress-{str(engagement_id)[:8]}",
-            "labels": {
-                "app": "tool-runner",
-                "engagement": str(engagement_id),
-                "asm.hettig.online/purpose": "nmap-raw-egress",
-            },
-        },
-        "spec": {
-            "podSelector": {"matchLabels": {"app": "tool-runner", "engagement": str(engagement_id)}},
-            "policyTypes": ["Egress"],
-            "egress": egress,
-        },
-    }
-    if namespace:
-        policy["metadata"]["namespace"] = namespace
-
     if omitted_assets and not resolved_hosts:
         warnings.append("domain/wildcard scope omitted until resolved IPs are materialized")
     elif omitted_assets:
         warnings.append(
-            f"{len(resolved_hosts)} materialized IP(s) rendered as /32-/128 allow blocks; "
+            f"{len(resolved_hosts)} materialized IP(s) used as /32-/128 allow blocks; "
             "name assets without resolved IPs remain fail-closed"
         )
     if not ip_blocks:
-        warnings.append("no active IP/CIDR allow assets; rendered policy denies raw egress")
+        warnings.append("no active IP/CIDR allow assets; the allowlist denies raw egress")
 
-    return RawEgressPolicy(policy=policy, ip_blocks=ip_blocks, omitted_assets=omitted_assets, warnings=warnings)
+    return RawEgressPolicy(ip_blocks=ip_blocks, omitted_assets=omitted_assets, warnings=warnings)
 
 
-def render_for_engagement(db: Session, engagement_id: uuid.UUID, *, namespace: str | None = None) -> RawEgressPolicy:
+def policy_for_engagement(db: Session, engagement_id: uuid.UUID) -> RawEgressPolicy:
     # Lazy import: dns_materialization importiert dieses Modul nicht, aber wir
     # halten die Abhaengigkeit hier lokal, um Import-Zyklen sicher zu vermeiden.
     from app.gateway.dns_materialization import materialized_ips
@@ -173,6 +151,6 @@ def render_for_engagement(db: Session, engagement_id: uuid.UUID, *, namespace: s
         raise ValueError("engagement_not_active")
     assets = db.scalars(select(ScopeAsset).where(ScopeAsset.engagement_id == engagement_id)).all()
     return build_raw_egress_policy(
-        engagement_id, assets, namespace=namespace,
+        engagement_id, assets,
         materialized_ips=materialized_ips(db, engagement_id),
     )

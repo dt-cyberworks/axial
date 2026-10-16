@@ -3,7 +3,7 @@
 **Who this is for:** operators working on one engagement.
 **After this page you can:** find every part of the engagement detail page and the Edit page, say what each field does, and know what can still be changed after activation.
 
-<!-- ui-labels: Risk signal | Runs | Open findings | Scan readiness | Authorization PDF | Authorization not attested | Activate engagement | Start run | Findings | Assets | Runs & reports | Attack-surface graph | DNS & hosting | Crawled endpoints | Web screenshots | Reports | Generate report | Download PDF | Edit engagement | Metadata | Discovery extras | Scan depth | Scan envelope | Tool grants | Campaign tool overrides | Scope assets | Bug bounty program policy | Vector Agent instructions (campaign override) | Vector Agent iteration budget (campaign override) | Manual approval timeout (campaign override) | Save campaign config | Go to tool grants | Open tool grants -->
+<!-- ui-labels: Pause engagement | Resume engagement | Close engagement | Revoke authorization | Changes | Capabilities & alerts | What changed | Run now | Risk signal | Runs | Open findings | Scan readiness | Authorization PDF | Authorization not attested | Activate engagement | Start run | Findings | Assets | Runs & reports | Attack-surface graph | DNS & hosting | Crawled endpoints | Web screenshots | Reports | Generate report | Download PDF | Edit engagement | Metadata | Discovery extras | Scan depth | Scan envelope | Tool grants | Campaign tool overrides | Scope assets | Bug bounty program policy | Vector Agent instructions (campaign override) | Vector Agent iteration budget (campaign override) | Manual approval timeout (campaign override) | Save campaign config | Go to tool grants | Open tool grants | Automatic runs -->
 
 ## Engagement detail (`/engagements/:id`)
 
@@ -14,6 +14,18 @@ The hub of one engagement. At the top: the title, links to **Edit**, **Audit** a
 **On someone else's engagement the page is read-only.** Everyone can read every engagement, but only its owner and administrators can change it. When you are neither, a notice at the top says whose it is (name and email), and the controls that change it are not offered: **Edit**, activation, **Attest authorization**, tool grants, **Start run**, **Generate report**, triage and the Lens request in the findings, and stopping a run. The tabs, the filters, the downloads (**Authorization PDF**, **Download PDF**) and the **Audit** log all work. See [Roles and ownership](../concepts.md#roles-and-ownership).
 
 ![An engagement owned by someone else: a notice names the owner and the controls that change it are not offered](../img/engagement-read-only.png)
+
+### Mode, controls and the monitoring tabs
+
+The header says whether the engagement is a *monitoring* engagement (unattended) or an *assessment* (a test). The owner and administrators also see **Controls**:
+
+| Control | Does |
+|---|---|
+| **Pause engagement** | stops the active run and makes the gateway deny every call until **Resume engagement** (only inside the authorized window) |
+| **Close engagement** | ends a finished engagement; refused while a run is active; it cannot be resumed |
+| **Revoke authorization** | the kill switch: stops everything now; final |
+
+A test engagement offers, next to **Start run**, a choice of *I will watch (decide live)* or *Notify me when you need me* (a semi-attended run, see [Approve or deny a tool call](../guides/approve-or-deny-a-tool-call.md#when-you-are-not-there)). A monitoring engagement offers **Run now**, an **Automatic runs** panel (the interval in days, the next run, and why a due run waited), shows **What changed** above the tabs, and has two more tabs, **Changes** and **Capabilities & alerts**; see [Monitor an attack surface](../guides/monitor-an-attack-surface.md). The runs table shows who started each run (a person, or a schedule) and how supervised it was.
 
 ### The status band
 
@@ -73,7 +85,7 @@ Four switches: passive subdomain sources (on by default), crawling and URL histo
 
 ### Scan depth
 
-**Standard** (default) picks each web service's checks from what the scan found: the generic templates plus only those for the technologies it identified. **Thorough** runs every template on every web service whatever was identified, and adds a deep content-discovery sweep of about 30,000 likely paths per web service (about 25 minutes each; if a slow target or a bug-bounty rate limit cuts it short, it is shown as partial). It is much slower: use it when a complete sweep matters more than time. It applies from the next scan, and each run records the depth it started with. It never widens scope, tool grants or the discovery switches. See [Tune a scan](../guides/tune-a-scan.md).
+**Standard** (default) picks each web service's checks from what the scan found: the generic templates plus only those for the technologies it identified. **Thorough** runs every non-intrusive template that applies to a web service, whether or not its product was identified (about 5,900 templates, not every template nuclei ships), and adds a deep content-discovery sweep of about 30,000 likely paths per web service (about 25 minutes each; if a slow target or a bug-bounty rate limit cuts it short, it is shown as partial). It is much slower: use it when the widest coverage matters more than time. It applies from the next scan, and each run records the depth it started with. It never widens scope, tool grants or the discovery switches. See [Tune a scan](../guides/tune-a-scan.md).
 
 ### Scan envelope
 

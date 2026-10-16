@@ -21,15 +21,18 @@ from app.settings_store import (
     MAX_AGENT_MAX_ITERATIONS,
     MAX_AGENT_MAX_TOKENS,
     MAX_APPROVAL_TIMEOUT_SECONDS,
+    MAX_TOOL_CALL_BUDGET,
     MIN_AGENT_MAX_ITERATIONS,
     MIN_AGENT_MAX_TOKENS,
     MIN_APPROVAL_TIMEOUT_SECONDS,
+    MIN_TOOL_CALL_BUDGET,
     SUBFINDER_PROVIDERS,
     SettingsCipherUnavailable,
     get_global_agent_max_iterations,
     get_global_agent_max_tokens,
     get_global_agent_prompt,
     get_global_approval_timeout_seconds,
+    get_global_tool_call_budget,
     get_llm_config,
     get_nvd_config,
     get_scan_policy,
@@ -37,6 +40,7 @@ from app.settings_store import (
     set_global_agent_max_tokens,
     set_global_agent_prompt,
     set_global_approval_timeout_seconds,
+    set_global_tool_call_budget,
     set_global_tool_policy,
     set_llm_config,
     set_nvd_config,
@@ -240,6 +244,33 @@ def update_agent_max_iterations(body: AgentMaxIterationsIn, db: Session = Depend
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return AgentMaxIterationsOut(value=value)
+
+
+# --- Tool-call budget of a run (global only, REQ-BUDGET-001) ---
+
+class ToolCallBudgetOut(BaseModel):
+    value: int
+    min: int = MIN_TOOL_CALL_BUDGET
+    max: int = MAX_TOOL_CALL_BUDGET
+
+
+class ToolCallBudgetIn(BaseModel):
+    value: int = Field(ge=MIN_TOOL_CALL_BUDGET, le=MAX_TOOL_CALL_BUDGET)
+
+
+@router.get("/tool-call-budget", response_model=ToolCallBudgetOut)
+def read_tool_call_budget(db: Session = Depends(get_db)):
+    return ToolCallBudgetOut(value=get_global_tool_call_budget(db))
+
+
+@router.put("/tool-call-budget", response_model=ToolCallBudgetOut)
+def update_tool_call_budget(body: ToolCallBudgetIn, db: Session = Depends(get_db)):
+    """A new value applies to the runs that start after it; a run keeps the budget it started with."""
+    try:
+        value = set_global_tool_call_budget(db, body.value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return ToolCallBudgetOut(value=value)
 
 
 # --- Globales Agent-Token-Limit (Schicht 3, REQ-AGENT-026) ---

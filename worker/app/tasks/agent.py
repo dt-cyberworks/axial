@@ -381,6 +381,16 @@ _TOOLS = [
 ]
 
 
+class RunParked(Exception):
+    """REQ-MODE-016: a semi-attended run needs a person's decision. The run hands
+    itself back (no worker slot is held while nobody answers) and continues from
+    `state` when the decision is made. `state` never carries a session cookie."""
+
+    def __init__(self, state: dict):
+        super().__init__("run parked on an approval")
+        self.state = state
+
+
 @dataclass
 class SimpleContext:
     """Beobachtungs-/Ablehnungs-Protokoll des Laufs (auch fuer Tests nutzbar)."""
@@ -414,6 +424,13 @@ class SimpleContext:
     # control-plane-seitig durchgesetzten expires_at passen (sonst koennte der
     # Worker lokal aufgeben, waehrend die Freigabe dort noch glaeufig ist).
     approval_timeout_seconds: int = 900
+    # REQ-MODE-007: nobody is there to decide. A call that needs a person is not
+    # waited for; it is withdrawn and kept as a suggestion for a manual test.
+    unattended: bool = False
+    # REQ-MODE-016: the person who started the run asked to be notified instead of
+    # watching. A decision parks the run rather than blocking a worker.
+    semi_attended: bool = False
+    parked: dict | None = None
 
     def observe(self, proposal: dict, result: str) -> None:
         self.observations.append({"proposal": proposal, "result": result})
@@ -725,8 +742,29 @@ def _await_approval(engagement_id, approval_id, asset_id, target, args, ip, prop
     if not approval_id:
         context.record_denied(proposal, "pending_no_id")
         return "PENDING: approval could not be created; skipped."
+    if context.unattended:
+        client.withdraw_approval(str(approval_id), "unattended_run")
+        detail = " ".join(str(x) for x in (args.get("method"), args.get("path")) if x) if isinstance(args, dict) else ""
+        client.add_suggestion(
+            uuid.UUID(engagement_id), tool=tool, target=target,
+            rationale=f"{tool} {detail}".strip() + " needed a person's decision in an unattended run",
+        )
+        context.record_denied(proposal, "approval_unavailable_unattended")
+        _audit_agent_event(engagement_id, "proposal_not_awaited", scan_run_id=context.scan_run_id, decision="DENY",
+                           reason="approval_unavailable_unattended", proposal=proposal, approval_id=str(approval_id))
+        return (
+            "NOT EXECUTED: this run is unattended and nobody can approve this request. It was recorded "
+            "as a suggestion for a manual test. Continue without it."
+        )
     _audit_agent_event(engagement_id, "proposal_pending_approval", scan_run_id=context.scan_run_id, decision="PENDING",
                        reason="awaiting_operator_approval", proposal=proposal, approval_id=str(approval_id))
+    if context.semi_attended and context.scan_run_id:
+        # REQ-MODE-016: do not hold a worker slot while nobody answers. What is needed
+        # to finish this call later is small and holds no session cookie: the exact
+        # call to run is read back from the approval when it is claimed.
+        raise RunParked({
+            "approval_id": str(approval_id), "target": target, "proposal": proposal, "identity": identity, "tool": tool,
+        })
     run_id = context.scan_run_id
     if run_id:
         try:
@@ -755,6 +793,15 @@ def _await_approval(engagement_id, approval_id, asset_id, target, args, ip, prop
         except Exception:  # noqa: BLE001
             pass
 
+    return _finish_approval(engagement_id, approval_id, asset_id, target, ip, proposal, context, decision_state,
+                            identity=identity, tool=tool)
+
+
+def _finish_approval(engagement_id, approval_id, asset_id, target, ip, proposal, context, decision_state: str,
+                     *, identity: str = "primary", tool: str = "http_request") -> str:
+    """What happens once the decision is known - used right after a live wait and
+    by a run that was parked and has just been resumed (REQ-MODE-016). Only the
+    exact call the gateway hands back on the claim is ever executed."""
     if decision_state == "approved":
         # Claim performs current gateway checks and atomically changes approved
         # -> executing. Only the exact stored call returned by the control plane
@@ -1203,9 +1250,82 @@ def _initial_context(
     )
 
 
+def _execute_tool_call(
+    engagement_id: str, name: str, arguments: dict, asset_by_host: dict[str, str], ip_by_host: dict[str, str],
+    context: SimpleContext,
+) -> str:
+    """One tool call of the model, to its observation. May raise RunParked."""
+    scan_run_id = context.scan_run_id
+    if name == "finish":
+        context.exhausted = True
+        context.conclusion = str(arguments.get("summary", ""))
+        _audit_agent_event(engagement_id, "finish_requested", scan_run_id=scan_run_id, decision="ALLOW", reason="llm_finish", summary=context.conclusion)
+        return "ok, finished."
+    if name == "run_check":
+        _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_tool", proposal=arguments)
+        return _handle_run_check(engagement_id, arguments, asset_by_host, ip_by_host, context)
+    if name == "http_request":
+        _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_http_request", proposal=arguments)
+        return _handle_http_request(engagement_id, arguments, asset_by_host, ip_by_host, context)
+    if name == "register_test_identity":
+        _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_register_test_identity", proposal=arguments)
+        return _handle_register_test_identity(engagement_id, arguments, asset_by_host, ip_by_host, context)
+    if name == "content_discovery":
+        _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_content_discovery", proposal=arguments)
+        return _handle_ffuf(engagement_id, arguments, asset_by_host, ip_by_host, context)
+    if name == "report_finding":
+        return _handle_report_finding(engagement_id, arguments, asset_by_host, context)
+    if name in ALLOWED_TOOLS:
+        # REQ-AGENT-009: das Modell hat gelegentlich eine Funktion
+        # NAMENS des Tools aufgerufen (z. B. "nuclei(...)") statt
+        # run_check({"tool": "nuclei", ...}). Statt eine Iteration fuer
+        # einen reinen Formfehler zu verbrennen, wird das identisch wie
+        # ein echter run_check-Vorschlag behandelt - der Funktionsname
+        # ist dabei massgeblich fuer "tool" (ueberschreibt ein evtl.
+        # widerspruechliches "tool"-Argument). Auditiert mit eigenem
+        # Grund, damit Modell-Zuverlaessigkeit sichtbar bleibt.
+        tool_input = {**arguments, "tool": name}
+        _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None,
+                           reason="llm_proposed_tool_as_function_name", proposal=tool_input)
+        return _handle_run_check(engagement_id, tool_input, asset_by_host, ip_by_host, context)
+    return f"REJECTED: unknown tool {name!r}."
+
+
+def _process_tool_calls(
+    engagement_id: str, tool_calls: list[dict], messages: list[dict], asset_by_host: dict[str, str],
+    ip_by_host: dict[str, str], context: SimpleContext, budget_max_iterations: int,
+) -> dict | None:
+    """Run the model's tool calls in order, appending each observation. Returns the
+    state to resume from when a call parked the run (REQ-MODE-016), else None."""
+    for index, tc in enumerate(tool_calls):
+        if context.iterations >= budget_max_iterations:
+            context.exhausted = True
+            break
+        context.iterations += 1
+        try:
+            arguments = json.loads(tc.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+        try:
+            observation = _execute_tool_call(engagement_id, tc["name"], arguments, asset_by_host, ip_by_host, context)
+        except RunParked as park:
+            return {
+                "messages": messages, "pending_tool_call_id": tc["id"], "remaining": tool_calls[index + 1:],
+                "iterations": context.iterations, "park": park.state,
+            }
+        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": observation})
+    return None
+
+
 def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None = None,
-        findings_and_services: dict | None = None, approval_timeout_seconds: int = 900) -> SimpleContext:
+        findings_and_services: dict | None = None, approval_timeout_seconds: int = 900,
+        resume_state: dict | None = None) -> SimpleContext:
     context = SimpleContext(scan_run_id=scan_run_id, approval_timeout_seconds=approval_timeout_seconds)
+    context.unattended = (
+        client.run_info(scan_run_id).get("supervision") == "unattended"
+        or client.run_info(scan_run_id).get("operating_mode") == "monitoring"
+    )
+    context.semi_attended = client.run_info(scan_run_id).get("supervision") == "semi_attended" and not context.unattended
     # REQ-FIDELITY-007: einmal pro Lauf aufloesen, damit jeder Agent-Tool-Vorschlag
     # denselben Port trifft wie die deterministische Fingerprint-Phase (REQ-FIDELITY-003).
     try:
@@ -1303,6 +1423,40 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
         {"role": "user", "content": _initial_context(engagement_id, asset_by_host, enabled_tools, engagement_params)},
     ]
 
+    if resume_state:
+        # REQ-MODE-016: this run was parked on a decision and has been resumed. Pick the
+        # conversation up where it stopped: the decision is applied to the call that
+        # waited for it (only the exact call the gateway hands back is executed), the
+        # rest of that turn's calls run, and the loop continues.
+        messages = list(resume_state.get("messages") or messages)
+        context.iterations = int(resume_state.get("iterations") or 0)
+        park = resume_state.get("park") or {}
+        host = str(park.get("target", "")).lower()
+        decision_state = client.get_approval(str(park.get("approval_id"))).get("state")
+        if decision_state not in ("approved", "rejected", "expired", "cancelled", "consumed"):
+            decision_state = "expired"  # unreadable or still open: never treated as approved
+        _audit_agent_event(engagement_id, "resumed", scan_run_id=scan_run_id, decision=None,
+                           reason="parked_approval_decided", approval_state=decision_state)
+        asset_id = asset_by_host.get(host)
+        if asset_id is None:
+            observation = "NOT EXECUTED: the approved target is not in the loaded scope any more."
+        else:
+            observation = _finish_approval(
+                engagement_id, park.get("approval_id"), asset_id, park.get("target"), ip_by_host.get(host),
+                park.get("proposal") or {}, context, decision_state,
+                identity=park.get("identity") or "primary", tool=park.get("tool") or "http_request",
+            )
+        messages.append({"role": "tool", "tool_call_id": resume_state.get("pending_tool_call_id"), "content": observation})
+        parked_again = _process_tool_calls(
+            engagement_id, list(resume_state.get("remaining") or []), messages, asset_by_host, ip_by_host, context,
+            budget_max_iterations,
+        )
+        if parked_again is not None:
+            context.parked = parked_again
+            _audit_agent_event(engagement_id, "parked", scan_run_id=scan_run_id, decision=None,
+                               reason="awaiting_operator_approval")
+            return context
+
     cancel_probe = CancelProbe.for_run(scan_run_id) if scan_run_id else None
     while context.iterations < budget_max_iterations and not context.exhausted:
         # Kooperativer Stopp (REQ-RUN-001): vor jedem (teuren) LLM-Aufruf pruefen.
@@ -1397,53 +1551,17 @@ def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None 
             ],
         })
 
-        for tc in tool_calls:
-            if context.iterations >= budget_max_iterations:
-                context.exhausted = True
-                break
-            context.iterations += 1
-            name = tc.function.name
-            try:
-                arguments = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
-                arguments = {}
-
-            if name == "finish":
-                context.exhausted = True
-                context.conclusion = str(arguments.get("summary", ""))
-                _audit_agent_event(engagement_id, "finish_requested", scan_run_id=scan_run_id, decision="ALLOW", reason="llm_finish", summary=context.conclusion)
-                observation = "ok, finished."
-            elif name == "run_check":
-                _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_tool", proposal=arguments)
-                observation = _handle_run_check(engagement_id, arguments, asset_by_host, ip_by_host, context)
-            elif name == "http_request":
-                _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_http_request", proposal=arguments)
-                observation = _handle_http_request(engagement_id, arguments, asset_by_host, ip_by_host, context)
-            elif name == "register_test_identity":
-                _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_register_test_identity", proposal=arguments)
-                observation = _handle_register_test_identity(engagement_id, arguments, asset_by_host, ip_by_host, context)
-            elif name == "content_discovery":
-                _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None, reason="llm_proposed_content_discovery", proposal=arguments)
-                observation = _handle_ffuf(engagement_id, arguments, asset_by_host, ip_by_host, context)
-            elif name == "report_finding":
-                observation = _handle_report_finding(engagement_id, arguments, asset_by_host, context)
-            elif name in ALLOWED_TOOLS:
-                # REQ-AGENT-009: das Modell hat gelegentlich eine Funktion
-                # NAMENS des Tools aufgerufen (z. B. "nuclei(...)") statt
-                # run_check({"tool": "nuclei", ...}). Statt eine Iteration fuer
-                # einen reinen Formfehler zu verbrennen, wird das identisch wie
-                # ein echter run_check-Vorschlag behandelt - der Funktionsname
-                # ist dabei massgeblich fuer "tool" (ueberschreibt ein evtl.
-                # widerspruechliches "tool"-Argument). Auditiert mit eigenem
-                # Grund, damit Modell-Zuverlaessigkeit sichtbar bleibt.
-                tool_input = {**arguments, "tool": name}
-                _audit_agent_event(engagement_id, "proposal", scan_run_id=scan_run_id, decision=None,
-                                    reason="llm_proposed_tool_as_function_name", proposal=tool_input)
-                observation = _handle_run_check(engagement_id, tool_input, asset_by_host, ip_by_host, context)
-            else:
-                observation = f"REJECTED: unknown tool {name!r}."
-
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": observation})
+        parked = _process_tool_calls(
+            engagement_id,
+            [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments} for tc in tool_calls],
+            messages, asset_by_host, ip_by_host, context, budget_max_iterations,
+        )
+        if parked is not None:
+            # REQ-MODE-016: hand the run back; it continues when the decision is made.
+            context.parked = parked
+            _audit_agent_event(engagement_id, "parked", scan_run_id=scan_run_id, decision=None,
+                               reason="awaiting_operator_approval")
+            return context
 
     logger.info(
         "agent phase finished: %d iterations, %d observations, %d denied%s",

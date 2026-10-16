@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/bounty-network-scan-profile.md");
+const requirementDoc = readRecord("requirements", "bounty-network-scan-profile.md");
 const wizard = read("frontend/src/pages/EngagementWizard.tsx");
 const edit = read("frontend/src/pages/EngagementEdit.tsx");
 const client = read("frontend/src/api/client.ts");
@@ -13,7 +14,7 @@ const engagementSchema = read("control-plane/app/schemas/engagement.py");
 const rawEgressLease = read("control-plane/app/gateway/raw_egress_lease.py");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 function contains(source, pattern, message) {
@@ -26,23 +27,23 @@ function test(name, fn) { tests.push({ name, fn }); }
 
 test("REQ-BOUNTYSCAN-001 is documented with the three-tier model", () => {
   requirement("REQ-BOUNTYSCAN-001");
-  contains(requirementDoc, "GitHub issue #37", "requirement doc must record the issue this closes");
-  contains(requirementDoc, '"none", "common", "full"', "requirement doc must name the three tiers");
+  record.contains(requirementDoc, "GitHub issue #37", "requirement doc must record the issue this closes");
+  record.contains(requirementDoc, '"none", "common", "full"', "requirement doc must name the three tiers");
 });
 
 test("REQ-BOUNTYSCAN-002/003 document the rate-unit and evidence rules", () => {
   requirement("REQ-BOUNTYSCAN-002");
   requirement("REQ-BOUNTYSCAN-003");
-  contains(requirementDoc, "raw_max_packets_per_second", "requirement doc must name the distinct raw-rate field");
+  record.contains(requirementDoc, "raw_max_packets_per_second", "requirement doc must name the distinct raw-rate field");
 });
 
 test("REQ-BOUNTYSCAN-004 documents the kernel-level limiter", () => {
   requirement("REQ-BOUNTYSCAN-004");
-  contains(requirementDoc, "limit rate", "requirement doc must name the nftables enforcement mechanism");
+  record.contains(requirementDoc, "limit rate", "requirement doc must name the nftables enforcement mechanism");
 });
 
 test("the requirement doc records the deliberate scope reduction from the issue's full proposal", () => {
-  contains(requirementDoc, "Deliberate scope reduction", "requirement doc must explicitly record what was descoped, not silently under-deliver");
+  record.contains(requirementDoc, "Deliberate scope reduction", "requirement doc must explicitly record what was descoped, not silently under-deliver");
 });
 
 test("BountyProgramCreate schema carries the three new fields and enforces the evidence rule", () => {

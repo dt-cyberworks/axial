@@ -3,9 +3,15 @@
 **Who this is for:** operators creating an engagement.
 **After this page you can:** say what every step and field of the wizard does, go back and change an earlier step without creating a second engagement, and pick up an unfinished draft.
 
-<!-- ui-labels: New engagement | Parties and test window | Title | Emergency contact | Authorized from | Authorized until | Maximum authorized port range (from) | Maximum authorized port range (to) | Advanced options (discovery extras, UDP discovery, Vector Agent, asset review) | Save draft and continue | Save changes and continue | Scope assets | Add scope row | Continue | active | authorization attested | Tool grants | Allow passive | Allow active | Require approval for these active tools | Back | Save scope and tools | Agent and guardrail review | Review authorization | Authorization checklist | Download authorization PDF | Activate engagement | This engagement follows a bug bounty program's rules of engagement -->
+<!-- ui-labels: Monitor an attack surface | Test a target | What to monitor | Activate monitoring | New engagement | Parties and test window | Title | Emergency contact | Authorized from | Authorized until | Maximum authorized port range (from) | Maximum authorized port range (to) | Advanced options (discovery extras, UDP discovery, Vector Agent, asset review) | Save draft and continue | Save changes and continue | Scope assets | Add scope row | Continue | active | authorization attested | Tool grants | Allow passive | Allow active | Require approval for these active tools | Back | Save scope and tools | Agent and guardrail review | Review authorization | Authorization checklist | Download authorization PDF | Activate engagement | This engagement follows a bug bounty program's rules of engagement -->
 
-## The five steps (`/new`)
+## The choice (`/new`)
+
+![The first screen of a new engagement: the choice between monitoring and testing](../img/new-engagement-choice.png)
+
+The first screen asks what you want to do. **Monitor an attack surface** opens the [monitoring wizard](#the-monitoring-wizard); **Test a target** opens the five-step wizard below. The choice is stored with the engagement and cannot be changed once it is active, because it changes the authorization text, what a run may do and how it ends. A draft you resume opens in the flow it was started in.
+
+## The five steps (test engagement)
 
 The sidebar of the wizard shows the steps: **Window**, **Scope**, **Tools**, **Review**, **Authorize**. You can click back to any earlier step. Nothing is scanned until you authorise and activate the engagement in the last step.
 
@@ -62,3 +68,17 @@ A read-only summary: that the Scope Gateway authorises every active tool call, w
 ### 5. Authorize: **Authorization checklist**
 
 The checklist shows the engagement, the agent setting, the discovery settings, the scan depth, how many allow rows there are and how many of them are active, and how many tools need manual approval. **Activation is blocked** until at least one allow row has a value and has been saved, and until authorization is attested for every active allow row; the page says which. **Download authorization PDF** produces a document stating exactly what is configured, for signature before activation. **Activate engagement** makes the engagement `active` and opens it. See [Authorize and activate](../guides/authorize-and-activate.md).
+
+## The monitoring wizard
+
+For an engagement that watches a scope on its own. Four steps: **Scope**, **Capabilities**, **Alerts** and **Authorize**. It has no tool grants with approvals, no asset review and no supervision choice, because none of them exists in a run nobody watches.
+
+| Step | What you do |
+|---|---|
+| **Scope** (*What to monitor*) | a name, an emergency contact, the dates of the standing authorization (a year by default), and the allow and deny rows. Tick **I am authorized to test this** on each allow row. Tick *These are a customer's systems* to hold new hosts until you release them |
+| **Capabilities** | choose how often it runs by itself (every 7 days to begin with, 1 to 90 or off), what it does on every run, the scan depth and the new-host policy; see [Monitor an attack surface](../guides/monitor-an-attack-surface.md#capabilities) |
+| **Alerts** | add a signed webhook |
+| **Authorize** | read *What will run without anyone watching* and *What can never happen*, download the authorization document, then **Activate monitoring** |
+
+The monitoring wizard saves a draft after the first step, like the test wizard, and resumes it from `/new?mode=monitoring&draft=<id>`.
+

@@ -16,7 +16,8 @@ from sqlalchemy.orm import sessionmaker
 from app import auth_service
 from app.db.base import get_db
 from app.main import app
-from app.models.engagement import Engagement
+from app.models.audit import AuditLog
+from app.models.engagement import Engagement, ScopeAsset
 from app.models.user import User
 from app.passwords import hash_secret
 
@@ -215,3 +216,63 @@ def test_cookie_sign_out_follows_the_same_rules(client, db):
     ok = client.post("/auth/logout", cookies={"session": cookie}, headers=CONSOLE)
     assert ok.status_code == 204
     assert client.get("/auth/me", cookies={"session": cookie}).status_code == 401
+
+
+# --- GitHub issue #57: removing a scope rule from the console ------------------------
+# The console reported "DELETE /engagements/<id>/scope-assets/<id> -> 403: missing
+# anti-CSRF header". The check treats every changing method alike, so the same
+# pair of tests as for POST must hold for this route: the header lets a
+# cookie-authenticated owner remove a rule, its absence changes nothing.
+
+def _engagement_with_rule(client, db, cookie) -> tuple[str, str]:
+    created = _create_engagement(client, cookie, {**CONSOLE, "origin": HOST})
+    assert created.status_code in (200, 201), created.text
+    engagement_id = created.json()["id"]
+    rule = client.post(
+        f"/engagements/{engagement_id}/scope-assets", cookies={"session": cookie},
+        headers={**CONSOLE, "origin": HOST},
+        json={"rule": "allow", "asset_type": "domain", "value": "rule.example.com"},
+    )
+    assert rule.status_code == 201, rule.text
+    return engagement_id, rule.json()["id"]
+
+
+def _rule_count(db, engagement_id) -> int:
+    db.expire_all()
+    return db.query(ScopeAsset).filter(ScopeAsset.engagement_id == uuid.UUID(engagement_id)).count()
+
+
+def test_cookie_delete_of_a_scope_rule_with_the_header_succeeds_and_is_audited(client, db):
+    cookie = _session_cookie(db, _user(db))
+    engagement_id, rule_id = _engagement_with_rule(client, db, cookie)
+    resp = client.delete(
+        f"/engagements/{engagement_id}/scope-assets/{rule_id}", cookies={"session": cookie},
+        headers={**CONSOLE, "origin": HOST},
+    )
+    assert resp.status_code == 204, resp.text
+    assert _rule_count(db, engagement_id) == 0
+    audited = db.query(AuditLog).filter(
+        AuditLog.engagement_id == uuid.UUID(engagement_id), AuditLog.action == "scope_asset_deleted").count()
+    assert audited == 1
+
+
+def test_negative_cookie_delete_of_a_scope_rule_without_the_header_is_rejected(client, db):
+    cookie = _session_cookie(db, _user(db))
+    engagement_id, rule_id = _engagement_with_rule(client, db, cookie)
+    resp = client.delete(f"/engagements/{engagement_id}/scope-assets/{rule_id}", cookies={"session": cookie})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "missing anti-CSRF header"
+    assert _rule_count(db, engagement_id) == 1  # nothing was removed
+    assert db.query(AuditLog).filter(
+        AuditLog.engagement_id == uuid.UUID(engagement_id), AuditLog.action == "scope_asset_deleted").count() == 0
+
+
+def test_negative_cookie_delete_of_a_scope_rule_from_a_foreign_origin_is_rejected(client, db):
+    cookie = _session_cookie(db, _user(db))
+    engagement_id, rule_id = _engagement_with_rule(client, db, cookie)
+    resp = client.delete(
+        f"/engagements/{engagement_id}/scope-assets/{rule_id}", cookies={"session": cookie},
+        headers={**CONSOLE, "origin": "https://evil.example"},
+    )
+    assert resp.status_code == 403
+    assert _rule_count(db, engagement_id) == 1

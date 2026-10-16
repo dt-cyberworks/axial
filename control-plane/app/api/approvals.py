@@ -9,8 +9,10 @@ from app.db.base import get_db
 from app.gateway.audit import append_audit_log
 from app.models.approval import ApprovalRequest
 from app.models.engagement import Engagement
+from app.models.scan_run import ScanRun
 from app.models.user import User
 from app.schemas.approval import ApprovalDecision, ApprovalOut
+from app.scan_lifecycle import resume_parked_run
 from app.security import NOT_OWNER_DETAIL, can_manage_engagement, require_user
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
@@ -27,6 +29,19 @@ def _require_engagement_owner(db: Session, engagement_id: uuid.UUID, user: User)
         raise HTTPException(404, "approval not found")
     if not can_manage_engagement(user, eng):
         raise HTTPException(403, NOT_OWNER_DETAIL)
+
+
+def _resume_if_parked(db: Session, approval: ApprovalRequest) -> None:
+    """REQ-MODE-016: a semi-attended run that parked on this approval continues now."""
+    run_id = (approval.tool_call or {}).get("scan_run_id")
+    if not run_id:
+        return
+    try:
+        run = db.scalar(select(ScanRun).where(ScanRun.id == uuid.UUID(str(run_id))).with_for_update())
+        if run is not None and resume_parked_run(db, run):
+            db.commit()
+    except Exception:  # noqa: BLE001 - the periodic sweep resumes it; a decision is never lost
+        db.rollback()
 
 
 @router.get("", response_model=list[ApprovalOut])
@@ -78,6 +93,7 @@ def approve(
     approval.approved_at = datetime.datetime.now(datetime.timezone.utc)
     db.commit()
     db.refresh(approval)
+    _resume_if_parked(db, approval)
     append_audit_log(
         db, engagement_id=approval.engagement_id, actor=f"user:{user.email}",
         action="approval", decision="ALLOW", reason="manual_approval",
@@ -103,6 +119,7 @@ def reject(
     approval.approved_at = datetime.datetime.now(datetime.timezone.utc)
     db.commit()
     db.refresh(approval)
+    _resume_if_parked(db, approval)
     append_audit_log(
         db, engagement_id=approval.engagement_id, actor=f"user:{user.email}",
         action="approval", decision="DENY", reason="manual_rejection",

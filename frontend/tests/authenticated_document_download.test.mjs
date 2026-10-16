@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/operator-console-usability-fixes.md");
+const requirement = readRecord("requirements", "operator-console-usability-fixes.md");
 const client = read("frontend/src/api/client.ts");
 const detail = read("frontend/src/pages/EngagementDetail.tsx");
 const wizard = read("frontend/src/pages/EngagementWizard.tsx");
 
-assert.match(requirement, /## REQ-DOWNLOAD-001:/);
+record.match(requirement, /## REQ-DOWNLOAD-001:/);
 
 // The helper authenticates the same way every other call does.
 assert.match(client, /async function downloadBlob\(/, "a blob-download helper must exist");

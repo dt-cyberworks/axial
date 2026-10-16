@@ -15,7 +15,8 @@ Actively scanning a system you are not authorised to test can be a criminal offe
 
 - **It is conservative and non-destructive by design.** The template-based checks exclude everything tagged intrusive, denial-of-service or fuzzing. Content discovery, crawling and the TLS check are rate-limited, time-boxed and send read requests.
 - **Template checks do send some requests with a body.** A few of nuclei's fixed templates try the vendor-default login of a product they identified, or send an injection-style probe. They are chosen as non-destructive and they are part of the tool, not composed by anyone at run time.
-- **A request the AI agent composes that could change data always waits for you.** A request with a method other than GET, HEAD or OPTIONS, or with a body, is proposed by the agent and waits for a person's explicit approval, which authorises that one request once.
+- **A request the AI agent composes that could change data always waits for you.** A request with a method other than GET, HEAD or OPTIONS, or with a body, is proposed by the agent and waits for a person's explicit approval, which authorises that one request once. In a *monitoring* engagement nobody is there to approve, so such a request is not made at all: it is kept as a suggestion in the inbox.
+- **A monitoring run never waits for anyone and never makes a call that needs a decision.** Credential and exploit testing cannot be granted to it, and a new host can be held until you release it.
 - **It does not exploit systems.** One supervised probe confirms a specific, serious ActiveMQ flaw; it needs a person's approval every single time and is the exception. Nothing extracts data, drops files, or runs commands on a target.
 - **It does not brute-force logins.** No password lists are used. The only credential tests are the default-login templates above and, if you switch it on, a separate tool that tries a short list of vendor defaults (off by default; see [Tools](tools.md#tools-that-exist-but-are-off-by-default)). Where credentials are supplied, or a target allows open self-registration, the agent may log in, with the login itself going through approval.
 - **It stays inside the scope.** The Scope Gateway authorises every tool call, and the egress proxy re-checks every web request on the network. A deny row always wins. Names that discovery finds are filtered through the scope before anything touches them.
@@ -36,7 +37,6 @@ From [`docs/legal.md`](../legal.md) and the [Rules of Engagement](../spec/rules-
 - **Explicit exclusions.** By default these are excluded unless expressly agreed: denial-of-service or load testing, social engineering, data exfiltration, destructive exploitation and physical testing.
 - **Professional liability insurance** that covers security testing, before the first scan.
 - **Data-protection compliance** where personal data is captured, for example exposed email addresses in evidence.
-- **Employer approval** for secondary work and a check for conflicts of interest, if that applies to you.
 
 How Axial supports this: the **authorization attested** tick on every active allow row, the **Authorization PDF** with signature lines, the checks at **Activate engagement**, and the audit log. None of them replaces the paper.
 
@@ -67,8 +67,8 @@ An honest list, so that a clean report is read for what it is.
 - **Cloud accounts are matched by exact identifier**, not inventoried or scanned through the provider's API.
 - **Authenticated testing is limited.** The agent can log in where credentials are supplied or self-registration is open. It is not a substitute for a tester with real accounts and roles. If it cannot log in, it is told to report what is behind the login as untested.
 - **The agent is only as good as its model.** Its findings are marked *validated* or *inferred*; inferred ones are leads, not proof.
-- **One installation, individual accounts.** There is no multi-tenant separation inside one installation: every signed-in user can read every engagement (scope, findings, evidence, audit log), and only an engagement's owner or an admin can change it. If two organisations must not see each other's work, run two installations. Sign-in uses a password and an authenticator code; there is no single sign-on, no hardware keys and no self-service password reset, and the system sends no email.
-- **No scheduled scans or alerts.** Scans start when a person starts them.
+- **One installation, individual accounts.** There is no multi-tenant separation inside one installation: every signed-in user can read every engagement (scope, findings, evidence, audit log), and only an engagement's owner or an admin can change it. If two organisations must not see each other's work, run two installations. Sign-in uses a password and an authenticator code; there is no single sign-on and no hardware keys. A forgotten password is reset by an administrator, or by the user through an e-mailed link when an administrator has switched e-mail on; the system sends e-mail only then, and only for that (alerts go to a webhook).
+- **Scans start by a person, or by an interval you set on a monitor.** A test scan starts when a person starts it (**Start run**). A monitoring engagement can also run by itself every so many days, inside its authorized window and under the same scope, grants and limits; such a run never waits for a person and is recorded with the schedule as its actor. A monitoring engagement can alert through a signed webhook; alerts are not sent by e-mail.
 - **No guarantee of completeness for compliance.** A report supports an assessment; it does not certify that a system is secure or compliant.
 
 If you need something on this list, plan for it separately.

@@ -3,7 +3,7 @@
 **Who this is for:** operators and admins starting their day in the console.
 **After this page you can:** read the overview of your engagements, understand each column and status, and use the cross-engagement findings list to see what needs attention first.
 
-<!-- ui-labels: Operator overview | Engagement queue | Engagements | Active scans | Agent armed | Needs setup | Authorized window | Owner | Only mine | All findings | All severities | All engagements | Only my engagements | Previous | Next | Open in engagement → | Create an engagement | Start with your first engagement -->
+<!-- ui-labels: Operator overview | Engagement queue | Engagements | Active scans | Agent armed | Needs setup | Monitored | Mode | Authorized window | Owner | Only mine | All findings | All severities | All engagements | Only my engagements | Previous | Next | Open in engagement → | Create an engagement | Start with your first engagement -->
 
 ## Overview (`/`)
 
@@ -21,6 +21,7 @@ An empty installation shows **Start with your first engagement**, a short remind
 | **Active scans** | engagements with a run in progress |
 | **Agent armed** | engagements where the Vector Agent is switched on |
 | **Needs setup** | engagements still in `draft` or `awaiting_signature` |
+| **Monitored** | active monitoring engagements |
 
 ### The engagement queue
 
@@ -28,7 +29,8 @@ An empty installation shows **Start with your first engagement**, a short remind
 |---|---|
 | **Engagement** | the title. Click it to open the engagement |
 | **Owner** | who owns it (hover for their email). Ask them when you want something changed |
-| Status | `draft` until you activate it, then `active`. Only an active engagement can scan. See [Concepts](../concepts.md#engagement) |
+| Status | `draft` until you activate it, then `active`; `paused`, `completed` or `revoked` after the controls on the engagement page. Only an active engagement can scan. See [Concepts](../concepts.md#engagement) |
+| Mode | **Monitoring** (unattended) or **Assessment** (a test). See [Concepts](../concepts.md#operating-modes) |
 | Agent | whether autonomous Vector Agent proposals are enabled (opt-in) |
 | **Authorized window** | the dates in which scanning is permitted. Outside it every tool call is denied, so a scan is blocked before it starts |
 | Views | **Open** the engagement and open its **Audit** trail. **Edit** its settings and **Delete** it appear only on an engagement you may change |

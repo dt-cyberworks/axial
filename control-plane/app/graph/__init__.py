@@ -3,7 +3,7 @@
 Materializes a typed, relationship-native view of one engagement's discovered
 surface from data the deterministic scan phases already collect. Graph-in-Postgres
 by design; the control-plane is the sole writer. The graph is derived metadata
-and never widens scope - see docs/requirements/attack-surface-graph.md.
+and never widens scope - see REQ-GRAPH-002.
 """
 
 from app.graph.builder import materialize_graph  # noqa: F401

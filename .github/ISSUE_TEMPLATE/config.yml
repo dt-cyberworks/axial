@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Sicherheitslücke melden (vertraulich)
+  - name: Report a security vulnerability (confidential)
     url: https://github.com/
-    about: Bitte NICHT als öffentliches Issue. Siehe SECURITY.md - Meldung per E-Mail.
+    about: Please do NOT open a public issue. See SECURITY.md for how to report it privately.

@@ -1,31 +1,25 @@
-## Was & Warum
+## What and why
 
-<!-- Kurz: was ändert dieser PR und warum? Verweis auf Kapitel/Issue. -->
+<!-- What does this pull request change for an operator, and why? Link the issue. -->
 
-## SDLC und Traceability (Pflicht)
+## Risk
 
-- Anforderungs-IDs (`REQ-*`):
-- Testfall-IDs (`TC-*`):
-- Risikoklasse (`R0`–`R4`):
-- [ ] Akzeptanzkriterien und Traceability sind aktuell.
-- [ ] `make requirements-check` ist grün.
-- [ ] Bei `R3`/`R4`: Threat-Model-Auswirkung, Negativtest und menschliches Security-Review dokumentiert.
-- [ ] Rollout und Rollback sind beschrieben oder nicht erforderlich.
+- Risk class (`R0`-`R4`, see CONTRIBUTING.md):
+- [ ] For `R3`/`R4`: the effect on the threat model, a negative test and a human security review are described.
+- [ ] Rollout and rollback are described, or not needed.
 
-## Sicherheits-Check (Pflicht)
+## Security check
 
-- [ ] Die Trennung „LLM schlägt vor / Gateway entscheidet" bleibt intakt.
-- [ ] Kontrolle liegt weiterhin in DB-Zustand, nicht im Prompt.
-- [ ] Das Gateway bleibt fail-closed (keine Prüfung abgeschwächt).
-- [ ] Bei neuer aktiver Fähigkeit: Negativ-Test ergänzt.
+- [ ] The split "the LLM proposes, the gateway decides" is intact.
+- [ ] Control still lives in database state, not in the prompt.
+- [ ] The gateway still fails closed (no check was weakened).
+- [ ] For a new active capability: a negative test was added.
 
 ## Tests
 
-- [ ] `make test-unit` grün
-- [ ] `make test-integration` grün
-- [ ] `make frontend-build` grün
-- [ ] Bei sicherheitsrelevanten Änderungen: `make lab-test` grün
+- [ ] `make verify` is green
+- [ ] For security-relevant changes: `make scope-check` is green
 
-## Notizen
+## Notes
 
-<!-- Offene Punkte, Breaking Changes, Follow-ups. -->
+<!-- Open points, breaking changes, follow-ups. -->

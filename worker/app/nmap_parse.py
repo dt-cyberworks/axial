@@ -130,3 +130,31 @@ def nmap_xml_target_count(text: str) -> int:
         return int(hosts.get("total", ""))
     except ValueError as exc:
         raise ValueError("nmap_xml_host_stats_invalid") from exc
+
+
+def nmap_xml_state_counts(text: str) -> dict[str, int]:
+    """GitHub issue #60: how many ports nmap saw in each state, from one complete XML
+    document: the ports it lists plus the ones it summarizes (`extraports`, e.g. 65530
+    `filtered`). The result says whether a missing port was closed (the host answered with
+    a reset) or filtered (silence), which `open: N` alone cannot."""
+    if not text.strip():
+        raise ValueError("nmap_xml_empty")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise ValueError("nmap_xml_malformed") from exc
+    if root.tag != "nmaprun":
+        raise ValueError("nmap_xml_root_invalid")
+    counts: dict[str, int] = {}
+    for host in root.findall("host"):
+        status = host.find("status")
+        if status is not None and status.get("state") not in (None, "up"):
+            continue
+        for node in host.findall("./ports/extraports"):
+            state, count = node.get("state", "unknown"), node.get("count", "")
+            if count.isdigit():
+                counts[state] = counts.get(state, 0) + int(count)
+        for node in host.findall("./ports/port/state"):
+            state = node.get("state", "unknown")
+            counts[state] = counts.get(state, 0) + 1
+    return counts

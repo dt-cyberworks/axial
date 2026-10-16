@@ -37,6 +37,13 @@ from app.models.finding import Finding, FindingObservation  # noqa: E402
 from app.models.report import Report  # noqa: E402
 from app.models.scan_plan import ScanCheck, ScanSurface  # noqa: E402
 from app.models.scan_run import AgentStep, ScanRun  # noqa: E402
+from app.models.monitoring import (  # noqa: E402
+    AlertEvent,
+    ChangeEvent,
+    InboxItem,
+    NotificationTarget,
+    RunInventorySnapshot,
+)
 from app.models.user import User  # noqa: E402
 
 DOMAIN = "example.com"
@@ -181,7 +188,15 @@ def seed(db, *, password: str, now: dt.datetime | None = None) -> dict:
     _scope(db, retail, [("allow", "domain", RETAIL, True, True)])
     _grants(db, retail, [("fingerprint", "active"), ("vuln", "active")])
     db.add(ToolApprovalPolicy(engagement_id=retail.id, tool_name="http_request", requires_manual_approval=True))
-    for eng in (main, retail):
+    watch = _engagement(
+        db, operator, now, title="Example Corp: monitored scope", status="active", operating_mode="monitoring",
+        new_asset_policy="hold", scan_profile="light",
+        authorized_from=_ts(now, days=30), authorized_until=now + dt.timedelta(days=335),
+        review_at=now + dt.timedelta(days=335), emergency_contact="Alex Morgan, +1 555 0100 (security on-call)",
+    )
+    _scope(db, watch, [("allow", "domain", f"portal.{DOMAIN}", True, True)])
+    _grants(db, watch, [("recon", "passive"), ("fingerprint", "active"), ("vuln", "active")])
+    for eng in (main, retail, watch):
         append_audit_log(db, engagement_id=eng.id, actor=f"user:{operator.email}", action="engagement_created",
                          decision="ALLOW", reason=None, payload={"title": eng.title})
         append_audit_log(db, engagement_id=eng.id, actor=f"user:{operator.email}", action="engagement_activated",
@@ -422,8 +437,85 @@ def seed(db, *, password: str, now: dt.datetime | None = None) -> dict:
 
     db.commit()
     materialize_graph(main.id, db)
-    return {"accounts": accounts, "engagements": {"main": str(main.id), "draft": str(draft.id), "retail": str(retail.id)},
+    _monitoring_demo(db, watch, operator, now)
+    return {"accounts": accounts,
+            "engagements": {"main": str(main.id), "draft": str(draft.id), "retail": str(retail.id), "monitor": str(watch.id)},
             "runs": {"main_latest": str(run2.id), "main_first": str(run1.id), "retail_running": str(run3.id)}}
+
+
+def _monitoring_demo(db, watch: Engagement, operator: User, now: dt.datetime) -> None:
+    """A monitoring engagement with a few healthy runs, what changed between them, a held
+    host, a suggestion, one degraded run and a webhook. Demo data only (REQ-MODE-018)."""
+    host = f"portal.{DOMAIN}"
+    new_host, held_host = f"status.{DOMAIN}", f"beta.{DOMAIN}"
+
+    def run(days, *, health="ok", reason=None, minutes=11) -> ScanRun:
+        started = _ts(now, days=days)
+        item = ScanRun(
+            engagement_id=watch.id, started_at=started, finished_at=started + dt.timedelta(minutes=minutes),
+            heartbeat_at=started, phase="report", state="done", budget_tool_calls_used=41, attempt=1,
+            scan_profile="light", trigger="manual", initiated_by=operator.email, supervision="unattended",
+            health=health, state_reason=reason,
+        )
+        db.add(item)
+        db.flush()
+        return item
+
+    first, second, third = run(6), run(3), run(1, health="degraded", reason="coverage_partial:nuclei=1")
+    # REQ-MON-001: this monitor runs every 7 days; the count started with its latest run (yesterday).
+    watch.schedule_every_days = 7
+    watch.schedule_set_at = _ts(now, days=8)
+    watch.schedule_anchor_at = third.started_at
+    for item, hosts, ports in (
+        (first, [host], [(f"{host}:443/tcp", "nginx", "1.24.0")]),
+        (second, [host, new_host], [(f"{host}:443/tcp", "nginx", "1.24.0"), (f"{host}:8080/tcp", "Apache Tomcat", "9.0.60")]),
+    ):
+        for value in hosts:
+            db.add(RunInventorySnapshot(scan_run_id=item.id, engagement_id=watch.id, kind="asset", key=value, data={}))
+        for key, product, version in ports:
+            db.add(RunInventorySnapshot(scan_run_id=item.id, engagement_id=watch.id, kind="service", key=key,
+                                        data={"product": product, "version": version}))
+    for value, first_seen in ((host, 6), (new_host, 3), (held_host, 1)):
+        db.add(DiscoveredAsset(
+            engagement_id=watch.id, asset_type="domain", value=value, in_scope=True, discovered_via="passive-osint",
+            first_seen=_ts(now, days=first_seen), last_seen=_ts(now, days=1),
+            hold_state="held" if value == held_host else None, held_at=_ts(now, days=1) if value == held_host else None,
+        ))
+    db.flush()
+    for run_item, kind, subject, severity, detail, days in (
+        (second, "asset_new", new_host, "info", {"held": False}, 3),
+        (second, "port_opened", f"{host}:8080/tcp", "low", {"product": "Apache Tomcat", "version": "9.0.60"}, 3),
+        (second, "finding_new", "Apache Tomcat 9.0.60 is affected by CVE-2025-24813", "high",
+         {"confidence": "validated", "category": "cve", "is_kev": False}, 3),
+        (third, "asset_new", held_host, "info", {"held": True}, 1),
+    ):
+        db.add(ChangeEvent(engagement_id=watch.id, scan_run_id=run_item.id, kind=kind, subject=subject, severity=severity,
+                           detail=detail, created_at=_ts(now, days=days) + dt.timedelta(minutes=12)))
+    db.add_all([
+        InboxItem(engagement_id=watch.id, kind="held_asset", dedupe_key=f"held_asset:{held_host}",
+                  summary=f"New host {held_host} was found and is held: it is not tested until you release it.",
+                  detail={"value": held_host}, created_at=_ts(now, days=1)),
+        InboxItem(engagement_id=watch.id, kind="suggestion", dedupe_key=f"suggestion:http_request:{host}",
+                  summary=f"Suggested manual test: http_request on {host}",
+                  detail={"tool": "http_request", "target": host, "rationale": "A write request needed a person's decision"},
+                  created_at=_ts(now, days=3)),
+        InboxItem(engagement_id=watch.id, kind="run_degraded", dedupe_key=f"run_degraded:{third.id}",
+                  summary="The latest run had reduced coverage: nothing was concluded as fixed from it.",
+                  detail={"scan_run_id": str(third.id)}, created_at=_ts(now, days=1) + dt.timedelta(minutes=12)),
+    ])
+    target = NotificationTarget(engagement_id=watch.id, kind="webhook", url="https://hooks.example.org/axial",
+                                min_severity="high", enabled=True, created_by=operator.email)
+    db.add(target)
+    db.flush()
+    db.add_all([
+        AlertEvent(engagement_id=watch.id, target_id=target.id, event_kind="finding_new", immediate=False, state="delivered",
+                   attempts=1, payload={"title": "New finding: Apache Tomcat 9.0.60 is affected by CVE-2025-24813"},
+                   delivered_at=_ts(now, days=2), created_at=_ts(now, days=3)),
+        AlertEvent(engagement_id=watch.id, target_id=target.id, event_kind="run_degraded", immediate=True, state="failed",
+                   attempts=6, last_error="http_500", payload={"title": "A run of Example Corp: monitored scope had reduced coverage"},
+                   created_at=_ts(now, days=1)),
+    ])
+    db.commit()
 
 
 def add_pending_approval(db, *, engagement_id: uuid.UUID, scan_run_id: uuid.UUID, now: dt.datetime | None = None) -> uuid.UUID:

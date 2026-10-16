@@ -4,21 +4,36 @@ Thanks for your interest. This project is licensed under AGPL-3.0 (see
 [LICENSE](LICENSE)) — contributions are welcome. The conventions below apply
 to every change.
 
-## Mandatory SDLC
+## How a change is made
 
-[`docs/engineering/sdlc.md`](docs/engineering/sdlc.md) is the binding source
-for the development process. Non-trivial changes need a `REQ-*` requirement
-in `docs/requirements/`, a risk classification, and linked `TC-*` test cases
-in `docs/test-cases/`.
+1. **Describe the behaviour change** in the pull request: what is different
+   for an operator, and why.
+2. **Classify the risk** (table below).
+3. **Add tests that verify the behaviour directly.** For anything
+   security-relevant, a negative test comes first: it proves the thing that must
+   not happen does not happen.
+4. **Run the gates** and keep them green:
 
 ```bash
-make requirements-check  # check schema and traceability
-make traceability         # regenerate the matrix after changes
-make verify               # full local gates (needs Postgres)
+make verify               # manual check, script tests, control-plane tests, frontend tests and build (needs Postgres)
 ```
 
-The traceability matrix is generated, never hand-edited. `R3`/`R4` changes
-need negative tests and human security review.
+Security-sensitive `R3`/`R4` changes require negative tests and human security
+review. Automated agents cannot approve their own SDLC exceptions or weaken a
+requirement or test to make a gate pass.
+
+### Risk classes
+
+| Risk | Typical change | Minimum verification |
+|---|---|---|
+| `R0` | Comments, copy, non-functional formatting | Relevant static check |
+| `R1` | Normal UI or isolated application behavior | Unit tests and build |
+| `R2` | API, persistence, worker orchestration | Unit and integration tests; migration/rollback assessment |
+| `R3` | Scope Gateway, auth, audit, runner, proxy, secrets | Threat-model assessment, positive and negative tests, integration gates, security-owner review |
+| `R4` | New active capability, widened egress, destructive potential | Explicit human authorization, security review, isolated validation, staged release |
+
+A change may be classified upward at any time. Downgrading an `R3` or `R4`
+change requires a documented human decision.
 
 ## Ground rules
 
@@ -50,11 +65,8 @@ make test-integration   # against local Postgres (TEST_DATABASE_URL)
 make frontend-build     # typecheck + build
 ```
 
-For security-relevant changes, also run the full lab test loop:
-
-```bash
-make lab-test           # isolation + scope enforcement (hard gates)
-```
+For security-relevant changes, also run `make scope-check`, which proves the
+Scope Gateway denies out-of-scope targets and unsafe arguments.
 
 ## Code conventions
 
@@ -69,7 +81,7 @@ make lab-test           # isolation + scope enforcement (hard gates)
 ## Adding a new tool to the allowlist
 
 Every addition of an active/offensive tool is a deliberate decision that
-needs a renewed legal/insurance review — never a casual `apt install`.
+needs maintainer review — never a casual `apt install`.
 Process:
 
 1. Add the tool to

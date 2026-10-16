@@ -9,7 +9,17 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app import config_resolver, scan_diff, scan_plan, scan_readiness
+from app import capabilities as capability_registry
+from app import (
+    config_resolver,
+    monitoring,
+    monitoring_settings,
+    operating_modes,
+    scan_diff,
+    scan_plan,
+    scan_readiness,
+    scheduling,
+)
 from app.config import get_settings
 from app.pdf import pdf_escape as _pdf_escape  # noqa: F401  (kept for existing callers/tests)
 from app.pdf import simple_pdf as _simple_pdf
@@ -47,6 +57,7 @@ from app.schemas.engagement import (
     GatewayOverrideCreate,
     GatewayOverrideOut,
     ScopeAssetCreate,
+    ScanStartIn,
     ScopeAssetOut,
     ScopeAuthorizationVerificationCreate,
     ToolCategoryName,
@@ -91,8 +102,22 @@ def create_engagement(body: EngagementCreate, user: User = Depends(require_user)
     if body.source == "benchmark":
         raise HTTPException(403, "source 'benchmark' cannot be set via this endpoint")
     # REQ-IAM-007: owner is always the creating user - never client-supplied.
+    if body.operating_mode == "monitoring" and body.asset_review_enabled:
+        # REQ-MODE-001: a review gate would block a run nobody supervises.
+        raise HTTPException(409, "a monitoring engagement cannot pause for a manual asset review; use the new-asset policy")
     eng = Engagement(**body.model_dump(), status="draft", owner_user_id=user.id)
     db.add(eng)
+    db.flush()
+    if eng.operating_mode == "monitoring":
+        # REQ-MODE-006: start from the installation's monitoring defaults, COPIED now.
+        defaults = monitoring_settings.get_monitoring_defaults(db)
+        capability_registry.apply_defaults(db, eng, defaults)
+        eng.new_asset_policy = (
+            defaults["new_asset_policy_customer"] if eng.source == "customer" else defaults["new_asset_policy_other"]
+        )
+        eng.fragility_breaker = bool(defaults["fragility_breaker"])
+        if "scan_profile" not in body.model_fields_set:
+            eng.scan_profile = defaults["scan_profile"]
     db.commit()
     db.refresh(eng)
     _annotate(eng, user, user)
@@ -103,6 +128,8 @@ def create_engagement(body: EngagementCreate, user: User = Depends(require_user)
             "tcp_port_range": f"{eng.tcp_port_from}-{eng.tcp_port_to}",
             "udp_discovery_enabled": eng.udp_discovery_enabled,
             "scan_profile": eng.scan_profile,
+            "operating_mode": eng.operating_mode,
+            "new_asset_policy": eng.new_asset_policy,
             **_discovery_switches(eng),
         },
     )
@@ -208,7 +235,10 @@ def _check_no_active_scope_overlap(db: Session, eng: Engagement, candidate_asset
         )
 
 
-def _authorization_config_payload(eng: Engagement, assets: list[ScopeAsset], grants: list[ToolGrant], policies: list[ToolApprovalPolicy]) -> dict:
+def _authorization_config_payload(
+    eng: Engagement, assets: list[ScopeAsset], grants: list[ToolGrant], policies: list[ToolApprovalPolicy],
+    capabilities: list[dict] | None = None, alert_hosts: list[str] | None = None,
+) -> dict:
     return {
         "engagement_id": str(eng.id),
         "title": eng.title,
@@ -238,11 +268,26 @@ def _authorization_config_payload(eng: Engagement, assets: list[ScopeAsset], gra
             {"tool": p.tool_name, "enabled": bool(p.enabled)} for p in policies if p.enabled is not None
         ],
         "discovery_switches": _discovery_switches(eng),
+        # REQ-MODE-015: what the engagement does unattended is part of the signed
+        # document, so a change after signing changes the checksum.
+        "operating_mode": eng.operating_mode,
+        "scan_depth": eng.scan_profile,
+        "new_asset_policy": eng.new_asset_policy if eng.operating_mode == "monitoring" else None,
+        "review_at": eng.review_at.isoformat() if eng.review_at else None,
+        # REQ-MON-001: only when set, so a document signed before the scheduler existed keeps its
+        # checksum; setting an interval after signing changes it (REQ-MODE-015).
+        **({"run_every_days": eng.schedule_every_days} if eng.operating_mode == "monitoring" and eng.schedule_every_days else {}),
+        # Only present for a monitoring engagement (REQ-MODE-015): what it does by itself.
+        **({"capabilities": [c["id"] for c in capabilities if c["enabled"]]} if capabilities is not None else {}),
+        **({"alert_webhook_hosts": alert_hosts} if alert_hosts is not None else {}),
     }
 
 
-def _authorization_pdf(eng: Engagement, assets: list[ScopeAsset], grants: list[ToolGrant], policies: list[ToolApprovalPolicy]) -> bytes:
-    payload = _authorization_config_payload(eng, assets, grants, policies)
+def _authorization_pdf(
+    eng: Engagement, assets: list[ScopeAsset], grants: list[ToolGrant], policies: list[ToolApprovalPolicy],
+    capabilities: list[dict] | None = None, alert_hosts: list[str] | None = None,
+) -> bytes:
+    payload = _authorization_config_payload(eng, assets, grants, policies, capabilities, alert_hosts)
     checksum = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
     allow_assets = [a for a in assets if a.rule == "allow"]
     deny_assets = [a for a in assets if a.rule == "deny"]
@@ -300,6 +345,22 @@ def _authorization_pdf(eng: Engagement, assets: list[ScopeAsset], grants: list[T
         f"- Web screenshots: {'enabled' if switches['screenshots_enabled'] else 'disabled'}",
     ])
 
+    if eng.operating_mode == "monitoring":
+        lines.extend([
+            "",
+            "Unattended monitoring",
+            "- This engagement runs without a person watching. Runs are started by a person or by a schedule,",
+            "  and nothing waits for a person's decision during a run.",
+            f"- Scan depth: {eng.scan_profile}",
+            f"- New hosts found by discovery: {'held until acknowledged (not tested before)' if eng.new_asset_policy == 'hold' else 'tested as soon as they are covered by the scope'}",
+            f"- Automatic runs: {('every ' + str(eng.schedule_every_days) + ' day' + ('' if eng.schedule_every_days == 1 else 's')) if eng.schedule_every_days else 'none (started by a person)'}",
+            f"- Authorization review date: {eng.review_at.date() if eng.review_at else 'set at activation'}",
+            "- Calls that would need a person's approval are not made; they are listed as suggestions.",
+            "- Capabilities switched on: " + (", ".join(c["label"] for c in capabilities if c["enabled"]) or "none")
+            if capabilities is not None else "- Capabilities: see the tool permissions above.",
+            "- Alerts go to: " + (", ".join(alert_hosts) if alert_hosts else "no webhook (changes are visible in the console only)"),
+            "- Credential testing and exploitation are not part of monitoring.",
+        ])
     lines.extend(["", "Tools requiring manual approval"])
     if manual_tools:
         for tool in manual_tools:
@@ -352,9 +413,17 @@ def update_engagement(
     changes = body.model_dump(exclude_unset=True)
     # REQ-COVER-007: switches are booleans, never null; editable at any status
     # because they can only narrow what the scope and grants already allow.
-    for name in (*DISCOVERY_SWITCHES, "scan_profile"):
+    for name in (*DISCOVERY_SWITCHES, "scan_profile", "operating_mode", "new_asset_policy", "fragility_breaker"):
         if name in changes and changes[name] is None:
             del changes[name]
+    # REQ-MODE-001: the mode is chosen while the engagement is a draft and then fixed.
+    if "operating_mode" in changes and changes["operating_mode"] != eng.operating_mode and eng.status != "draft":
+        raise HTTPException(409, "the operating mode can only be changed while the engagement is a draft")
+    effective_mode = changes.get("operating_mode", eng.operating_mode)
+    if effective_mode == "monitoring" and changes.get("asset_review_enabled"):
+        raise HTTPException(409, "a monitoring engagement cannot pause for a manual asset review; use the new-asset policy")
+    if "operating_mode" in changes and effective_mode == "monitoring":
+        changes["asset_review_enabled"] = False
     if not changes:
         return _annotate(eng, user, None, db)
     switches_before = _discovery_switches(eng)
@@ -447,6 +516,8 @@ def put_engagement_config(
     globale Policy, true/false ueberschreibt; requires_approval verschaerft nur.
     agent_prompt_override=None/"" -> Kampagne erbt wieder den globalen Prompt."""
     eng = _get_engagement_or_404(db, engagement_id)
+    if eng.operating_mode == "monitoring" and any(t.requires_approval for t in body.tools):
+        raise HTTPException(409, "a monitoring engagement has nobody to approve a call; remove the approval setting")
 
     for entry in body.tools:
         spec = registry.get(entry.tool)
@@ -564,7 +635,18 @@ def download_authorization_pdf(
     assets = db.scalars(select(ScopeAsset).where(ScopeAsset.engagement_id == engagement_id).order_by(ScopeAsset.rule, ScopeAsset.asset_type, ScopeAsset.value)).all()
     grants = db.scalars(select(ToolGrant).where(ToolGrant.engagement_id == engagement_id).order_by(ToolGrant.tool_category, ToolGrant.mode)).all()
     policies = db.scalars(select(ToolApprovalPolicy).where(ToolApprovalPolicy.engagement_id == engagement_id).order_by(ToolApprovalPolicy.tool_name)).all()
-    pdf = _authorization_pdf(eng, assets, grants, policies)
+    capabilities = alert_hosts = None
+    if eng.operating_mode == "monitoring":
+        from urllib.parse import urlsplit
+
+        from app.models.monitoring import NotificationTarget
+
+        capabilities = capability_registry.view(db, eng)
+        alert_hosts = sorted({
+            urlsplit(t.url).hostname or t.url for t in db.scalars(
+                select(NotificationTarget).where(NotificationTarget.engagement_id == engagement_id))
+        })
+    pdf = _authorization_pdf(eng, assets, grants, policies, capabilities, alert_hosts)
     append_audit_log(
         db,
         engagement_id=engagement_id,
@@ -760,6 +842,13 @@ def add_tool_grant(
     (removing always works - it only narrows). Every change is audited with its actor."""
     eng = _get_engagement_or_404(db, engagement_id)
     _require_editable_grants(eng)
+    if eng.operating_mode == "monitoring":
+        # REQ-MODE-006/007: nobody is there to decide in a monitoring engagement, and
+        # credential or exploit testing is not part of unattended monitoring.
+        if body.tool_category in ("cred", "exploit") and body.mode == "active":
+            raise HTTPException(409, f"{body.tool_category} testing cannot be granted to a monitoring engagement")
+        if body.requires_manual_approval or body.manual_tools:
+            raise HTTPException(409, "a monitoring engagement has nobody to approve a call; remove the approval setting")
     manual_tools = sorted(set(body.manual_tools or []))
     category_tools = _tools_for_category(body.tool_category)
     invalid_tools = [tool for tool in manual_tools if tool not in category_tools]
@@ -1001,12 +1090,24 @@ def activate_engagement(
     if not (eng.authorized_from and eng.authorized_until and eng.authorized_from < eng.authorized_until):
         raise HTTPException(409, "Cannot activate: the test window is missing or ends before it starts.")
 
+    if eng.operating_mode == "monitoring":
+        if eng.asset_review_enabled:
+            raise HTTPException(409, "Cannot activate: a monitoring engagement cannot pause for a manual asset review.")
+        # REQ-MODE-012: standing authorization is reviewed; default 12 months, never past the window.
+        if eng.review_at is None:
+            eng.review_at = min(now + datetime.timedelta(days=365), eng.authorized_until)
+
     eng.status = "active"
+    # REQ-MON-001: the interval counts from the moment the engagement becomes active, so a
+    # monitor activated long after its interval was set does not start a run by itself at once.
+    scheduling.restart_count(eng, now)
     db.commit()
     db.refresh(eng)
     append_audit_log(
         db, engagement_id=eng.id, actor=f"user:{user.email}", action="engagement_activated",
-        decision="ALLOW", reason="activation_checklist_passed", payload={"at": now.isoformat()},
+        decision="ALLOW", reason="activation_checklist_passed",
+        payload={"at": now.isoformat(), "operating_mode": eng.operating_mode,
+                 "review_at": eng.review_at.isoformat() if eng.review_at else None},
     )
     return _annotate(eng, user, None, db)
 
@@ -1020,44 +1121,158 @@ def get_scan_readiness(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     return {"ready": r.ready, "blockers": [{"code": b.code, "message": b.message, "action": b.action} for b in r.blockers]}
 
 
+def _scope_hosts(db: Session, eng: Engagement, hosts: list[str]) -> list[str]:
+    """REQ-MODE-017: a run can be limited to some hosts, never widened. Each host must
+    be a discovered in-scope host or a declared scope value."""
+    wanted = sorted({h.strip().lower().rstrip(".") for h in hosts if h and h.strip()})
+    if not wanted:
+        raise HTTPException(422, "hosts must name at least one in-scope host")
+    known = {
+        v.lower().rstrip(".") for v in db.scalars(
+            select(DiscoveredAsset.value).where(
+                DiscoveredAsset.engagement_id == eng.id, DiscoveredAsset.in_scope.is_(True),
+            )
+        )
+    }
+    known |= {
+        a.value.lower().rstrip(".") for a in db.scalars(
+            select(ScopeAsset).where(ScopeAsset.engagement_id == eng.id, ScopeAsset.rule == "allow")
+        )
+    }
+    unknown = [h for h in wanted if h not in known]
+    if unknown:
+        raise HTTPException(422, f"not an in-scope host of this engagement: {', '.join(unknown)}")
+    return wanted
+
+
 @router.post("/{engagement_id}/scan", status_code=202)
-def start_scan(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
+def start_scan(
+    engagement_id: uuid.UUID, body: ScanStartIn | None = None,
+    db: Session = Depends(get_db), user: User = Depends(require_user),
+):
     """Enqueued die scan_run-Phasen-Pipeline (Architektur Kap. 4.1) beim worker.
     Prozess-Topologie Abb. 1: Orchestrator -> enqueue -> Celery Worker.
 
     Preflight (REQ-RUN-002): startet NUR, wenn die engagement-weiten Blocking-
     Bedingungen erfuellt sind - sonst 409 mit Blocker-Liste, statt einen Lauf zu
-    starten, der dann jeden Request blockt."""
-    _get_engagement_or_404(db, engagement_id)
-    # Verwaiste Laeufe zuerst ernten (REQ-RAWLEASE-001), damit ein abgestuerzter/
-    # haengender Lauf den Start eines neuen nicht dauerhaft blockiert.
-    reap_stale_runs(db, engagement_id)
-    r = scan_readiness.evaluate(db, engagement_id)
-    if not r.ready:
-        raise HTTPException(409, {"error": "engagement_not_scan_ready",
-                                  "blockers": [{"code": b.code, "message": b.message, "action": b.action} for b in r.blockers]})
-    # REQ-AGENT-008: effektives Iterationsbudget (Kampagne -> global ->
-    # eingebauter Default) statt eines hartcodierten Werts.
-    max_iterations = config_resolver.effective_agent_max_iterations(db, engagement_id)
-    # REQ-APPROVAL-005: der Worker-Poll-Deckel muss zur control-plane-seitig
-    # durchgesetzten expires_at passen, sonst kann der Worker lokal frueher
-    # aufgeben als die Freigabe tatsaechlich glaeufig ist (Desync-Risiko).
-    approval_timeout_seconds = config_resolver.effective_approval_timeout_seconds(db, engagement_id)
-    # GitHub issue #18: the scan_run row is created HERE, transactionally and
-    # race-safe (app.scan_lifecycle.start_scan_run - a partial unique index is
-    # the actual invariant), and its ID is handed to the worker rather than
-    # having the worker create its own row via a second, independently-racing
-    # check-then-insert (create_scan_run below still exists as a legacy/
-    # direct-testing entry point, now made equally race-safe).
+    starten, der dann jeden Request blockt.
+
+    REQ-MODE-002/017: the run records who started it and how supervised it is;
+    the body (optional) can limit it to some hosts or retest one finding. The
+    run is created by operating_modes.begin_scan, the one start path."""
+    eng = _get_engagement_or_404(db, engagement_id)
+    body = body or ScanStartIn()
+    scope_hosts = None
+    retest_finding_id = None
+    scan_profile = body.scan_profile
+    if body.retest_finding_id is not None:
+        finding = db.get(Finding, body.retest_finding_id)
+        if finding is None or finding.engagement_id != engagement_id:
+            raise HTTPException(404, "finding not found for this engagement")
+        asset = db.get(DiscoveredAsset, finding.asset_id) if finding.asset_id else None
+        if asset is None:
+            raise HTTPException(409, "this finding has no host to retest")
+        scope_hosts = [asset.value.lower()]
+        retest_finding_id = finding.id
+    if body.hosts:
+        scope_hosts = _scope_hosts(db, eng, body.hosts + (scope_hosts or []))
     try:
-        run = start_scan_run(db, engagement_id, budget_tool_calls_max=200)
-    except ScanRunAlreadyActive:
-        raise HTTPException(409, "engagement already has an active scan_run") from None
-    task_id = enqueue_scan(
-        str(engagement_id), scan_run_id=str(run.id), budget_max_iterations=max_iterations,
-        approval_timeout_seconds=approval_timeout_seconds,
+        started = operating_modes.begin_scan(
+            db, engagement_id, trigger="manual", initiated_by=user.email, supervision=body.supervision,
+            scan_profile=scan_profile, scope_hosts=scope_hosts, retest_finding_id=retest_finding_id,
+        )
+    except operating_modes.ScanNotStartable as exc:
+        raise HTTPException(exc.status, exc.detail) from None
+    return {"task_id": started.task_id, "scan_run_id": str(started.run.id),
+            "supervision": started.run.supervision, "scan_profile": started.run.scan_profile}
+
+
+def _stop_active_runs(db: Session, engagement_id: uuid.UUID, now: datetime.datetime, reason: str) -> list[str]:
+    """Cooperative stop of the engagement's active run (same effect as the operator's
+    Stop scan): the run is terminal at once, its open approvals and reviews close."""
+    stopped: list[str] = []
+    runs = db.scalars(
+        select(ScanRun).where(ScanRun.engagement_id == engagement_id, ScanRun.state.in_(["running", "waiting_approval"]))
+        .with_for_update()
+    ).all()
+    for run in runs:
+        run.cancel_requested = True
+        run.state = "aborted"
+        run.state_reason = reason
+        run.finished_at = now
+        stopped.append(str(run.id))
+        for approval in db.scalars(select(ApprovalRequest).where(
+            ApprovalRequest.engagement_id == engagement_id,
+            ApprovalRequest.state.in_(["requested", "approved", "executing"]),
+        )):
+            if str((approval.tool_call or {}).get("scan_run_id") or "") != str(run.id):
+                continue
+            approval.state = "cancelled"
+            approval.execution_finished_at = now
+            approval.execution_error = reason
+        review = db.scalar(select(AssetReviewRequest).where(
+            AssetReviewRequest.scan_run_id == run.id, AssetReviewRequest.state == "pending"))
+        if review is not None:
+            review.state = "cancelled"
+            review.decided_at = now
+    return stopped
+
+
+def _lifecycle(
+    db: Session, engagement_id: uuid.UUID, user: User, *, action: str, allowed_from: tuple[str, ...], to: str,
+) -> Engagement:
+    eng = _get_engagement_or_404(db, engagement_id)
+    if eng.status not in allowed_from:
+        raise HTTPException(409, f"cannot {action}: the engagement is '{eng.status}'")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if action == "resume" and not (eng.authorized_from <= now <= eng.authorized_until):
+        raise HTTPException(409, "cannot resume: the authorized window is not open")
+    if action == "close" and _scan_run_active(db, engagement_id):
+        raise HTTPException(409, "cannot close: a run is active; stop it first")
+    stopped: list[str] = []
+    if action in ("pause", "revoke"):
+        stopped = _stop_active_runs(db, engagement_id, now, f"engagement_{to}")
+    before = eng.status
+    eng.status = to
+    if action == "resume":
+        scheduling.restart_count(eng, now)  # REQ-MON-001: no surprise run after a long pause
+    append_audit_log(
+        db, engagement_id=eng.id, actor=f"user:{user.email}", action=f"engagement_{action}", decision="ALLOW",
+        reason="operator_action", payload={"from": before, "to": to, "stopped_runs": stopped},
     )
-    return {"task_id": task_id}
+    db.commit()
+    db.refresh(eng)
+    return eng
+
+
+@router.post("/{engagement_id}/pause", response_model=EngagementOut)
+def pause_engagement(engagement_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """REQ-MODE-003: every gateway decision becomes `engagement_not_active`; the active run stops."""
+    return _annotate(_lifecycle(db, engagement_id, user, action="pause", allowed_from=("active",), to="paused"), user, None, db)
+
+
+@router.post("/{engagement_id}/resume", response_model=EngagementOut)
+def resume_engagement(engagement_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    return _annotate(_lifecycle(db, engagement_id, user, action="resume", allowed_from=("paused",), to="active"), user, None, db)
+
+
+@router.post("/{engagement_id}/close", response_model=EngagementOut)
+def close_engagement(engagement_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """The end of a test: the engagement is `completed` and cannot be resumed."""
+    return _annotate(
+        _lifecycle(db, engagement_id, user, action="close", allowed_from=("active", "paused"), to="completed"),
+        user, None, db,
+    )
+
+
+@router.post("/{engagement_id}/revoke", response_model=EngagementOut)
+def revoke_engagement(engagement_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """The kill switch: any non-terminal engagement becomes `revoked`; irreversible."""
+    return _annotate(
+        _lifecycle(db, engagement_id, user, action="revoke",
+                   allowed_from=("draft", "awaiting_signature", "active", "paused"), to="revoked"),
+        user, None, db,
+    )
 
 
 @router.post("/{engagement_id}/scan-runs/{run_id}/cancel")
@@ -1108,6 +1323,7 @@ def cancel_scan_run(
             "scan_run_id": str(run_id), "state": "aborted",
         },
     )
+    monitoring.on_run_finished(db, run)
     return {
         "scan_run_id": str(run_id),
         "cancel_requested": True,

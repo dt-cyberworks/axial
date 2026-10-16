@@ -1,10 +1,10 @@
-# lab_runner.Dockerfile - minimaler Tool-Runner NUR fuer den Lab-Testloop (M1).
+# lab_runner.Dockerfile - minimal tool runner ONLY for the lab test loop.
 #
-# Ersatz fuer runner.Dockerfile (Kali + HexStrike, s. dort) in diesem
-# Live-Test: nur nmap + ein Python-Stdlib-HTTP-Server. Kleiner, schnellerer,
-# zuverlaessigerer Build (keine externe Repo-Clone-Abhaengigkeit). Die volle
-# HexStrike-Integration bleibt Roadmap M3 (docs/roadmap.md) - dies ist der
-# bewusst minimale, aber echte Pfad Gateway -> Runner -> Findings.
+# Replacement for runner.Dockerfile (Kali + HexStrike, see there) in this live
+# test: only nmap + a Python stdlib HTTP server. A smaller, faster, more
+# reliable build (no external repo-clone dependency). The full HexStrike
+# integration lives in runner.Dockerfile - this is the deliberately minimal but
+# real path gateway -> runner -> findings.
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 
 RUN apt-get update && apt-get install -y --no-install-recommends nmap \

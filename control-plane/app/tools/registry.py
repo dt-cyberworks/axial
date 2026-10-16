@@ -28,12 +28,12 @@ from dataclasses import dataclass, field
 
 from app.gateway import args_safety
 
-# Ausfuehrungsklasse bestimmt den Egress-Enforcement-Pfad:
-#   raw_network : direkte TCP/Raw-Verbindung -> signierter Compose-Lease mit
-#                 nftables oder K8s-NetworkPolicy aus materialisierten IPs
-#   http_proxy  : HTTP(S)-Tool -> muss den Egress-Proxy explizit nutzen (proxy_flag)
-#   passive     : rein passiv/OSINT ueber externe APIs/DNS (kein Ziel-Egress
-#                 im Scan-Sinn, z. B. subfinder/amass/crt.sh)
+# The execution class decides the egress enforcement path:
+#   raw_network : direct TCP/raw connection -> signed Compose lease with
+#                 nftables from materialized IPs
+#   http_proxy  : HTTP(S) tool -> must use the egress proxy explicitly (proxy_flag)
+#   passive     : purely passive/OSINT via external APIs/DNS (no target egress
+#                 in the scan sense, e.g. subfinder/amass/crt.sh)
 EXECUTION_CLASSES = {"raw_network", "http_proxy", "passive"}
 CATEGORIES = {"recon", "fingerprint", "vuln", "cred", "exploit"}
 
@@ -91,7 +91,7 @@ _SPECS: list[ToolSpec] = [
              hexstrike_endpoint="/api/tools/nmap", worker_mapped=True, dispatched=True,
              proxy_flag=None, parser="nmap_xml", max_runtime_seconds=300,
              arg_validator=args_safety._nmap_args_safe,
-             notes="configured TCP and opt-in targeted UDP via signed Compose lease/nftables or generated K8s NetworkPolicy"),
+             notes="configured TCP and opt-in targeted UDP via signed Compose lease/nftables"),
     ToolSpec("httpx", "fingerprint", "http_proxy", installed=True, default_enabled=True,
              hexstrike_endpoint="/api/command", worker_mapped=True, dispatched=True,
              proxy_flag="-proxy", proxy_verified=True, parser="httpx",

@@ -1,12 +1,11 @@
-"""Lokale CVE-Zuordnung fuer bekannte, offensichtlich verwundbare Versionen.
+"""Local CVE mapping for known, obviously vulnerable versions.
 
-Alternative zur NVD-API (Spezifikation Kap. 3.3: "Versionserkennung ->
-Abgleich gegen CVE-Datenbank (NVD-API oder lokale Kopie)"). Bewusst klein und
-statisch gehalten - deckt die Ziele aus lab/expected_findings.yaml ab
-(Metasploitable2-Familie), damit der Lab-Testloop echte, korrekte
-CVE-Findings ohne Internet-Abhaengigkeit erzeugt. Fuer echte Kundenziele
-(M2) durch einen NVD-API-Abgleich ersetzen/ergaenzen (s. TODO in
-worker/app/tasks/correlate.py).
+Alternative to the NVD API (Specification Ch. 3.3: "version detection ->
+match against a CVE database (NVD API or local copy)"). Deliberately small and
+static - covers the targets in lab/expected_findings.yaml (the Metasploitable2
+family) so the lab test loop produces real, correct CVE findings without an
+internet dependency. For real targets, replace/extend with an NVD API lookup
+(see the TODO in worker/app/tasks/correlate.py).
 """
 
 from __future__ import annotations

@@ -10,7 +10,7 @@ packets - but the reservation layer had no equivalent check at all.
 
 Mirrors tool-runner/runner_auth.py's shape exactly (same fail-closed
 contract, same reasoning): dependency-free (stdlib only) so it is directly
-unit-testable, /health stays open for the Compose/K8s liveness probe, every
+unit-testable, /health stays open for the Compose healthcheck, every
 other path requires a configured token AND a caller-supplied token matching
 it in constant time, and a MISSING configured token denies everything
 non-health rather than silently accepting unauthenticated requests.

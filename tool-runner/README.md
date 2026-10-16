@@ -1,33 +1,29 @@
 # tool-runner
 
-Ephemere Ausfuehrungsebene (HexStrike + Kali-Tools). Wird **nie** dauerhaft
-betrieben, sondern pro Auftrag frisch gestartet und danach zerstoert
-(`deployment/k8s/job-tool-runner.yaml` bzw. der `tool-runner`-Service in
-`docker-compose.yml` fuer M1-M3 auf einem Host).
+Isolated execution plane (HexStrike + Kali tools): the `tool-runner` service in
+`docker-compose.yml` (profile `runner`). It is not on the control plane's
+network and is never addressed by the LLM directly.
 
-Zwei unabhaengige Beschraenkungsebenen (s. `docs/spec/tool-allowlist.md`):
+Two independent layers of restriction (see `docs/spec/tool-allowlist.md`):
 
-1. **Build-Zeit-Allowlist** (`runner.Dockerfile`) - was ueberhaupt im Image
-   installiert ist. Ein Tool, das hier fehlt, kann von HexStrike oder dem
-   LLM nicht aufgerufen werden, unabhaengig von jedem Prompt oder Fehler.
-2. **Laufzeit-Grant** (`tool_grant`-Tabelle + Scope Gateway,
-   `control-plane/app/gateway/authorize.py::WHITELIST`) - welche Teilmenge
-   der installierten Tools in diesem konkreten Auftrag ueberhaupt
-   vorgeschlagen werden darf.
+1. **Build-time allowlist** (`runner.Dockerfile`) - what is installed in the
+   image at all. A tool that is missing here cannot be called by HexStrike or
+   the LLM, regardless of any prompt or bug.
+2. **Runtime grant** (`tool_grant` table + Scope Gateway,
+   `control-plane/app/gateway/authorize.py::WHITELIST`) - which subset of the
+   installed tools may be proposed at all in this particular engagement.
 
-Der tool-runner selbst hat standardmaessig keinen direkten Netzzugang ausser zum
-`egress-proxy` (s. `deployment/k8s/networkpolicy-runner-egress.yaml`) und
-wird niemals direkt vom LLM angesprochen - jeder Vorschlag geht zuerst durch
-`POST /internal/engagements/{id}/gateway/authorize` in der control-plane.
+By default the tool-runner itself has no direct network access except to the
+`egress-proxy` (the internal `runner` network in `docker-compose.yml`) and is
+never addressed by the LLM directly - every proposal first goes through
+`POST /internal/engagements/{id}/gateway/authorize` in the control plane.
 
-Fuer nmap/raw scans gilt ein separater Pfad: In Compose teilt dieser Runner
-den Netzwerk-Namespace des `raw-egress-gateway`. Dessen nftables-OUTPUT-Policy
-ist deny-all und akzeptiert nur eine Control-Plane-signierte, kurzlebige Lease
-fuer die auditierte materialisierte IP. Nur das Gateway besitzt `NET_ADMIN`;
-dieser Runner bleibt non-root mit `NET_RAW`. In Kubernetes gilt weiterhin die
-per-Engagement-NetworkPolicy aus
-`GET /internal/engagements/{id}/raw-egress-policy`. Domain-/Wildcard-Scope muss
-vorher materialisiert werden; bis dahin bleibt raw egress fail-closed.
+nmap/raw scans take a separate path: in Compose this runner shares the network
+namespace of the `raw-egress-gateway`. Its nftables OUTPUT policy is deny-all
+and accepts only a short-lived lease signed by the control plane, for the
+audited materialized IP. Only the gateway owns `NET_ADMIN`; this runner stays
+non-root with `NET_RAW`. Domain/wildcard scope has to be materialized first;
+until then raw egress stays fail-closed.
 
 Build:
 
@@ -35,10 +31,10 @@ Build:
 docker build -f tool-runner/runner.Dockerfile -t asm/tool-runner:dev tool-runner
 ```
 
-**TODO(M3):** MCP-Server/-Client, der HexStrikes HTTP-API mit dem
-freigegebenen `--profile` instanziiert und ToolResults normalisiert
-zurueckgibt (Architektur Kap. 4.3). Aktuell enthaelt dieses Verzeichnis nur
-die Image-Definition, noch keinen Runner-Code.
+**TODO:** an MCP server/client that instantiates HexStrike's HTTP API with the
+authorized `--profile` and returns normalized ToolResults (Architecture
+Ch. 4.3). Currently this directory holds only the image definition, no runner
+code yet.
 
 ## Scan-run cancellation
 

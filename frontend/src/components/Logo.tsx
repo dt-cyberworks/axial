@@ -1,4 +1,4 @@
-// Single source for the Axial mark (docs/design/axial-brand-design.md).
+// Single source for the Axial mark (REQ-BRAND-001).
 // Reused by the sidebar brand block and the auth screen so the two never drift.
 export default function Logo({
   size = 32,

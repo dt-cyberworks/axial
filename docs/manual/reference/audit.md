@@ -31,6 +31,6 @@ The meaning of each denial reason is in [Troubleshooting](../troubleshooting.md#
 
 ## What the log proves
 
-The log is **append-only and hash-chained**: each row carries a hash that includes the previous row, so a modified, removed, inserted or re-ordered row breaks the chain and can be detected. That is what makes it usable as evidence towards a customer, a bug-bounty operator or an insurer that every action was within the scope and when it was approved. Filtering and searching are read-only; they never alter the log.
+The log is **append-only and hash-chained**: each row carries a hash that includes the previous row, so a modified, removed, inserted or re-ordered row breaks the chain and can be detected. That is what makes it usable as evidence that every action was within the scope and when it was approved. Filtering and searching are read-only; they never alter the log.
 
 The log of one engagement is the full record. The *Activity* tab of a run is a filtered, run-scoped, human-readable view of the same events; see [Run detail](run-detail.md#activity). Account events (sign-ins, password changes, admin actions) are in a separate chain, the account audit, which only administrators can read.

@@ -78,8 +78,8 @@ class Settings(BaseSettings):
     # Fehlt er, arbeitet die Korrelation korrekt (nur langsamer) ohne Key.
     nvd_api_key: str = ""
 
-    # Signiert intern erzeugte Approval-/Report-Referenzen; ersetzt Vault/SOPS
-    # im lokalen M1-Skeleton (siehe Deployment-Architektur Kap. 7.2).
+    # Signs internally generated approval/report references; stands in for
+    # Vault/SOPS in local development (see Deployment Architecture Ch. 7.2).
     scope_signing_secret: str = "change-me-in-dev"
     # Separate capability key for short-lived raw-egress leases. The gateway
     # receives only this verifier key, never the operator/internal API token.

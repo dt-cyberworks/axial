@@ -10,6 +10,11 @@ import DiscoverySection from "../components/DiscoverySection";
 import { discoveryFlagSummary } from "../components/DiscoverySwitches";
 import FindingsSection from "../components/FindingsSection";
 import ReadOnlyNotice from "../components/ReadOnlyNotice";
+import CapabilitiesEditor from "../components/CapabilitiesEditor";
+import ChangesSection from "../components/ChangesSection";
+import EngagementLifecycle from "../components/EngagementLifecycle";
+import ScheduleControl from "../components/ScheduleControl";
+import NotificationTargets from "../components/NotificationTargets";
 import ToolGrantsEditor from "../components/ToolGrantsEditor";
 import { fmtDuration, fmtTime, runStatePill } from "../lib/runs";
 
@@ -22,9 +27,17 @@ const ENGAGEMENT_TABS = [
   { id: "assets", label: "Assets" },
   { id: "runs", label: "Runs & reports" },
 ] as const;
-type EngagementTab = typeof ENGAGEMENT_TABS[number]["id"];
+// REQ-MODE-018: a monitoring engagement also has the change feed and its setup.
+const MONITORING_TABS = [
+  { id: "findings", label: "Findings" },
+  { id: "changes", label: "Changes" },
+  { id: "assets", label: "Assets" },
+  { id: "runs", label: "Runs & reports" },
+  { id: "setup", label: "Capabilities & alerts" },
+] as const;
+type EngagementTab = typeof ENGAGEMENT_TABS[number]["id"] | typeof MONITORING_TABS[number]["id"];
 function parseEngagementTab(value: string | null): EngagementTab {
-  return ENGAGEMENT_TABS.some((tab) => tab.id === value) ? (value as EngagementTab) : "findings";
+  return MONITORING_TABS.some((tab) => tab.id === value) ? (value as EngagementTab) : "findings";
 }
 
 /** REQ-CONSOLE-012: the highest open severity in English, instead of the API's
@@ -88,8 +101,11 @@ export default function EngagementDetail() {
   const activeRun = scanRuns.find((r) => r.state === "running" || r.state === "waiting_approval");
   const openFindings = Object.values(summary?.counts_by_severity ?? {}).reduce((a, b) => a + b, 0);
 
+  // REQ-MODE-002: a person who starts a test chooses whether they will watch it.
+  const [supervision, setSupervision] = useState<"attended" | "semi_attended">("attended");
   const startScan = useMutation({
-    mutationFn: () => api.startScan(id!),
+    mutationFn: () => api.startScan(id!, engagement?.operating_mode === "assessment" && supervision === "semi_attended"
+      ? { supervision } : undefined),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["scan-runs", id] }),
   });
 
@@ -125,6 +141,8 @@ export default function EngagementDetail() {
   // REQ-IAM-025: everyone reads every engagement; only the owner or an admin changes it.
   // The server refuses a change from anyone else, so this only hides what would be refused.
   const canManage = engagement.can_manage;
+  const isMonitoring = engagement.operating_mode === "monitoring";
+  const tabs = isMonitoring ? MONITORING_TABS : ENGAGEMENT_TABS;
 
   return (
     <section className="page-stack">
@@ -134,7 +152,7 @@ export default function EngagementDetail() {
         <div>
           <span className="eyebrow">Engagement</span>
           <h1>{engagement?.title ?? "Engagement"}</h1>
-          <p>Status {engagement?.status ?? "?"} · Vector Agent {engagement?.ai_testing_allowed ? "enabled" : "disabled"} · Discovery extras: {engagement ? discoveryFlagSummary(engagement) : "?"} · {id}</p>
+          <p>Status {engagement?.status ?? "?"} · {isMonitoring ? "Monitoring (unattended)" : "Assessment"} · Vector Agent {engagement?.ai_testing_allowed ? "enabled" : "disabled"} · Discovery extras: {engagement ? discoveryFlagSummary(engagement) : "?"} · {id}</p>
         </div>
         <div className="header-actions">
           {canManage && <Link to={`/engagements/${id}/edit`} className="secondary-action">Edit</Link>}
@@ -209,6 +227,16 @@ export default function EngagementDetail() {
         </section>
       )}
 
+      {canManage && !isDraft && <EngagementLifecycle engagement={engagement} />}
+
+      {/* REQ-MON-004: how often a monitor runs by itself, and why a due run waits. */}
+      {isMonitoring && !isDraft && engagement.status !== "completed" && engagement.status !== "revoked" && (
+        <ScheduleControl engagementId={engagement.id} canManage={canManage} />
+      )}
+
+      {/* REQ-MODE-013/018: a monitor tells you what changed before anything else. */}
+      {isMonitoring && !isDraft && activeTab === "findings" && <ChangesSection engagementId={id} compact />}
+
       {/* REQ-CONSOLE-013: one compact row (readiness left, action right), so the findings start high on the page. */}
       <section className="form-panel start-run-panel" aria-label="Start a scan run">
         <div className="start-run-status">
@@ -238,13 +266,23 @@ export default function EngagementDetail() {
           )}
         </div>
         <div className="start-run-actions">
+          {canManage && !isMonitoring && (
+            <label className="supervision-choice">
+              <span className="muted-line">Supervision</span>
+              <select value={supervision} onChange={(e) => setSupervision(e.target.value as "attended" | "semi_attended")}
+                aria-label="Supervision of this run">
+                <option value="attended">I will watch (decide live)</option>
+                <option value="semi_attended">Notify me when you need me</option>
+              </select>
+            </label>
+          )}
           {canManage && (
             <button
               className="primary-action"
               disabled={!readiness?.ready || !!activeRun || startScan.isPending}
               onClick={() => startScan.mutate()}
             >
-              {activeRun ? "A run is already active" : startScan.isPending ? "Starting…" : "Start run"}
+              {activeRun ? "A run is already active" : startScan.isPending ? "Starting…" : isMonitoring ? "Run now" : "Start run"}
             </button>
           )}
           {activeRun && <Link className="secondary-action" to={`/engagements/${id}/runs/${activeRun.id}`}>Open active run →</Link>}
@@ -253,7 +291,7 @@ export default function EngagementDetail() {
       </section>
 
       <div className="page-tabs" role="tablist" aria-label="Engagement sections">
-        {ENGAGEMENT_TABS.map((tab) => (
+        {tabs.map((tab) => (
           <button key={tab.id} id={`engagement-tab-${tab.id}`} role="tab" aria-selected={activeTab === tab.id}
             aria-controls="engagement-tab-panel" className={`page-tab ${activeTab === tab.id ? "active" : ""}`}
             onClick={() => selectTab(tab.id)}>
@@ -267,6 +305,15 @@ export default function EngagementDetail() {
       {/* Only the shown tab is mounted, so only its data is requested. */}
       <div id="engagement-tab-panel" role="tabpanel" aria-labelledby={`engagement-tab-${activeTab}`} className="page-stack">
         {activeTab === "findings" && <FindingsSection engagementId={id} canManage={canManage} />}
+
+        {isMonitoring && activeTab === "changes" && <ChangesSection engagementId={id} />}
+
+        {isMonitoring && activeTab === "setup" && (
+          <>
+            <CapabilitiesEditor engagementId={id} active={engagement.status === "active"} canManage={canManage} />
+            <NotificationTargets engagementId={id} canManage={canManage} />
+          </>
+        )}
 
         {activeTab === "assets" && (
           <>
@@ -289,7 +336,7 @@ export default function EngagementDetail() {
               <div className="panel-heading"><div><h2>Runs</h2><p>Click a run to see its progress, diff, agent steps, and log. Findings accumulate across all runs; they are listed on the Findings tab.</p></div></div>
               <div className="responsive-table">
                 <table className="data-table">
-                  <thead><tr><th>Run</th><th>Started</th><th>Finished</th><th>Duration</th><th>Phase</th><th>State</th><th>Tool budget</th></tr></thead>
+                  <thead><tr><th>Run</th><th>Started</th><th>Finished</th><th>Duration</th><th>Phase</th><th>State</th><th>Started by</th><th>Tool budget</th></tr></thead>
                   <tbody>
                     {scanRuns.map((run, index) => (
                       <tr key={run.id} className="finding-row" onClick={() => navigate(`/engagements/${id}/runs/${run.id}`)}>
@@ -298,11 +345,15 @@ export default function EngagementDetail() {
                         <td>{fmtTime(run.finished_at)}</td>
                         <td>{fmtDuration(run.started_at, run.finished_at)}</td>
                         <td>{run.phase}</td>
-                        <td><span className={`pill ${runStatePill(run.state)}`}>{run.cancel_requested && run.state === "running" ? "stopping…" : run.state}</span></td>
+                        <td>
+                          <span className={`pill ${runStatePill(run.state)}`}>{run.cancel_requested && run.state === "running" ? "stopping…" : run.state}</span>
+                          {run.health && run.health !== "ok" && <span className={`pill ${run.health === "failed" ? "bad" : "warn"}`}>{run.health}</span>}
+                        </td>
+                        <td>{run.trigger === "scheduled" ? "schedule" : run.initiated_by ?? "—"}{run.supervision ? <span className="muted-line"> {run.supervision.replace("_", "-")}</span> : null}</td>
                         <td>{run.budget_tool_calls_used}/{run.budget_tool_calls_max}</td>
                       </tr>
                     ))}
-                    {scanRuns.length === 0 && <tr><td className="empty-cell" colSpan={7}>No scan has run yet. Start one above.</td></tr>}
+                    {scanRuns.length === 0 && <tr><td className="empty-cell" colSpan={8}>No scan has run yet. Start one above.</td></tr>}
                   </tbody>
                 </table>
               </div>

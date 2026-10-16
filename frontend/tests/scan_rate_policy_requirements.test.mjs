@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/scan-rate-policy.md");
+const requirementDoc = readRecord("requirements", "scan-rate-policy.md");
 const settingsPage = read("frontend/src/pages/Settings.tsx");
 const client = read("frontend/src/api/client.ts");
 const settingsApi = read("control-plane/app/api/settings.py");
@@ -19,7 +20,7 @@ const audit = read("frontend/src/pages/Audit.tsx");
 const runActivity = read("frontend/src/lib/runActivity.ts");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 function contains(source, pattern, message) {
   if (pattern instanceof RegExp) assert.match(source, pattern, message);

@@ -1,9 +1,9 @@
-"""Phase 1 - Discovery (Spezifikation Kap. 3.1 / Architektur Kap. 4.1).
+"""Phase 1 - Discovery (Specification Ch. 3.1 / Architecture Ch. 4.1).
 
-Ausschliesslich passiv: Certificate-Transparency-Logs. Rechtlich unkritisch,
-da oeffentliche Quelle - erfordert keine Gateway-Freigabe (kein aktiver
-Tool-Call gegen ein Kundensystem). Aktive Discovery-Schritte muessten wie
-jeder andere aktive Call durch client.authorize() laufen.
+Passive only: certificate-transparency logs. Sends no traffic to the target
+(a public source) - needs no gateway approval (no active tool call against a
+customer system). Active discovery steps would have to go through
+client.authorize() like any other active call.
 
 Lab-Sonderfall: interne Docker-Hostnamen (z. B. 'metasploitable2') haben
 keinen Certificate-Transparency-Eintrag - crt.sh liefert dafuer nichts.
@@ -459,6 +459,9 @@ def _subfinder_subdomains(engagement_id: str, scan_run_id: str | None, domain: s
         "tool": "subfinder", "category": "recon", "mode": "passive", "target": domain, "args": {},
         "is_automated": True, "phase": "discovery", "scan_run_id": scan_run_id,
     })
+    if decision.get("is_pending") and decision.get("approval_request_id"):
+        # REQ-MODE-005: never leave an approval request nobody waits for.
+        client.withdraw_approval(str(decision["approval_request_id"]), "not_awaited_by_discovery")
     if not decision.get("allowed"):
         logger.info("subfinder on %s denied: %s", domain, decision.get("reason"))
         tool_execution.record(

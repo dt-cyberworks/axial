@@ -55,6 +55,8 @@ CHECK_REASONS = (
     "switch_off", "tool_disabled", "no_tool_grant", "not_a_tls_service", "not_a_web_service", "no_endpoints",
     "no_matching_templates", "oob_unavailable", "materialized_ip_missing", "dependency_never_finished",
     "budget_reached", "web_alias_of", "duplicate_vhost_of", "gateway_denied", "handler_error",
+    # GitHub issue #60: why a finished port scan still has gaps (outcome partial).
+    "probes_dropped", "ports_no_longer_open",
 )
 MAX_IMAGE_BYTES = 1_000_000
 # Strings that must never appear in a public manual: the maintainers' own hosts, accounts and tooling.

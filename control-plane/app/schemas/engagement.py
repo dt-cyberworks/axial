@@ -40,7 +40,11 @@ class EngagementCreate(BaseModel):
     crawling_enabled: bool = False
     oob_enabled: bool = False
     screenshots_enabled: bool = False
-    scan_profile: Literal["standard", "thorough"] = "standard"
+    scan_profile: Literal["passive", "light", "standard", "thorough"] = "standard"
+    # REQ-MODE-001: monitoring (unattended, scheduled) or assessment (attended /
+    # semi-attended testing). New monitoring engagements start from the
+    # installation's monitoring defaults (REQ-MODE-006).
+    operating_mode: Literal["monitoring", "assessment"] = "assessment"
 
     @model_validator(mode="after")
     def validate_tcp_port_range(self):
@@ -85,7 +89,11 @@ class EngagementUpdate(BaseModel):
     crawling_enabled: bool | None = None
     oob_enabled: bool | None = None
     screenshots_enabled: bool | None = None
-    scan_profile: Literal["standard", "thorough"] | None = None
+    scan_profile: Literal["passive", "light", "standard", "thorough"] | None = None
+    operating_mode: Literal["monitoring", "assessment"] | None = None
+    new_asset_policy: Literal["auto", "hold"] | None = None
+    fragility_breaker: bool | None = None
+    review_at: datetime.datetime | None = None
 
 
 class EngagementOut(BaseModel):
@@ -105,6 +113,10 @@ class EngagementOut(BaseModel):
     oob_enabled: bool = False
     screenshots_enabled: bool = False
     scan_profile: str = "standard"
+    operating_mode: str = "assessment"
+    new_asset_policy: str = "auto"
+    fragility_breaker: bool = True
+    review_at: datetime.datetime | None = None
     authorized_from: datetime.datetime
     authorized_until: datetime.datetime
     emergency_contact: str | None = None
@@ -283,3 +295,66 @@ class GatewayOverrideCreate(BaseModel):
 class GatewayOverrideOut(BaseModel):
     applied: list[str]
     message: str
+
+
+class ScanStartIn(BaseModel):
+    """Optional body of POST /engagements/{id}/scan (REQ-MODE-002/017). An empty or
+    missing body starts a normal run, exactly as before."""
+
+    # attended (default) | semi_attended; ignored for a monitoring engagement,
+    # whose runs are always unattended.
+    supervision: Literal["attended", "semi_attended"] | None = None
+    # Limit the run to some in-scope hosts (never more than the scope).
+    hosts: list[str] | None = None
+    # Retest one finding: a run limited to that finding's host.
+    retest_finding_id: uuid.UUID | None = None
+    scan_profile: Literal["passive", "light", "standard", "thorough"] | None = None
+
+
+class CapabilityOut(BaseModel):
+    id: str
+    label: str
+    description: str
+    enabled: bool
+    # Why it cannot be on (a tool that is not installed here, for instance).
+    unavailable_reason: str | None = None
+
+
+class CapabilitiesOut(BaseModel):
+    operating_mode: str
+    scan_profile: str
+    new_asset_policy: str
+    fragility_breaker: bool
+    capabilities: list[CapabilityOut]
+
+
+class CapabilitiesIn(BaseModel):
+    """A set of changes. Fields left out stay as they are."""
+
+    capabilities: dict[str, bool] = {}
+    scan_profile: Literal["passive", "light", "standard", "thorough"] | None = None
+    new_asset_policy: Literal["auto", "hold"] | None = None
+    fragility_breaker: bool | None = None
+    # Widening an engagement that has left draft needs the caller to say so.
+    confirm_widening: bool = False
+
+
+class NotificationTargetIn(BaseModel):
+    kind: Literal["webhook"] = "webhook"
+    url: str
+    # Write-only. Stored encrypted, never returned.
+    secret: str | None = None
+    min_severity: Literal["critical", "high", "medium", "low", "info"] = "high"
+    enabled: bool = True
+
+
+class NotificationTargetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: str
+    url: str
+    min_severity: str
+    enabled: bool
+    has_secret: bool = False
+    created_at: datetime.datetime | None = None

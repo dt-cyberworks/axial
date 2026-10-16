@@ -49,14 +49,14 @@ Nothing else in the console is reachable until these steps are done. See the [ac
 
 | Situation | What to do |
 |---|---|
-| Forgot the password | An admin chooses **Reset password** for that user and passes on the new one-time password. The user signs in with it and sets a new one |
+| Forgot the password | If e-mail is switched on, the user chooses **Forgot password?** on the sign-in page, opens the link from the message and sets a new one with a code from the authenticator. Otherwise an admin chooses **Reset password** for that user and passes on the new one-time password; the user signs in with it and sets a new one |
 | Lost the phone, still has backup codes | Sign in with a backup code, then **Account → Re-enroll two-factor authentication** |
 | Lost the phone, no backup codes | An admin chooses **Reset MFA**; the user enrols a new authenticator at the next sign-in. The admin does not need the user's password for either reset |
 | Locked out after wrong passwords | wait: five wrong passwords lock the account for 30 seconds, doubling with each further failure up to 15 minutes |
 | "Too many sign-in attempts from this address" | wait a few minutes; this limit is per source address and does not affect other people |
 | The only admin is locked out | run the bootstrap command on the host to create another admin, or have the host's administrator reset the account on the server |
 
-There is no self-service "forgot password" link in this version, because no email is sent by the system; recovery is by an administrator.
+The **Forgot password?** link exists only when an administrator has switched e-mail on under **E-mail (SMTP relay)** in [Settings](../reference/settings.md#e-mail-smtp-relay). It needs the authenticator code, so it never replaces **Reset MFA**. Without e-mail, recovery is by an administrator.
 
 ## Change your own password and authenticator
 

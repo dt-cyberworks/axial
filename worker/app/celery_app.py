@@ -51,9 +51,39 @@ celery_app.conf.update(
             "task": "asm.reap_stale_runs",
             "schedule": float(os.environ.get("REAP_STALE_RUNS_INTERVAL_SECONDS", 60)),
         },
+        # REQ-MON-002: alerts of monitoring engagements (signed webhooks). Retried by
+        # the control plane's own bookkeeping; never touches a run.
+        "deliver-alerts": {
+            "task": "asm.deliver_alerts",
+            "schedule": float(os.environ.get("DELIVER_ALERTS_INTERVAL_SECONDS", 60)),
+        },
+        # REQ-MAIL-003: queued e-mail (password reset, test message) is sent by the worker,
+        # because the control plane has no route to the internet.
+        "deliver-mail": {
+            "task": "asm.deliver_mail",
+            "schedule": float(os.environ.get("DELIVER_MAIL_INTERVAL_SECONDS", 15)),
+        },
+        # REQ-MODE-016: a parked run whose approval expired continues with "not approved".
+        "resume-parked-runs": {
+            "task": "asm.resume_parked_runs",
+            "schedule": float(os.environ.get("RESUME_PARKED_RUNS_INTERVAL_SECONDS", 60)),
+        },
+        # REQ-MON-001/003: start the monitoring runs that are due ("every N days"). The control
+        # plane decides; a tick that finds nothing due does nothing.
+        "run-due-schedules": {
+            "task": "asm.run_due_schedules",
+            "schedule": float(os.environ.get("RUN_DUE_SCHEDULES_INTERVAL_SECONDS", 60)),
+        },
+        # REQ-MODE-012: missed runs and authorization review (inbox items and alerts only).
+        "monitoring-housekeeping": {
+            "task": "asm.monitoring_housekeeping",
+            "schedule": float(os.environ.get("MONITORING_HOUSEKEEPING_INTERVAL_SECONDS", 900)),
+        },
     },
 )
 
 # Registriert die Phasen-/Wartungs-Tasks (Architektur Kap. 4.1) beim celery-Worker-Prozess.
 import app.tasks.pipeline  # noqa: E402,F401
 import app.tasks.reap  # noqa: E402,F401
+import app.tasks.monitoring_tasks  # noqa: E402,F401
+import app.tasks.mail_tasks  # noqa: E402,F401

@@ -1,15 +1,14 @@
 # Architecture
 
 Source: [`docs/spec/technical-architecture.md`](spec/technical-architecture.md)
-(v2.1) and [`docs/spec/scanner-specification.md`](spec/scanner-specification.md) (v1.0).
+and [`docs/spec/scanner-specification.md`](spec/scanner-specification.md).
 
 ## Overview
 
 The scanner covers every phase of an external security assessment — from
 passive reconnaissance to controlled, non-destructive exploitation testing
-(the "Vector Agent"). Target context: a side-business managed service for
-SMBs. The value creation lies in **interpreting and prioritizing** the
-results, not in the scan itself.
+(the "Vector Agent"). Target context: SMBs. The value creation lies in
+**interpreting and prioritizing** the results, not in the scan itself.
 
 ## Components and zones
 
@@ -30,7 +29,7 @@ flowchart TB
         S3[("seaweedfs<br/>evidence, reports")]
     end
 
-    subgraph exec["Execution plane — isolated, ephemeral, disposable"]
+    subgraph exec["Execution plane — isolated, disposable"]
         TR["tool-runner<br/>HexStrike + Kali tools"]
         RG["raw-egress-gateway<br/>signed lease + nftables deny-all"]
     end
@@ -76,7 +75,7 @@ active tool call passes through the Scope Gateway (details:
 | G | Safe active checks | Executes authorized, non-destructive checks | active |
 | H | Risk scoring | EPSS + CVSS + business context + exposure | processing |
 | I | Orchestration & history | Scheduler, diff detection, asset inventory | processing |
-| J | Reporting | Plain-language customer report (the sales product) | output |
+| J | Reporting | Plain-language report | output |
 | K | Audit trail | Complete logging of every action & approval | cross-cutting |
 
 ## Scan-phase pipeline
@@ -102,21 +101,20 @@ stateDiagram-v2
 ```
 
 Implemented in [`worker/app/tasks/`](../worker/app/tasks/): `pipeline.py`
-drives the machine, each phase is its own module. Per-phase maturity is
+drives the machine, each phase is its own module. Per-phase status is
 tracked in [roadmap.md](roadmap.md).
 
-## Technology stack (reference)
+## Technology stack
 
 | Layer | Technology | Rationale |
 |---|---|---|
 | API / orchestrator | Python 3.12 + FastAPI | async, typed, fast tool integration |
 | Task queue | Celery + Redis | distributed, repeatable scan jobs |
 | Primary DB | PostgreSQL 16 | relational + JSONB for flexible findings |
-| Tool execution | MCP server + HexStrike | controlled tool registry per engagement |
-| LLM (reasoning) | Claude (tool use) | reliable structured tool use |
+| Tool execution | HexStrike HTTP API in the tool-runner | controlled tool registry per engagement |
+| LLM (reasoning) | any OpenAI-compatible model, set in Settings | structured tool use |
 | Object storage | S3-compatible (SeaweedFS) | raw output, report PDFs, evidence |
-| Secrets | Vault / SOPS | scope signing key, API keys |
 | Frontend | React + TypeScript | component-based, type-safe |
 
-The stack is a reference implementation — swappable as long as the
-contracts ([api.md](api.md)) are honored.
+The API contracts are in [api.md](api.md). Secrets are read from environment
+files; Vault/SOPS is planned but not built (see [roadmap.md](roadmap.md)).

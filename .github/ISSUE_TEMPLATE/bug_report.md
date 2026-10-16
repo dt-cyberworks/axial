@@ -1,26 +1,25 @@
 ---
 name: Bug report
-about: Ein Fehler im Scanner, Gateway, Worker, Proxy oder Frontend
+about: A defect in the scanner, gateway, worker, proxy or frontend
 title: "[bug] "
 labels: bug
 ---
 
-<!-- SICHERHEITSLÜCKEN NICHT HIER melden -> siehe SECURITY.md (vertraulich). -->
+<!-- DO NOT report security vulnerabilities here -> see SECURITY.md (confidential). -->
 
-## Komponente
+## Component
 
-- [ ] control-plane  - [ ] worker  - [ ] egress-proxy  - [ ] tool-runner  - [ ] frontend  - [ ] lab
+- [ ] control-plane  - [ ] worker  - [ ] egress-proxy  - [ ] tool-runner  - [ ] frontend
 
-## Beschreibung
+## Description
 
-<!-- Was passiert? Was wird erwartet? -->
+<!-- What happens? What did you expect? -->
 
-## Reproduktion
+## Steps to reproduce
 
 1.
 2.
 
-## Umgebung
+## Environment
 
-- Stufe (M1–M6):
-- Deployment (Compose / K8s):
+- Deployment (local evaluation / single-host production):

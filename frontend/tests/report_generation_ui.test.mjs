@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/generated-customer-report.md");
+const requirement = readRecord("requirements", "generated-customer-report.md");
 const client = read("frontend/src/api/client.ts");
 const detail = read("frontend/src/pages/EngagementDetail.tsx");
 
-assert.match(requirement, /## REQ-REPORT-004:/);
+record.match(requirement, /## REQ-REPORT-004:/);
 
 // The API surface: generate, list, download.
 assert.match(client, /requestReport: \(id: string\) => request<ReportJob>/);

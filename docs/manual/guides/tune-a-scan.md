@@ -14,9 +14,11 @@ Under **Scan depth** (wizard: advanced options; later: **Edit engagement**):
 | Depth | What it does | Cost |
 |---|---|---|
 | **Standard** (default) | for each web service, runs the generic templates plus only those written for the technologies it identified | the normal scan, typically 10 to 20 minutes for one small site |
-| **Thorough** | runs every template on every web service whatever was identified, and adds a deep content-discovery sweep of about 30,000 likely paths per web service | much slower: the sweep alone is about 25 minutes per web service, and there is far more traffic |
+| **Thorough** | runs every non-intrusive template that applies to a web service, whether or not its product was identified, and adds a deep content-discovery sweep of about 30,000 likely paths per web service | much slower: the sweep alone is about 25 minutes per web service, and there is far more traffic |
 
-Choose Thorough when a complete sweep matters more than time, for example before a major release or for a site that is hard to identify. If a slow target, or a bug-bounty rate cap, cuts a sweep short, it is marked *partial* rather than complete. Scan depth can be changed at any status; it applies from the next scan, and every run records the depth it started with. It never widens scope, tool grants or the discovery switches.
+**What "every template" means.** Thorough runs the whole set the scan is allowed to use, not every template nuclei ships. That set is about 5,900 of the roughly 13,500 template files in the scanner image (about 2,000 generic web templates and about 3,900 written for specific products). Standard runs the generic ones plus the products it identified; Thorough also runs the product ones it did not identify. Never run at any depth: templates tagged intrusive, denial-of-service or fuzzing, templates for network protocols, and the code, file and cloud-audit templates. The counts change with the template version.
+
+Choose Thorough when the widest coverage matters more than time, for example before a major release or for a site that is hard to identify. If a slow target, or a bug-bounty rate cap, cuts a sweep short, it is marked *partial* rather than complete. Scan depth can be changed at any status; it applies from the next scan, and every run records the depth it started with. It never widens scope, tool grants or the discovery switches.
 
 ## Discovery extras
 
@@ -38,6 +40,7 @@ Three things set the pace of a scan.
 - **The installation's rate limit.** An admin sets the maximum number of tool calls per second under **Settings → Scan rate policy** (5 by default). With *automatically slow down* on, a call that exceeds it waits and retries rather than failing.
 - **A bug-bounty program's cap**, if the engagement follows one: its own maximum requests per second and concurrency apply on top, in both the gateway and the egress proxy.
 - **The tools' own limits.** The web tools are rate-limited, at most two checks run in parallel per engagement, and every check has a time budget of at most 30 minutes.
+- **The run's tool-call budget.** An admin sets how many tool calls one run may make (200 by default) under **Settings → Tool-call budget per run (global)**. Every check of every web service is a call, so **Thorough** over many hosts needs a higher number. A run that uses it up is marked *reduced coverage* and lists the checks that did not run; see [Settings](../reference/settings.md#tool-call-budget-per-run-global).
 
 To make a scan gentler, ask an admin to lower the rate, switch off the extras you do not need and keep **Standard**. To make it wider, switch on the extras and choose **Thorough**, and plan for the time.
 

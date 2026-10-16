@@ -25,13 +25,28 @@ from app.models.scan_run import ScanRun
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
+def _coverage_warning(run: ScanRun) -> bool:
+    reason = run.state_reason or ""
+    return "coverage_degraded" in reason or "coverage_partial" in reason
+
+
 def _previous_run(db: Session, run: ScanRun) -> ScanRun | None:
-    return db.scalar(
+    """REQ-MODE-004: the baseline is the last earlier run that gave a full picture:
+    `done`, without a coverage warning. A failed, aborted, degraded or partial run
+    is never the baseline - comparing with it reports everything it missed as new."""
+    candidates = db.scalars(
         select(ScanRun)
-        .where(ScanRun.engagement_id == run.engagement_id, ScanRun.started_at < run.started_at)
+        .where(
+            ScanRun.engagement_id == run.engagement_id,
+            ScanRun.started_at < run.started_at,
+            ScanRun.state == "done",
+        )
         .order_by(ScanRun.started_at.desc())
-        .limit(1)
     )
+    for candidate in candidates:
+        if not _coverage_warning(candidate):
+            return candidate
+    return None
 
 
 def _observed(db: Session, run_id: uuid.UUID) -> dict[str, uuid.UUID]:
@@ -70,6 +85,7 @@ def compute_diff(db: Session, run: ScanRun) -> dict:
         return {
             "run_id": str(run.id), "previous_run_id": None, "has_baseline": False,
             "observed_count": len(now_obs), "new": [], "resolved": [], "persisting_count": 0,
+            "run_coverage_reduced": _coverage_warning(run),
         }
 
     prev_obs = _observed(db, prev.id)
@@ -85,4 +101,7 @@ def compute_diff(db: Session, run: ScanRun) -> dict:
         "new": new,
         "resolved": resolved,
         "persisting_count": len(persisting),
+        # REQ-MODE-004: a run with reduced coverage cannot say "fixed": the console
+        # shows that "no longer seen" may only mean "not looked at".
+        "run_coverage_reduced": _coverage_warning(run),
     }

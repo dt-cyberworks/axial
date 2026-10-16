@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/operator-console-usability-fixes.md");
+const requirement = readRecord("requirements", "operator-console-usability-fixes.md");
 const styles = read("frontend/src/styles.css");
 const runDetail = read("frontend/src/pages/RunDetail.tsx");
 
-assert.match(requirement, /## REQ-ASSETREVIEW-008:/);
+record.match(requirement, /## REQ-ASSETREVIEW-008:/);
 
 // The asset-review table opts out of the shared wide-table minimum.
 assert.match(

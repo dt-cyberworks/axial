@@ -89,7 +89,8 @@ def test_endpoint_path_captures_the_structured_body(monkeypatch):
     assert "target.example.com" in result["command"]
     # the scan profile actually used is the detail an operator needs to see
     assert "1-65535" in result["command"]
-    assert "500" in result["command"]
+    # the rate nmap was actually started with (half the lease rate, REQ-PORTSCAN-001), not the lease rate
+    assert "--max-rate 250" in result["command"]
 
 
 # --- bounding + best-effort contract ---------------------------------------

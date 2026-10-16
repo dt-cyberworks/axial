@@ -15,7 +15,7 @@ import pytest
 from tests.integration.owners import make_owner
 from app.gateway import dns_materialization
 from app.gateway.dns_materialization import materialize, materialized_ips
-from app.gateway.raw_egress_policy import render_for_engagement
+from app.gateway.raw_egress_policy import policy_for_engagement
 
 
 def _fake_getaddrinfo(mapping: dict[str, list[str]]):
@@ -68,7 +68,7 @@ def test_materialize_resolves_names_and_feeds_policy(db, monkeypatch):
     assert resolved_ips == ["93.254.65.195", "93.254.65.196"]
 
     # In die raw-egress-policy eingespeist -> beide als /32-Block.
-    rendered = render_for_engagement(db, eng.id)
+    rendered = policy_for_engagement(db, eng.id)
     cidrs = sorted(b["cidr"] for b in rendered.ip_blocks)
     assert cidrs == ["93.254.65.195/32", "93.254.65.196/32"]
 

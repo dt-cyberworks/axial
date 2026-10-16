@@ -74,7 +74,7 @@ anything is sent to the runner.
 
 **Stage `discovery`** — find which configured TCP ports are open:
 ```
--sS <ports> --privileged -T3 -Pn -n --max-rate <rate> --max-retries 2 --host-timeout 600s -oX -
+-sS <ports> --privileged -T3 -Pn -n --max-rate <rate> --scan-delay <n>ms --max-retries 2 --host-timeout 600s -oX -
 ```
 | Flag | Why |
 |---|---|
@@ -84,7 +84,8 @@ anything is sent to the runner.
 | `-T3` | Nmap's default/"normal" timing template — deliberately not aggressive (`-T4`/`-T5`). |
 | `-Pn` | Skip ICMP host-discovery ping. Many externally-facing targets (and bug-bounty scopes) block ICMP; without `-Pn` a live-but-ping-filtered host would be silently skipped. |
 | `-n` | No reverse-DNS lookups — avoids noisy, unnecessary resolver traffic; the isolated runner network also has no general DNS. |
-| `--max-rate <rate>` | Hard packet-rate ceiling, **1–1000 pps**, validated by `args_safety._nmap_args_safe` (`control-plane/app/gateway/args_safety.py:51-88`). Rate-limits the scan so it cannot look like — or act like — a denial-of-service flood against a possibly small target. |
+| `--max-rate <rate>` | Packet-rate ceiling. The lease's rate (**1–1000 pps**, validated by `args_safety._nmap_args_safe`, `control-plane/app/gateway/args_safety.py:51-88`) is what the gateway's kernel limiter enforces; nmap is started with **half of it** (`tool_runner_client.nmap_send_rate`, REQ-PORTSCAN-001), because nmap sends in bursts and a limiter set to the same number drops some of its probes (measured: 10 refused sends and 103 s for 20,000 ports at 1000 against 1000, none and 25 s at 800 or below). The kernel limit itself is unchanged. Rate-limits the scan so it cannot look like — or act like — a denial-of-service flood against a possibly small target. |
+| `--scan-delay <n>ms` | Even spacing of the probes: `ceil(1000 / rate)` ms, so at most `rate` leave in any second and none in a burst the kernel limiter would drop (REQ-PORTSCAN-001; 0 refused probes in 9 of 9 scans, 42 s each for 20,000 ports, where `--max-rate` alone still lost probes now and then). Not a second cap, only the shape of the first. |
 | `--max-retries 2` | Bounded retransmissions — reliability without unbounded noise. |
 | `--host-timeout 600s` | Generous ceiling so a full 1–65535 sweep of a heavily filtered host (~200s at 1000pps) completes instead of nmap discarding the host mid-scan and reporting zero open ports (this happened live at a tighter 280s timeout; comment at `tool_runner_client.py:86-89`). Stays safely under the raw-egress lease TTL (900s). |
 | `-oX -` | XML to stdout — deterministic, machine-parseable output for `worker/app/nmap_parse.py`, instead of nmap's human-oriented default text. |
@@ -280,6 +281,13 @@ target and are not tool calls, so they do not pass the gateway. The flags below 
 | `-timeout 8 -retries 1` | Bounded per-request timeout and a single retry — keeps the whole pass under HexStrike's hard 300s executor limit. |
 | `-p <url>` (if configured) | Forces nuclei traffic through the egress proxy (second scope check), same rationale as the other HTTP tools. |
 
+**Raw-request templates (`unsafe: true`).** About fifty of the selected templates (request-smuggling, host-header,
+cache-poisoning and metadata-endpoint probes among them) are sent by nuclei's own raw HTTP client as hand-built,
+deliberately malformed requests. They go through the egress proxy like every other request and are scope-checked,
+rate-limited and audited the same way. Until 2026-10-02 they never reached a target: the proxy's reply to `CONNECT`
+had no header line, which that client does not accept, so each waited 60 s and sent nothing while the check read
+"complete" (REQ-EGRESS-004). `make verify-tunnel-handshake` proves they now get through.
+
 **Headless pass** (deliberately minimal — one template only):
 ```
 -tags domxss -severity info,low,medium,high,critical -rate-limit 50 -timeout 8 -retries 1 [-p <egress-proxy-url>] -headless -system-chrome -ho "--no-sandbox" -hbs 2 -headc 2 -page-timeout 20
@@ -437,7 +445,7 @@ of flaw as the older `CVE-2015-5254`. This is the specific gap nuclei's own
 template for this CVE cannot close in this deployment: that template needs
 a public Interactsh out-of-band callback server, and the isolated runner
 has no general internet egress by design (§4/§6; also
-`docs/requirements/fingerprint-phase-efficiency.md` `REQ-FPEFF-008`).
+`REQ-FPEFF-008`).
 
 The packet is a single curated entry
 (`worker/app/openwire_payload.py`'s `GADGETS` table) — its header is
@@ -510,8 +518,7 @@ A researcher auditing "how fast can this scan a target" should be aware
 there are **two separate, independently-enforced rate mechanisms** that both
 apply simultaneously:
 
-1. **Gateway admission rate** (`REQ-RATE-001..003`,
-   `docs/requirements/scan-rate-policy.md`) — an operator-configurable cap on
+1. **Gateway admission rate** (`REQ-RATE-001..003`) — an operator-configurable cap on
    gateway-*approved* tool calls per second, enforced in
    `control-plane/app/gateway/authorize.py` independent of which tool is
    being called. When exceeded, the gateway either hard-denies
@@ -534,9 +541,8 @@ intent:
 - **`raw_network`** (nmap, and `redis-probe`/`activemq-banner`/
   `activemq-openwire-probe`, §3.4): a signed, short-TTL lease
   (`control-plane/app/gateway/raw_egress_lease.py`) authorizes a specific
-  IP/port/rate for a bounded time window; `nftables` (Compose) or a generated
-  Kubernetes `NetworkPolicy` (cluster deployments) deny everything else at
-  the network layer. nmap's lease covers the engagement-configured port
+  IP/port/rate for a bounded time window; `nftables` (the raw-egress gateway
+  in Compose) denies everything else at the network layer. nmap's lease covers the engagement-configured port
   range; the three raw-protocol probes instead use a `raw_tcp_probe` port
   profile scoped to exactly the one port being probed. If raw-network egress
   is not enabled for a deployment, these tools are refused outright
@@ -547,7 +553,7 @@ intent:
   tables above) because none of them honor `HTTP_PROXY` environment
   variables. The egress proxy performs an independent, second scope
   re-check and attaches the required identification header per request —
-  documented in [`security-model.md`](../security-model.md#defense-in-depth-zwei-unabhängige-scope-prüfungen).
+  documented in [`security-model.md`](../security-model.md#defense-in-depth-two-independent-scope-checks).
 - **`passive`** (crt.sh, Cert Spotter, HackerTarget, Wayback/CommonCrawl URL history and
   `subfinder`; `amass` is retired): queries a third-party data
   source, never the target; not authorized by the gateway because there is
@@ -628,4 +634,4 @@ for the agent (`tool_not_agent_callable`). The nuclei `endpoints` pass validates
 every URL against scope, deny rules and the port window. The `oob` pass uses the
 platform's own interactsh server (compose profile `oob`, internal network, one
 nftables accept rule in the raw-egress gateway); the token reaches the runner
-only through its environment. Design: [`extended-discovery-architecture.md`](../design/extended-discovery-architecture.md).
+only through its environment (REQ-COVER-004).

@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/auth-check-network-resilience.md");
+const requirement = readRecord("requirements", "auth-check-network-resilience.md");
 const app = read("frontend/src/App.tsx");
 
-assert.match(requirement, /## REQ-IAM-012:/);
+record.match(requirement, /## REQ-IAM-012:/);
 
 // Only a network-level failure (no response ever received) should retry -
 // a confirmed HTTP response (including a real 401, already handled by the

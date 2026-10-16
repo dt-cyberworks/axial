@@ -3,7 +3,7 @@
 **Who this is for:** operators and admins who see a message, a code or an empty result and want to know what it means and what to do.
 **After this page you can:** look up every blocker, run reason, check reason and gateway denial the console shows, and work out why a scan found nothing or an agent did nothing.
 
-<!-- ui-labels: Scan readiness | Start run | Activate engagement | Edit engagement | Tool grants | Campaign tool overrides | Discovery extras | Scope assets | Stop scan | Plan | Activity | Vector Agent | Audit | reduced coverage | partial coverage -->
+<!-- ui-labels: Scan readiness | Start run | Activate engagement | Edit engagement | Tool grants | Campaign tool overrides | Discovery extras | Scope assets | Stop scan | Plan | Activity | Vector Agent | Audit | reduced coverage | partial coverage | Automatic runs | Run now -->
 
 Where to look first:
 
@@ -43,12 +43,15 @@ The reason is shown beside the run's state, on the run page and in the runs tabl
 | `cancelled_by_operator` | someone chose **Stop scan** | start a new run when you are ready |
 | `cancellation_status_unavailable` | the control plane could not say whether you had cancelled, so all work against the targets was stopped as a safety measure. Nothing was left out on purpose | start the run again. If it recurs, the control plane is overloaded or restarting; ask an administrator to check it |
 | `reaped_stale_heartbeat` | the worker running it stopped sending signs of life and the run could not be resumed (it had never been claimed, it had already been resumed twice, or it could not be queued again) | start a new run; ask an administrator to check the worker |
+| `engagement_paused` | the engagement was paused, which stops its active run | resume it, then start a new run |
+| `engagement_revoked` | the authorization was revoked, which stops its active run for good | nothing; the engagement cannot scan again |
 | `asset_review_pending` | the run is waiting for you to review the discovered hosts (a `waiting_approval` run). Not a failure | answer the **Review discovered assets** popup; see [Run detail](reference/run-detail.md#asset-review) |
 | `asset_review_expired` | the asset review popup was not answered within 15 minutes, so the run stopped rather than scan everything | start a run and answer the review, or switch the review off |
 | `task_time_limit_exceeded` | the whole scan task ran into the worker's time limit | narrow the scope or the scan depth, or split the engagement |
 | `pipeline_error:<type>:<phase>` | an internal error ended the run. The *type* is the kind of error and the *phase* where it happened. A run that ended with only `pipeline_error` is from an older version that did not record the cause | start it again; if it repeats with the same type and phase, report both to an administrator |
 | `coverage_degraded:<tool>=<why>` | a tool the scan depends on (`nmap` or `httpx`) was attempted but never once succeeded. **Not** a clean result | find out why the tool failed (the *why* is in the text), fix it and rerun |
-| `coverage_partial:<tool>=<n>` | `n` checks of that tool stopped at their time budget. What they reported is real, but not everything was examined | rerun, or use **Thorough** scan depth, or accept the partial result knowingly |
+| `coverage_partial:<tool>=<n>` | `n` checks of that tool stopped at their time budget, or (for `nmap`) `n` port scans have gaps, see [When the port scan has gaps](#when-the-port-scan-has-gaps). What they reported is real, but not everything was examined | rerun, or use **Thorough** scan depth, or accept the partial result knowingly. For `nmap`, follow the next section |
+| `coverage_degraded:tool_call_budget=exhausted_<n>_denied` | the run used up its tool-call budget and the Scope Gateway refused `n` further calls, so the checks behind them did not run. **Not** a clean result | an administrator raises the budget under **Admin → Operational settings → Tool-call budget per run (global)** by at least `n`, then run again; see [Settings](reference/settings.md#tool-call-budget-per-run-global) |
 | `agent_incomplete:<why>` | the Vector Agent ended before it finished its plan; the deterministic phases are unaffected | check the AI provider and the agent budgets; see [Configure the AI provider](guides/configure-the-llm.md) |
 
 A run that stopped *without* your action for a reason that is not about the target can simply be started again; the findings of earlier runs are kept.
@@ -85,6 +88,20 @@ Reasons you will see:
 | `gateway_denied:<reason>` | the Scope Gateway refused the call; the reason is one from the next table |
 | `cancelled_by_operator` | the run was stopped |
 | `cancellation_status_unavailable` | stopped as a safety measure; see above (a *failed* check) |
+| `approval_unavailable_unattended` | the check needed a person's decision and the run is unattended (a monitoring run, or one started that way). It was not made and is in the [inbox](reference/inbox.md) as a suggestion |
+| `approval_rejected`, `approval_expired`, `approval_cancelled` | the check waited for a decision (**Start run** as a test) and it was *no*, nobody answered within the approval timeout, or the run was stopped. It was not made |
+| `approval_claim_denied:<reason>` | it was approved, but the gateway checked it again before running and no longer allowed it (the window ended, the scope changed, the engagement was paused); the reason is one from the next table |
+
+## When the port scan has gaps
+
+The port scan (Nmap) is not a check in the **Plan** tab; it is a step of the **Activity** tab, and a run that has a gap in it ends with `coverage_partial:nmap=<n>`. The step is titled *Nmap completed TCP discovery, but the result is incomplete* and says why. **A port missing from such a list does not mean the port is closed.**
+
+| Reason | Meaning | What to do |
+|---|---|---|
+| `probes_dropped` | some of Nmap's probes were refused by the scanner's own firewall rules before they left, so a port that is open may have looked silent. The number is "this many or more": Nmap stops reporting after a few | run the scan again. If it recurs, tell an administrator: the scanner's packet rate and the gateway's limit have drifted apart |
+| `ports_no_longer_open` | ports that recent earlier runs found open were not found this time, even after a second, slower check of just those ports. The step lists what the second check saw for each port: `closed` means the target answered "nothing here", `filtered` means it stayed silent | find out why on the target: a service that was stopped, a changed firewall rule, or an automatic block of the scanner's address (for example fail2ban). If nothing changed there, run the scan again |
+
+The step also shows how many ports Nmap saw in each state (*open*, *closed*, *filtered*) and, for each port checked again, whether it was found. A port that was missing but found again on the second check is reported as found; it is not a gap.
 
 ## Why the Scope Gateway denied a call
 
@@ -107,7 +124,7 @@ A denied call appears as a *deny* row in **Audit** and in the **Activity** tab, 
 | `scan_run_not_found` | the run does not exist for this engagement | internal; report it |
 | `scan_run_not_active` | the run is no longer running | the run ended; nothing to do |
 | `scan_run_cancelled` | the run was stopped | nothing to do |
-| `budget_exhausted` | the run used its tool-call budget (200 by default) | start a new run, or narrow the scope |
+| `budget_exhausted` | the run used its tool-call budget (200 by default; an administrator sets it under **Operational settings**) | the run is marked *reduced coverage*; raise the budget and run again, or narrow the scope |
 | `rate_limited` | the request rate is exhausted | with *automatically slow down* on, the worker waits and retries; otherwise an admin can raise the limit in **Settings** |
 | `ai_testing_not_enabled` | the Vector Agent is not enabled on this engagement | tick the switch on **Edit engagement** |
 | `ai_testing_forbidden` | the bug-bounty program does not permit AI testing | the agent may not run on this engagement |
@@ -139,7 +156,6 @@ For the **operator override** on some of these, see [Audit](reference/audit.md#d
 | the test window is missing or ends before it starts | correct the dates |
 | a bug-bounty engagement needs its program details | fill in the program policy |
 | the allow-scope overlaps another currently active engagement's allow-scope: "Title" (owner Name, email) | the message names the active engagement that already covers some of these hosts (up to three; "and N more" if there are more), and its owner. The two cannot both be responsible. Change one scope, or ask the owner to finish theirs |
-| a customer engagement needs the signed scope document | record who signed it and the document's SHA-256 |
 
 ## Why a change was refused
 
@@ -149,6 +165,7 @@ You can read every engagement, but only its owner and administrators can change 
 |---|---|
 | only the owner of this engagement or an administrator can change it | the engagement belongs to someone else. Ask its owner (the notice at the top of the page names them), or an administrator, to make the change or to hand the engagement to you |
 | admin role required | the action (for example reassigning an owner, or anything under **Admin**) is for administrators only |
+| This page is out of date or a browser extension removed its security header | the server refused a change because the request did not carry the header the console always adds. Reload the page without the cache (**Ctrl+Shift+R**) and try again. If it persists, try a private window with extensions off. Nothing was changed |
 
 The console hides the buttons that would be refused, so you meet this message only through a stale page or a direct request.
 
@@ -171,6 +188,10 @@ See [Users and two-factor authentication](guides/users-and-mfa.md).
 3. Open the run's **Vector Agent** tab: if it says *No agent steps recorded*, it gives the reason. If steps exist but the agent stalls, a reply may have been cut off: raise **Max tokens** or **Max iterations**.
 4. A bug-bounty engagement needs the program to permit AI testing.
 5. A **Lens Agent** explanation can be cut off by the provider's length limit; the page says so.
+
+## A monitor did not run by itself
+
+Open the engagement's **Automatic runs** panel: when a run is due but waiting, it names the reason. The reasons and what to do are listed in [Monitor an attack surface](guides/monitor-an-attack-surface.md#automatic-runs). Most often the engagement is paused, the authorization review date has passed, a run is still going, or the engagement is not ready to scan (the [inbox](reference/inbox.md) then holds an item). If the panel says *Off*, no interval is set. Setting an interval never starts a run at once, so the first run is yours with **Run now**.
 
 ## The scan found nothing
 

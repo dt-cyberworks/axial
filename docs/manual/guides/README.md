@@ -11,6 +11,7 @@ Each guide is one job from start to finish. For the meaning of a screen or a fie
 | Record that you are permitted, and switch the engagement on | [Authorize and activate](authorize-and-activate.md) |
 | Decide which kinds of tools may run | [Control which tools run](control-which-tools-run.md) |
 | Run a scan, watch it, stop it | [Start and watch a scan](run-a-scan.md) |
+| Let Axial watch a scope on its own and tell you what changed | [Monitor an attack surface](monitor-an-attack-surface.md) |
 | Make a scan wider, deeper or gentler | [Tune a scan](tune-a-scan.md) |
 | Answer a request that is waiting for your decision | [Approve or deny a tool call](approve-or-deny-a-tool-call.md) |
 | Decide what to do with each finding | [Triage findings](triage-findings.md) |
