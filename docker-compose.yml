@@ -1,24 +1,24 @@
-# Docker Compose fuer M1-M3 (lab / own_domain), ein Host - Deployment-
-# Architektur Kap. 4/7.3. Netz-Segmentierung wie Listing 2 dort: 'ctrl' und
-# 'runner' sind internal (keine Route ins Internet), der einzige Weg nach
-# draussen fuehrt ueber egress-proxy.
+# Docker Compose, one host - Deployment Architecture Ch. 4. Network
+# segmentation as in Listing 2 there: 'ctrl' and 'runner' are internal (no
+# route to the internet); the only way out is through the egress-proxy.
 #
-# WICHTIG (Abweichung von Listing 2): Ein Docker-Netz mit internal:true
-# blockiert nicht nur Egress, sondern verhindert AUCH das Veroeffentlichen von
-# Host-Ports. control-plane (API/Operator-Konsole) muss aber vom Host
-# erreichbar sein. Deshalb gibt es ein zusaetzliches, nicht-internes 'edge'-
-# Netz nur fuer Ingress. Docker kann "Ingress ja, Egress nein" nicht als
-# Netz-Flag ausdruecken - in Produktion wird der control-plane-Egress daher
-# auf Infrastruktur-/Firewall-Ebene beschraenkt (nicht via internal:true) und
-# die API hinter einen Reverse-Proxy gelegt. Siehe docs/deployment.md.
+# IMPORTANT (deviation from Listing 2): a Docker network with internal:true
+# blocks not only egress but ALSO publishing host ports. The control-plane
+# (API/operator console) has to be reachable from the host, though. Hence the
+# additional, non-internal 'edge' network for ingress only. Docker cannot
+# express "ingress yes, egress no" as a network flag - in production the
+# control-plane's egress is therefore restricted at infrastructure/firewall
+# level (not via internal:true) and the API is put behind a reverse proxy.
+# See docs/deployment.md.
 #
-# 'worker' haengt zusaetzlich am 'egress'-Netz, weil die passive Discovery-
-# Phase (Spezifikation Kap. 3.1) oeffentliche OSINT-Quellen wie crt.sh direkt
-# abfragt - das sind keine Kundensysteme. Jeder aktive Call gegen ein Ziel
-# geht weiterhin ausschliesslich ueber den egress-proxy (runner-Netz).
+# 'worker' is additionally attached to the 'egress' network because the
+# passive discovery phase (Specification Ch. 3.1) queries public OSINT sources
+# such as crt.sh directly - those are not customer systems. Every active call
+# against a target still goes exclusively through the egress-proxy (runner
+# network).
 #
-# tool-runner ist Profil-gebunden (M1/lab braucht ihn noch nicht aktiv, s.
-# Architektur Kap. 7 Roadmap): docker compose --profile runner up
+# tool-runner is profile-bound (only needed for active scans):
+# docker compose --profile runner up
 
 services:
   postgres:
@@ -159,7 +159,7 @@ services:
         condition: service_started
     env_file:
       - path: .env
-        required: false   # inline environment deckt M1 ab; .env ist optional
+        required: false   # inline environment covers the defaults; .env is optional
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://asm:asm@postgres:5432/asm}
       REDIS_URL: redis://redis:6379/0
@@ -209,7 +209,7 @@ services:
       NMAP_MAX_RATE: ${NMAP_MAX_RATE:-1000}
       # GitHub issue #35: maximum address count a cidr scope asset may cover
       # (65536 = a /16 for IPv4). Conservative, order-of-magnitude default -
-      # see docs/requirements/scope-asset-validation.md.
+      # see REQ-SCOPEVAL-002.
       MAX_HOST_DISCOVERY_ADDRESSES: ${MAX_HOST_DISCOVERY_ADDRESSES:-65536}
       # GitHub issue #49 (REQ-PIPE-019/020): database pool, sized on purpose, and the
       # share of it the egress proxy's audit/rate traffic may hold at once.
@@ -218,6 +218,8 @@ services:
       DB_POOL_TIMEOUT_SECONDS: ${DB_POOL_TIMEOUT_SECONDS:-10}
       INTERNAL_BULK_DB_SLOTS: ${INTERNAL_BULK_DB_SLOTS:-4}
       INTERNAL_BULK_WAIT_SECONDS: ${INTERNAL_BULK_WAIT_SECONDS:-3}
+      # REQ-MON-003: how many scheduled monitoring runs may execute at once on this installation.
+      MONITORING_MAX_CONCURRENT_RUNS: ${MONITORING_MAX_CONCURRENT_RUNS:-1}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs:8333}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-asm-dev-access}
@@ -251,14 +253,14 @@ services:
     depends_on: [control-plane, redis]
     env_file:
       - path: .env
-        required: false   # inline environment deckt M1 ab; .env ist optional
+        required: false   # inline environment covers the defaults; .env is optional
     environment:
       REDIS_URL: redis://redis:6379/0
       CONTROL_PLANE_URL: http://control-plane:8000
-      # M1-Lab-Testloop nutzt tool-runner-lab (lab/lab-compose.yml). Fuer
-      # own_domain/customer (M3+) auf den echten tool-runner-Dienst zeigen
+      # The lab test loop uses tool-runner-lab (lab/lab-compose.yml). For
+      # own_domain scans, point at the real tool-runner service
       # (profiles: ["runner"], docker compose --profile runner up).
-      # HexStrike teilt den Netzwerk-Namespace des Raw-Egress-Gateways.
+      # HexStrike shares the raw-egress gateway's network namespace.
       TOOL_RUNNER_URL: http://raw-egress-gateway:8888
       RAW_EGRESS_GATEWAY_URL: http://raw-egress-gateway:8765
       # GitHub issue #22: shared secret authenticating the worker to the
@@ -389,20 +391,19 @@ services:
     build:
       context: ./tool-runner
       dockerfile: runner.Dockerfile
-    profiles: ["runner"]  # erst ab M3 aktiv geschaltet (own_domain, aktiv)
+    profiles: ["runner"]  # only needed for active scans
     depends_on:
       raw-egress-gateway:
         condition: service_healthy
-    # Die offensive Ausfuehrungsebene haengt bewusst NICHT im ctrl-Netz
-    # (Zonen-Trennung, Deployment Kap. 1) - sonst koennte ein kompromittierter
-    # Runner control-plane/DB erreichen. Stattdessen:
-    #   runner  : erreicht NUR den egress-proxy (Datenkanal zu den Zielen)
-    #   control : schmaler Kontrollkanal, ueber den der worker Befehle schickt
-    # Beide sind internal (keine eigene Internet-Route). In K8s uebernimmt das
-    # die NetworkPolicy (deployment/k8s/networkpolicy-runner-egress.yaml);
-    # Docker-Netze sind groeber, aber die Trennung ctrl-vs-runner bleibt.
-    # Teilt den Namespace mit dem Gateway: dessen OUTPUT-Deny-All gilt auch
-    # fuer jeden Nmap-Prozess. Capabilities bleiben pro Prozess/Container.
+    # The offensive execution plane is deliberately NOT on the ctrl network
+    # (zone separation, Deployment Ch. 1) - otherwise a compromised runner
+    # could reach the control plane/DB. Instead:
+    #   runner  : reaches ONLY the egress-proxy (data channel to the targets)
+    #   control : narrow control channel through which the worker sends commands
+    # Both are internal (no route to the internet of their own). Docker
+    # networks are coarse, but the ctrl-vs-runner separation holds.
+    # Shares the namespace with the gateway: its deny-all OUTPUT policy also
+    # applies to every Nmap process. Capabilities stay per process/container.
     network_mode: "service:raw-egress-gateway"
     # REQ-PIPE-007: HexStrike kills a check's process group at its budget but
     # never reaps it, and as PID 1 the Python server does not adopt orphans
@@ -427,7 +428,7 @@ services:
     # Set = nur NET_RAW, kein DAC_OVERRIDE), read_only-fs, Netz-Isolation
     # (nftables deny-all, kein control-plane/DB/Internet ausser per Lease).
     # Max-Haertung fuer spaeter: ambient caps via Entrypoint (behaelt no-new-privs),
-    # gehoert ins Runner-Image / k8s securityContext.
+    # gehoert ins Runner-Image.
 
   # REQ-COVER-004 (R4, approved by johannes 2026-09-29): self-hosted
   # out-of-band interaction server so nuclei's blind-vulnerability templates

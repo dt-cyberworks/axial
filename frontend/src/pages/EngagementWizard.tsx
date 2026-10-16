@@ -210,6 +210,11 @@ export default function EngagementWizard() {
           setError("That engagement is no longer a draft. Open it from the dashboard instead.");
           return;
         }
+        if (eng.operating_mode === "monitoring") {
+          // REQ-MODE-018: a monitoring draft is set up in its own flow.
+          navigate(`/new?mode=monitoring&draft=${eng.id}`, { replace: true });
+          return;
+        }
         setEngagementId(eng.id);
         setTitle(eng.title);
         setAuthorizedFrom(isoToDateOnly(eng.authorized_from));

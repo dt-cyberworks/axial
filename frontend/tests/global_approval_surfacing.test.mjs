@@ -1,19 +1,20 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/global-approval-surfacing.md");
+const requirement = readRecord("requirements", "global-approval-surfacing.md");
 const app = read("frontend/src/App.tsx");
 const watcher = read("frontend/src/components/GlobalApprovalWatcher.tsx");
 const modal = read("frontend/src/components/ApprovalModal.tsx");
 const run = read("frontend/src/pages/RunDetail.tsx");
 
 // REQ-APPROVALUI-001: the popup is surfaced app-wide, not only on Run detail.
-assert.match(requirement, /## REQ-APPROVALUI-001:/);
-assert.match(requirement, /## REQ-APPROVALUI-002:/);
+record.match(requirement, /## REQ-APPROVALUI-001:/);
+record.match(requirement, /## REQ-APPROVALUI-002:/);
 
 // Mounted once in the authenticated shell.
 assert.match(app, /import GlobalApprovalWatcher from "\.\/components\/GlobalApprovalWatcher"/);

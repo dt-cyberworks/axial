@@ -10,12 +10,12 @@ from app.models.common import uuid_pk
 
 
 class ResolvedHost(Base):
-    """Auditierte DNS-Materialisierung eines freigegebenen Namens zu einer IP.
+    """Audited DNS materialization of an authorized name into an IP.
 
-    Grundlage fuer raw egress (nmap): Domain-/Wildcard-Scope kann keine
-    K8s-NetworkPolicy direkt erlauben. Die control-plane loest die
-    freigegebenen Namen auf, wendet deny-Vorrang auf IP-Ebene an und haelt das
-    Ergebnis hier fest (s. app/gateway/dns_materialization.py)."""
+    Basis for raw egress (nmap): domain/wildcard scope cannot directly allow a
+    raw-egress grant (IP/CIDR). The control plane resolves the authorized names,
+    applies deny precedence at IP level and records the result here (see
+    app/gateway/dns_materialization.py)."""
 
     __tablename__ = "resolved_host"
 

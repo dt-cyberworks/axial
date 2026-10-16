@@ -51,6 +51,16 @@ class ScanRun(Base):
     # REQ-PIPE-005: the scan depth this run was started with (the engagement's
     # setting at that moment; a later change does not rewrite history).
     scan_profile: Mapped[str | None] = mapped_column(String(16))
+    # REQ-MODE-002: how the run started and how supervised it is.
+    trigger: Mapped[str] = mapped_column(String, nullable=False, server_default="manual")
+    initiated_by: Mapped[str | None] = mapped_column(String)
+    supervision: Mapped[str | None] = mapped_column(String)
+    # REQ-MODE-012: ok | degraded | failed, set when the run finishes.
+    health: Mapped[str | None] = mapped_column(String)
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    # REQ-MODE-017: a run limited to some in-scope hosts / one finding's retest.
+    scope_hosts: Mapped[list | None] = mapped_column(JSONB)
+    retest_finding_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True))
 
 
 class AgentStep(Base):

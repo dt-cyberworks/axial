@@ -1,4 +1,4 @@
-"""REQ-PORTFOLIO-001 (docs/requirements/cross-engagement-findings.md).
+"""REQ-PORTFOLIO-001.
 
 GET /findings carries no engagement_id in its path, so the router-wide
 ownership check never runs for it. These tests prove the handler's own

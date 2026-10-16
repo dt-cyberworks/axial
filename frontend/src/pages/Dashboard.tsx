@@ -62,6 +62,7 @@ export default function Dashboard() {
   const active = shown.filter((e) => e.status === "active").length;
   const agentReady = shown.filter((e) => e.ai_testing_allowed).length;
   const drafts = shown.filter((e) => e.status === "draft" || e.status === "awaiting_signature").length;
+  const monitored = shown.filter((e) => e.operating_mode === "monitoring" && e.status === "active").length;
 
   return (
     <section className="page-stack">
@@ -89,6 +90,10 @@ export default function Dashboard() {
         <div className="metric-cell">
           <span>Needs setup</span>
           <strong>{drafts}</strong>
+        </div>
+        <div className="metric-cell">
+          <span>Monitored</span>
+          <strong>{monitored}</strong>
         </div>
       </div>
 
@@ -129,6 +134,7 @@ export default function Dashboard() {
                 <th>Engagement</th>
                 <th>Owner</th>
                 <th>Status</th>
+                <th>Mode</th>
                 <th>Agent</th>
                 <th>Authorized window</th>
                 <th>Views</th>
@@ -143,6 +149,7 @@ export default function Dashboard() {
                   </td>
                   <td title={e.owner_email ?? undefined}>{e.owner_name ?? "-"}</td>
                   <td><span className={`pill ${statusClass(e.status)}`}>{STATUS_LABEL[e.status] ?? e.status}</span></td>
+                  <td><span className={`pill ${e.operating_mode === "monitoring" ? "good" : "neutral"}`}>{e.operating_mode === "monitoring" ? "Monitoring" : "Assessment"}</span></td>
                   <td><span className={`pill ${e.ai_testing_allowed ? "good" : "neutral"}`}>{e.ai_testing_allowed ? "Enabled" : "Disabled"}</span></td>
                   <td>{formatWindow(e)}</td>
                   <td className="row-actions">
@@ -154,7 +161,7 @@ export default function Dashboard() {
                 </tr>
               ))}
               {shown.length === 0 && (
-                <tr><td colSpan={6} className="empty-cell">{onlyMine ? "You do not own an engagement yet." : "No engagements yet — create one above."}</td></tr>
+                <tr><td colSpan={7} className="empty-cell">{onlyMine ? "You do not own an engagement yet." : "No engagements yet — create one above."}</td></tr>
               )}
             </tbody>
           </table>

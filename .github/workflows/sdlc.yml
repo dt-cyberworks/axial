@@ -10,18 +10,22 @@ permissions:
 
 jobs:
   requirements:
-    name: requirements-as-code
+    name: manual, scripts and requirements-as-code
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The requirement and test-case records and their pipeline exist only in the private
+      # repository (GitHub issue #56); the same workflow runs in both, so this step runs only
+      # where the pipeline is present.
       - name: Validate requirements and traceability
+        if: hashFiles('scripts/requirements_pipeline.py') != ''
         run: python3 scripts/requirements_pipeline.py check
       - name: Check the user manual (links, anchors, UI labels, codes, images, no private data)
         run: python3 scripts/check_manual.py
-      - name: Test pipeline implementation
+      - name: Test the repository scripts
         run: |
           python3 -m pip install pytest
           python3 -m pytest scripts/tests -q

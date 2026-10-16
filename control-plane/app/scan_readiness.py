@@ -42,9 +42,15 @@ def evaluate(db: Session, engagement_id) -> Readiness:
         return Readiness(ready=False, blockers=[Blocker("engagement_not_found", "Engagement not found.")])
 
     if eng.status != "active":
+        # REQ-MODE-003: say what to do for the status the engagement is really in.
+        remedy = {
+            "paused": "Resume it before starting a scan.",
+            "completed": "It is closed and cannot scan again; create a new engagement.",
+            "revoked": "Its authorization was revoked; it cannot scan again.",
+        }.get(eng.status, "Activate it before starting a scan.")
         blockers.append(Blocker(
             "engagement_not_active",
-            f"Engagement is '{eng.status}', not 'active'. Activate it before starting a scan.",
+            f"Engagement is '{eng.status}', not 'active'. {remedy}",
         ))
 
     now = dt.datetime.now(dt.timezone.utc)

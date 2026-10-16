@@ -1,4 +1,4 @@
-"""Evidence-driven scan pipeline, increment 1 (docs/requirements/scan-pipeline.md).
+"""Evidence-driven scan pipeline, increment 1 (REQ-PIPE-001..021).
 
 TC-PIPE-001 web_alias, TC-PIPE-004 no network/javascript on web, TC-PIPE-006
 honest outcomes, TC-PIPE-007 declared budgets (worker half), TC-PIPE-013 nikto

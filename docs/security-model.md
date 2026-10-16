@@ -70,22 +70,30 @@ flowchart LR
     GW -->|only if permitted| TR["tool-runner"]
     TR -->|every request| PX["Egress proxy<br/>(2nd scope re-check)"]
     PX -->|scope-compliant only| NET(["target"])
-    TR -.->|NetworkPolicy:<br/>no other egress| X["✕ everything else"]
+    TR -.->|deny-all nftables<br/>OUTPUT policy| X["✕ everything else"]
 ```
 
-Even if the gateway were bypassed, the NetworkPolicy blocks any traffic
-that doesn't go to the egress proxy — and the proxy only lets
-scope-compliant targets through. Two independent layers protect exactly
-the point where an out-of-scope hit is most costly.
+Even if the gateway were bypassed, the runner has no route out except through
+the egress proxy: it has no internet route of its own and shares the network
+namespace of the raw-egress gateway, whose nftables OUTPUT policy is deny-all
+(it allows the proxy and, while a signed lease is active, one audited target
+IP and port set). The proxy only lets scope-compliant targets through. Two
+independent layers protect exactly the point where an out-of-scope hit is most
+costly. Compose has no further per-engagement network policy engine behind
+them; the controls above are everything there is on the wire.
 
 ## Isolation boundary
 
 Offensive tools (`tool-runner`) **never** run in the same container as the
 gateway, the DB, or the audit log. If a tool breaks out or is compromised
 (HexStrike has a documented history of misuse), it must not be able to
-reach the control plane or the tamper-evident audit chain. The runner is
-**ephemeral** — fresh per engagement, destroyed afterward — so no state
-persists across customers/scopes.
+reach the control plane or the tamper-evident audit chain. The runner is a
+long-running container with a read-only root filesystem and only a `tmpfs`
+scratch area. It is **not** recreated per engagement: it keeps no engagement
+data of its own (results go to the control plane), its processes are tagged
+with the scan run so a cancellation kills only that run's processes, and
+scratch files are gone when the container restarts. Customers who must not
+share a runner need separate Compose stacks.
 
 ## Two layers of tool restriction
 
@@ -167,8 +175,7 @@ answers "may this tool call run", which stays the Scope Gateway's job alone.
 [`audit.py`](../control-plane/app/gateway/audit.py) writes every gateway
 decision append-only, with `row_hash = sha256(prev_hash ||
 canonical_json(row))`. The chaining makes after-the-fact modification
-detectable — the proof to the customer, the bug-bounty operator, and the
-professional-liability insurer that every action stayed in scope. In
+detectable, so it can be shown that every action stayed in scope. In
 production, the `audit_log` table gets its own backups and `REVOKE UPDATE,
 DELETE` (INSERT only).
 
@@ -178,11 +185,11 @@ DELETE` (INSERT only).
 |---|---|
 | The LLM proposes an out-of-scope target | gateway deny/allow check (state, not prompt) |
 | Prompt injection "I am authorized" | control lives in the DB, not in prompt text |
-| Tool breakout / compromise | zone separation, ephemeral runner, NetworkPolicy |
-| Gateway bypass | redundant egress proxy + NetworkPolicy (defense in depth) |
+| Tool breakout / compromise | zone separation, read-only non-root runner, deny-all nftables egress policy |
+| Gateway bypass | redundant egress proxy + the runner's deny-all nftables egress policy (defense in depth) |
 | out-of-scope network access | egress proxy blocks at the network level |
 | after-the-fact audit tampering | hash chain, append-only, restrictive permissions |
-| cost explosion / infinite loop | a budget ceiling per run (tool calls/tokens/time) |
+| cost explosion / infinite loop | a budget ceiling per run (tool calls/tokens/time); the tool-call ceiling is one global admin setting, copied onto the run at its start, and a run that exhausts it is degraded, never reported clean (REQ-BUDGET-001/002) |
 | destructive exploitation | the build-time allowlist excludes exploit tools |
 | lateral movement onto the execution engine (unauthenticated `/api/command`) | a shared-secret gate at the tool-runner (REQ-HARDEN-001, `X-ASM-Runner-Token`, fail-closed) |
 | SSRF via an in-scope name to cloud metadata/loopback (DNS rebinding) | the egress proxy refuses link-local/loopback/reserved and pins the checked IP (REQ-HARDEN-002) |
@@ -198,13 +205,15 @@ Public operator routes require the single-operator credential. Browser clients e
 
 The egress proxy uses a read-only database role and submits bounded audit events to the authenticated control-plane ingestion route. If this audit submission is unavailable, the associated network request is denied. Audit appends take a PostgreSQL transaction advisory lock per engagement, producing one serialized hash chain.
 
+The proxy's reply to an allowed `CONNECT` is one fixed constant with a `Proxy-Agent` header line and nothing derived from the request (REQ-EGRESS-004/005). A reply without any header line left nuclei's raw HTTP client waiting for 60 s and sending nothing, so its raw-request templates never reached a target. A denied request never receives this reply and opens no tunnel. `make verify-tunnel-handshake` runs the real nuclei through the real proxy handler and fails if the proxy slows one of those templates down.
+
 Manual approvals use `requested -> approved -> executing -> consumed|execution_failed`. The claim transition re-runs the complete Scope Gateway against the stored call and is protected by a row lock.
 
 ## Raw scan target binding and truthful results
 
-Raw-socket tools cannot traverse the HTTP proxy. In Compose, a run first obtains a bounded FIFO reservation; waiting grants no network access. The control plane then signs a short-lived capability only after the exact Nmap call passes the Scope Gateway. The separate raw-egress gateway requires the matching queue-head run, verifies the capability, and installs the audited materialized IP plus exact TCP or UDP ports in a deny-all namespace shared with the runner. The gateway, not the offensive runner, owns `NET_ADMIN`. One lease is active at a time; a heartbeat refreshes the kernel target timeout only while Nmap is running, and deactivation flushes both target and port sets. Kubernetes uses the equivalent per-engagement NetworkPolicy path. Each lease's granted packet rate is additionally enforced by a real kernel-level nftables `limit rate` rule scoped to the lease's concurrency slot (`raw-egress-gateway/app/gateway.py`'s `NftPolicyManager`) - not only by Nmap's own cooperative `--max-rate` flag (`docs/requirements/bounty-network-scan-profile.md`, `REQ-BOUNTYSCAN-004`).
+Raw-socket tools cannot traverse the HTTP proxy. In Compose, a run first obtains a bounded FIFO reservation; waiting grants no network access. The control plane then signs a short-lived capability only after the exact Nmap call passes the Scope Gateway. The separate raw-egress gateway requires the matching queue-head run, verifies the capability, and installs the audited materialized IP plus exact TCP or UDP ports in a deny-all namespace shared with the runner. The gateway, not the offensive runner, owns `NET_ADMIN`. One lease is active at a time; a heartbeat refreshes the kernel target timeout only while Nmap is running, and deactivation flushes both target and port sets. Each lease's granted packet rate is additionally enforced by a real kernel-level nftables `limit rate` rule scoped to the lease's concurrency slot (`raw-egress-gateway/app/gateway.py`'s `NftPolicyManager`) - not only by Nmap's own cooperative `--max-rate` flag (`REQ-BOUNTYSCAN-004`). Nmap is started at half the lease's rate so the limiter never has to drop its probes; a scan whose probes were refused anyway, or that no longer finds a port earlier runs found (after one slow second look), is reported `partial`, never clean (`REQ-PORTSCAN-001..004`).
 
-For `bug_bounty`-source engagements, the raw-egress lease path additionally applies `docs/requirements/bounty-network-scan-profile.md`'s per-program `tcp_syn_scan_profile` tier (`none`/`common`/`full`, default `none`) on top of the Scope Gateway's own checks: only `host_discovery` (a fixed two-port liveness sweep) is exempted from the raw-nmap block by default; `common`/`full` are explicit, separate operator opt-ins, and `full` additionally requires a recorded `network_scan_authorization_evidence` reason - never inferred from `automation_allowed` or any rate figure alone. This is R4 (new active-scanning capability); a profile broader than `host_discovery` requires explicit human security review before use against a real (non-lab) program, per `AGENTS.md`'s documented-exception pattern.
+For `bug_bounty`-source engagements, the raw-egress lease path additionally applies the per-program `tcp_syn_scan_profile` tier (`REQ-BOUNTYSCAN-001..004`: `none`/`common`/`full`, default `none`) on top of the Scope Gateway's own checks: only `host_discovery` (a fixed two-port liveness sweep) is exempted from the raw-nmap block by default; `common`/`full` are explicit, separate operator opt-ins, and `full` additionally requires a recorded `network_scan_authorization_evidence` reason - never inferred from `automation_allowed` or any rate figure alone. This is R4 (new active-scanning capability); a profile broader than `host_discovery` requires explicit human security review before use against a real (non-lab) program, per `AGENTS.md`'s documented-exception pattern.
 
 Runner HTTP success is not treated as scan success. Non-zero exits, runner-declared failure, zero-target/malformed XML, policy/heartbeat/cleanup failure, and proxy backpressure are failed outcomes. TCP discovery covers exactly the persisted engagement range; service detection sees only discovered open ports. UDP is default-off, fixed to the approved nine-port profile, and persists open/closed/filtered/open-or-filtered counts while fingerprinting only confirmed-open ports. Tool, target/IP, protocol/range, state summary, stderr summary, and discovered-service count are stored in the append-only audit chain.
 
@@ -218,3 +227,34 @@ process group, and exposes only exact-run group termination to the worker. If th
 control plane cannot answer a cancellation poll, the worker terminates the tool.
 Raw Nmap retains its independently signed lease and revokes it in `finally` after
 the runner returns or is terminated.
+
+## Operating modes
+
+An engagement is `monitoring` (unattended) or `assessment`. The mode never widens what the gateway
+allows; it narrows how a decision that needs a person is handled.
+
+- A monitoring engagement refuses configuration that needs a person (an asset review, a per-tool
+  approval, a `cred`/`exploit` grant). A call that still needs a decision in a run nobody supervises is
+  withdrawn by the worker and recorded as a suggestion; nothing waits and no popup is left.
+- A new host of a monitoring engagement can be held: inventoried, not tested, until acknowledged. A
+  run limited to some hosts, and a `passive` run, make no call outside what they were asked to.
+- A semi-attended run that needs a decision parks: the same run stays open, so the approval stays bound
+  to its `scan_run_id` and is re-checked by the gateway when claimed. The stored state holds no session
+  cookie and not the call's arguments.
+- Alerts carry a kind, a title and a link: no evidence, credential or tool output. A webhook must be a
+  public https address, checked when it is saved and again when it is sent; redirects are not followed.
+- A monitoring engagement can run by itself every N days (1 to 90). This is the one place the product
+  starts a scan without a person pressing a button, so it is bounded: a due run goes through the same
+  start path as a manual one (readiness, the one-active-run rule, the Scope Gateway, budgets), and does
+  not start while the engagement is not `active`, outside its authorized window, after its review date,
+  while another run is active or beyond the installation's capacity cap. Each skip is stored and
+  audited once. The scheduler never changes scope, grants, capabilities or the interval, never retries
+  a failed run, and its start is audited with the schedule as the actor. The interval is part of the
+  authorization document's configuration, so changing it after signing changes the checksum.
+
+**Not part of this change** (withheld; recorded in the engineering requirement records):
+the gateway-resident forms of these rules (`approval_unavailable_unattended`, `profile_passive`,
+`asset_held_for_review`) and the standing consent to state-changing requests (R4). Until then the worker
+enforces the narrowing rules, and a state-changing request still always waits for a person in an
+assessment and is never made by a monitor.
+

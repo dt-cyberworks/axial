@@ -211,8 +211,9 @@ require human security review.
   self-hosting; single-engagement blast radius. Owner: operator.
 - **R-2 Worker↔postgres network reachability (S9).** Worker sits on `ctrl` for
   control-plane access and can *reach* postgres at L3; it holds no DB
-  credentials. Defense-in-depth only; a K8s NetworkPolicy / dedicated control
-  channel would remove even reachability. Owner: infra.
+  credentials. Defense-in-depth only; there is no network-level separation of
+  worker and postgres in Compose, and a dedicated control channel would remove
+  even reachability. Owner: infra.
 - **R-3 Agent-authored findings (S12).** Unauthenticated finding creation is
   bounded and attributed; a future confidence-gating control is tracked.
 - **R-4 nmap materialized-IP metadata guard.** Raw nmap does not transit the

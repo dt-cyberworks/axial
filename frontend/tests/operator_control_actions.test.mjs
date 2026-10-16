@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
-const requirement = read("docs/requirements/operator-control-actions.md");
+const requirement = readRecord("requirements", "operator-control-actions.md");
 const dashboard = read("frontend/src/pages/Dashboard.tsx");
 const engagement = read("frontend/src/pages/EngagementDetail.tsx");
 const run = read("frontend/src/pages/RunDetail.tsx");
 const client = read("frontend/src/api/client.ts");
 
-assert.match(requirement, /## REQ-ENG-001:/);
+record.match(requirement, /## REQ-ENG-001:/);
 assert.match(client, /res\.status === 204/);
 assert.match(client, /deleteEngagement:.*request<void>/s);
 assert.match(dashboard, /current\.filter\(\(engagement\) => engagement\.id !== deletedId\)/);

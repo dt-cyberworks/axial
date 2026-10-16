@@ -7,6 +7,7 @@ POST /internal/engagements/{id}/gateway/authorize - die Kontrolle liegt im
 Scope Gateway, nicht im Worker.
 """
 
+import logging
 import os
 import uuid
 
@@ -45,6 +46,8 @@ class ControlPlaneClient:
         # scan_run_id -> the claim attempt this process holds. Every write for
         # that run carries it, so a replaced attempt is refused (REQ-RESUME-002).
         self._attempts: dict[str, int] = {}
+        # scan_run_id -> what the claim said about the run (see claim_scan_run).
+        self._run_info: dict[str, dict] = {}
 
     def claim_scan_run(self, scan_run_id: uuid.UUID, *, task_id: str, budget_max_iterations: int | None = None,
                        approval_timeout_seconds: int | None = None) -> dict:
@@ -58,10 +61,21 @@ class ControlPlaneClient:
         r.raise_for_status()
         claim = r.json()
         self._attempts[str(scan_run_id)] = int(claim["attempt"])
+        # REQ-MODE-002/011/017: what this run is, for every later decision of the worker.
+        self._run_info[str(scan_run_id)] = {
+            "supervision": claim.get("supervision"), "scan_profile": claim.get("scan_profile"),
+            "trigger": claim.get("trigger") or "manual", "scope_hosts": claim.get("scope_hosts"),
+            "retest_finding_id": claim.get("retest_finding_id"),
+            "operating_mode": claim.get("operating_mode") or "assessment",
+            "approval_timeout_seconds": int(
+                ((claim.get("checkpoint") or {}).get("params") or {}).get("approval_timeout_seconds") or 900
+            ),
+        }
         return claim
 
     def release_scan_run(self, scan_run_id: uuid.UUID | str) -> None:
         self._attempts.pop(str(scan_run_id), None)
+        self._run_info.pop(str(scan_run_id), None)
 
     def _attempt_params(self, scan_run_id: uuid.UUID | str) -> dict:
         attempt = self._attempts.get(str(scan_run_id))
@@ -70,7 +84,18 @@ class ControlPlaneClient:
     def authorize(self, engagement_id: uuid.UUID, tool_call: dict) -> dict:
         r = self._client.post(f"/internal/engagements/{engagement_id}/gateway/authorize", json=tool_call)
         r.raise_for_status()
-        return r.json()
+        decision = r.json()
+        # REQ-BUDGET-002: every worker call to the gateway passes here (pipeline, discovery,
+        # agent), so this is the one place a budget denial is seen exactly once. Telemetry only:
+        # it never changes the decision and a failure of it must not fail the call.
+        if not decision.get("allowed") and decision.get("reason") == "budget_exhausted":
+            try:
+                from app import tool_execution  # lazy: tool_execution imports this module's client
+
+                tool_execution.note_budget_exhausted(tool_call.get("scan_run_id"), str(tool_call.get("tool") or ""))
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).warning("could not record a budget denial", exc_info=True)
+        return decision
 
     def acquire_raw_egress_lease(self, engagement_id: uuid.UUID, **fields) -> dict:
         r = self._client.post(
@@ -93,11 +118,10 @@ class ControlPlaneClient:
         r.raise_for_status()
         return r.json()
 
-    def create_scan_run(self, engagement_id: uuid.UUID, budget_tool_calls_max: int = 200) -> dict:
-        r = self._client.post(
-            f"/internal/engagements/{engagement_id}/scan-runs",
-            json={"budget_tool_calls_max": budget_tool_calls_max},
-        )
+    def create_scan_run(self, engagement_id: uuid.UUID) -> dict:
+        """The run's tool-call budget is the global setting, decided by the control plane
+        (REQ-BUDGET-001); a caller cannot ask for another one."""
+        r = self._client.post(f"/internal/engagements/{engagement_id}/scan-runs", json={})
         r.raise_for_status()
         return r.json()
 
@@ -177,6 +201,14 @@ class ControlPlaneClient:
         r.raise_for_status()
         return r.json()
 
+    def known_open_ports(self, engagement_id: uuid.UUID, ip: str, scan_run_id: str) -> list[int]:
+        """GitHub issue #60: TCP ports that recent earlier runs found open on `ip`."""
+        r = self._client.get(
+            f"/internal/engagements/{engagement_id}/known-open-ports", params={"ip": ip, "scan_run_id": scan_run_id},
+        )
+        r.raise_for_status()
+        return sorted({int(port) for port in r.json().get("ports", [])})
+
     def list_discovered_assets(self, engagement_id: uuid.UUID, in_scope: bool | None = None) -> list[dict]:
         params = {} if in_scope is None else {"in_scope": str(in_scope).lower()}
         r = self._client.get(f"/internal/engagements/{engagement_id}/discovered-assets", params=params)
@@ -228,19 +260,32 @@ class ControlPlaneClient:
         except Exception:  # noqa: BLE001
             return {"subfinder": False, "crawling": False, "oob": False, "screenshots": False}
 
-    def get_scan_settings(self, engagement_id: uuid.UUID) -> dict:
+    def run_info(self, scan_run_id: uuid.UUID | str | None) -> dict:
+        """What the claim said about this run. A run this process did not claim
+        (a legacy call, a test) reads as an attended assessment at `standard`
+        depth - the behaviour that existed before operating modes."""
+        info = self._run_info.get(str(scan_run_id)) if scan_run_id else None
+        return dict(info) if info else {
+            "supervision": None, "scan_profile": None, "trigger": "manual", "scope_hosts": None,
+            "retest_finding_id": None, "operating_mode": "assessment", "approval_timeout_seconds": 900,
+        }
+
+    def get_scan_settings(self, engagement_id: uuid.UUID, scan_run_id: uuid.UUID | str | None = None) -> dict:
         """REQ-PIPE-005/015: scan depth, the parallel-check limit and the tools the
         campaign switched off. Fails toward the cheaper, stricter reading:
         `standard` depth and one check at a time (the gateway still refuses a
-        disabled tool if the list could not be read)."""
+        disabled tool if the list could not be read).
+
+        REQ-MODE-011: the depth is the one the RUN started with."""
         try:
-            r = self._client.get(f"/internal/engagements/{engagement_id}/scan-settings")
+            params = {"scan_run_id": str(scan_run_id)} if scan_run_id else None
+            r = self._client.get(f"/internal/engagements/{engagement_id}/scan-settings", params=params)
             r.raise_for_status()
             data = r.json()
             profile = data.get("scan_profile")
             parallel = int(data.get("max_parallel_checks") or 1)
             disabled = [t for t in (data.get("disabled_tools") or []) if isinstance(t, str)]
-            return {"scan_profile": profile if profile in ("standard", "thorough") else "standard",
+            return {"scan_profile": profile if profile in ("passive", "light", "standard", "thorough") else "standard",
                     "max_parallel_checks": max(1, min(parallel, 2)), "disabled_tools": disabled}
         except Exception:  # noqa: BLE001
             return {"scan_profile": "standard", "max_parallel_checks": 1, "disabled_tools": []}
@@ -474,6 +519,85 @@ class ControlPlaneClient:
         # what makes its trend/diff section meaningful.
         params = {"scan_run_id": str(scan_run_id)} if scan_run_id else None
         r = self._client.post(f"/internal/engagements/{engagement_id}/report", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def park_scan_run(self, scan_run_id: uuid.UUID | str, *, approval_id: str, resume_state: dict) -> dict:
+        """REQ-MODE-016: hand a semi-attended run back while it waits for a decision.
+        Fenced by the claim attempt like every other write of this run."""
+        r = self._client.post(
+            f"/internal/scan-runs/{scan_run_id}/park",
+            json={"approval_id": approval_id, "resume_state": resume_state,
+                  **{k: v for k, v in self._attempt_params(scan_run_id).items()}},
+        )
+        _raise_if_superseded(r)
+        r.raise_for_status()
+        return r.json()
+
+    # ---- monitoring mode (REQ-MODE-007/008, REQ-MON-002) -------------------
+
+    def evaluate_hold(self, scan_run_id: uuid.UUID | str, candidates: list[dict]) -> dict:
+        """Which discovered hosts are tested in this run and which are held. Fails
+        toward holding nothing back being NOT assumed: on an error every candidate
+        counts as held, so an unanswered question never widens what is tested."""
+        r = self._client.post(
+            f"/internal/scan-runs/{scan_run_id}/hold",
+            json={"candidates": [{"asset_id": str(c["asset_id"]), "value": c.get("value")} for c in candidates]},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def add_suggestion(self, engagement_id: uuid.UUID, *, tool: str, target: str, rationale: str = "") -> None:
+        """A proposal an unattended run could not get a decision for. Best effort."""
+        try:
+            self._client.post(
+                f"/internal/engagements/{engagement_id}/suggestions",
+                json={"tool": tool, "target": target, "rationale": rationale},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def withdraw_approval(self, approval_id: str, reason: str = "unattended_run") -> None:
+        """Close an approval the worker will not wait for. Best effort: a failure
+        leaves a popup nobody acts on, never an execution."""
+        try:
+            self._client.post(f"/internal/approvals/{approval_id}/withdraw", json={"reason": reason})
+        except Exception:  # noqa: BLE001
+            pass
+
+    def due_alerts(self) -> list[dict]:
+        r = self._client.get("/internal/alerts/due")
+        r.raise_for_status()
+        return r.json()
+
+    def report_alert_result(self, alert_id: str, *, delivered: bool, error: str | None = None) -> None:
+        r = self._client.post(f"/internal/alerts/{alert_id}/result", json={"delivered": delivered, "error": error})
+        r.raise_for_status()
+
+    def resume_parked_runs(self) -> int:
+        r = self._client.post("/internal/scan-runs/resume-parked")
+        r.raise_for_status()
+        return int(r.json().get("resumed", 0))
+
+    # ---- outbound e-mail (REQ-MAIL-003) ------------------------------------
+
+    def due_mail(self) -> dict:
+        r = self._client.get("/internal/mail/due")
+        r.raise_for_status()
+        return r.json()
+
+    def report_mail_result(self, message_id: str, *, delivered: bool, error: str | None = None) -> None:
+        r = self._client.post(f"/internal/mail/{message_id}/result", json={"delivered": delivered, "error": error})
+        r.raise_for_status()
+
+    def monitoring_housekeeping(self) -> dict:
+        r = self._client.post("/internal/monitoring/housekeeping")
+        r.raise_for_status()
+        return r.json()
+
+    def run_due_schedules(self) -> dict:
+        """One scheduler tick (REQ-MON-003); the control plane decides what starts."""
+        r = self._client.post("/internal/monitoring/run-due-schedules")
         r.raise_for_status()
         return r.json()
 

@@ -25,7 +25,9 @@ SKIP_REASONS = frozenset({
 def outcome_of(result: dict) -> str:
     """complete | partial | failed | skipped:<reason> for one tool result."""
     explicit = result.get("outcome")
-    if explicit:
+    # `partial` is only meaningful for a result that otherwise succeeded: a scan that ran to the
+    # end but has holes (GitHub issue #60). If a later step failed it, it is simply failed.
+    if explicit and (str(explicit) != "partial" or result.get("success")):
         return str(explicit)
     if result.get("success"):
         return "complete"
@@ -66,6 +68,12 @@ def skipped_result(reason: str, **summary) -> dict:
 # clear_coverage() at the end of the run.
 _COVERAGE: dict[str, dict[str, dict]] = {}
 _COVERAGE_LOCK = threading.Lock()
+
+# REQ-BUDGET-002: calls the Scope Gateway denied because the run's tool-call budget was used up.
+# Per run, like the counters above and cleared with them. A run that is resumed after a worker
+# restart carries the resulting warning in its checkpoint (pipeline._coverage_warning).
+BUDGET_EXHAUSTED_REASON = "budget_exhausted"
+_BUDGET_DENIED: dict[str, dict[str, int]] = {}
 
 
 class CheckCollector:
@@ -130,7 +138,9 @@ def check_outcome(collector: CheckCollector) -> tuple[str, str | None]:
         failed = next(r for r in collector.results if outcome_of(r) == "failed")
         return "failed", str(failed.get("error_reason") or "failed")
     if any(o == "partial" for o in outcomes):
-        return "partial", BUDGET_REACHED
+        partial = next(r for r in collector.results if outcome_of(r) == "partial")
+        reasons = (partial.get("outcome_summary") or {}).get("partial_reasons") or [BUDGET_REACHED]
+        return "partial", str(reasons[0])
     return "complete", None
 
 
@@ -199,7 +209,7 @@ def _accumulate_coverage(scan_run_id: str | None, tool: str, result: dict) -> No
         per_run = _COVERAGE.setdefault(str(scan_run_id), {})
         entry = per_run.setdefault(tool, {"attempted": 0, "succeeded": 0, "partial": 0, "reasons": []})
         entry["attempted"] += 1
-        if result.get("error_reason") == BUDGET_REACHED:
+        if result.get("error_reason") == BUDGET_REACHED or outcome_of(result) == "partial":
             entry["partial"] += 1
         if succeeded:
             entry["succeeded"] += 1
@@ -229,11 +239,30 @@ def partial_tools(scan_run_id: str | None) -> dict[str, int]:
     }
 
 
+def note_budget_exhausted(scan_run_id: str | None, tool: str) -> None:
+    """REQ-BUDGET-002: the gateway refused one call of this run because its budget is used up.
+    Only that reason is counted here; every other denial is a different story."""
+    if not scan_run_id:
+        return
+    with _COVERAGE_LOCK:
+        per_run = _BUDGET_DENIED.setdefault(str(scan_run_id), {})
+        per_run[tool or "unknown"] = per_run.get(tool or "unknown", 0) + 1
+
+
+def budget_exhausted_calls(scan_run_id: str | None) -> int:
+    """How many calls of this run the gateway denied for want of budget so far."""
+    if not scan_run_id:
+        return 0
+    with _COVERAGE_LOCK:
+        return sum(_BUDGET_DENIED.get(str(scan_run_id), {}).values())
+
+
 def clear_coverage(scan_run_id: str | None) -> None:
     if not scan_run_id:
         return
     with _COVERAGE_LOCK:
         _COVERAGE.pop(str(scan_run_id), None)
+        _BUDGET_DENIED.pop(str(scan_run_id), None)
 
 
 def degraded_tools(scan_run_id: str | None, tools: tuple[str, ...]) -> dict[str, list[str]]:

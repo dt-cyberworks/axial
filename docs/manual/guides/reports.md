@@ -19,7 +19,7 @@ A styled PDF with a cover page and five sections:
 2. **Risk overview.** The number of findings by severity, and what is new, resolved or persisting since the previous run.
 3. **Detailed findings.** For each finding: what it is, where it is, the proof and what to do about it. If the finding has an explanation from the Lens Agent, it is included.
 4. **Asset inventory.** What was discovered: hosts, services and hints of assets nobody listed.
-5. **Methodology and scope.** What was authorised: scope, window, exclusions and authorisation. This is the section a client or an insurer reads to see that the testing was inside its mandate.
+5. **Methodology and scope.** What was authorised: scope, window, exclusions and authorisation. This is the section a client or an auditor reads to see that the testing was inside its mandate.
 
 A **coverage** part states what the run did *not* do: checks that stopped at their time budget, failed, or were skipped, each with the reason in plain words. It is there so that a reader does not mistake a short findings list for a clean result.
 

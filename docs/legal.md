@@ -1,32 +1,30 @@
-# ⚖ Legal Prerequisites
+# Legal Prerequisites
 
-> **Not legal advice.** This page summarizes the ⚖ markers from the
-> specifications. The concrete criminal-law and contractual assessment
-> (computer-misuse, data-protection, secondary-employment, and platform-terms
-> law in your jurisdiction) should be secured with qualified legal counsel.
+> **Not legal advice.** This page lists what should be in place before you scan
+> a system that is not yours. Actively scanning or testing third-party systems
+> without authorization can be a criminal offence in many jurisdictions; a
+> qualified lawyer can tell you what applies to you.
 
-Actively scanning or testing third-party systems without authorization can
-be a criminal offense in many jurisdictions. Control is technically
-enforced in this system (the Scope Gateway), but the **legal basis** must
-be in place before that.
+The Scope Gateway enforces technically that Axial only touches what you
+record as in scope. Having permission to test every target is your
+responsibility, and it has to exist before the scan starts.
 
 ## Before the first scan against a third-party system
 
-Checklist from the Specification Ch. 7 and the
-[Rules of Engagement](spec/rules-of-engagement.md):
+Checklist from the [scanner specification](spec/scanner-specification.md) and
+the [Rules of Engagement](spec/rules-of-engagement.md):
 
-- [ ] **Signed engagement** with an exact scope (domains/IP ranges, not "the whole company")
+- [ ] **A recorded engagement** with an exact scope (domains/IP ranges, not "the whole company")
 - [ ] **Proof of authorization** for every actively authorized asset — ownership, a customer/program
       contract, or a public invitation to test (e.g. a dedicated pentest practice
       platform); for cloud, possibly additional provider authorization
 - [ ] **Test window & emergency contact** at the customer
 - [ ] **Explicit exclusions** (no DoS, no social engineering, no exfiltration, unless agreed)
-- [ ] **Professional liability insurance** with IT-security-testing coverage — before the first scan
+- [ ] **Insurance or other cover**, if your organization requires it before testing
 - [ ] **A complete audit trail** (already technically enforced, see [security-model.md](security-model.md))
-- [ ] **Data-protection compliance** where personal data is captured (e.g. exposed email addresses)
-- [ ] **Employer approval** for secondary employment; check for conflicts of interest
+- [ ] **Data handling** where personal data is captured (e.g. exposed email addresses): redaction and retention
 
-## How the system enforces the legal basis
+## How the system enforces it
 
 | Requirement | Technical enforcement |
 |---|---|
@@ -34,7 +32,6 @@ Checklist from the Specification Ch. 7 and the
 | Exact scope | `scope_asset` allow/deny; `deny` takes precedence |
 | Time window | Gateway **and** egress proxy reject outside `[authorized_from, authorized_until]` |
 | Per-asset authorization | The `active` transition is blocked until actively authorized assets are `authorization_verified` (the basis can be ownership, contract, program, or public invitation) |
-| Customer signature | `activate` requires `scope_signed_by` + `scope_doc_sha256` |
 | Bug-bounty policy | `automation_allowed` / `ai_testing_allowed` as hard gates; mandatory ident header |
 | Provability | a hash-chained, append-only audit trail |
 

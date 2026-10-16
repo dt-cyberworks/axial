@@ -26,13 +26,16 @@ from app.tool_runner_client import (
 
 # REQ-PIPE-016: web products whose product-bound templates run when a surface's
 # profile is empty (nothing identified). Reviewed list, mirrored in
-# docs/design/scan-pipeline-architecture.md; a test fails when they diverge.
+# the REQ-PIPE-016 design record; a test fails when they diverge (private tree).
 COMMON_PRODUCTS = (
     "wordpress", "drupal", "joomla", "apache", "nginx", "iis", "tomcat", "jenkins", "gitlab", "grafana",
     "confluence", "jira", "php", "spring",
 )
 
 SCAN_PROFILES = ("standard", "thorough")
+# REQ-MODE-011: depths below `standard` for unattended monitoring. `passive` never
+# reaches the planner (a passive run does not fingerprint); `light` is planned here.
+TIER_PROFILES = ("passive", "light")
 # REQ-PIPE-017: the thorough profile's deep content-discovery sweep.
 DEEP_FFUF_CHECK_ID = "ffuf:deep"
 DEEP_FFUF_WORDLIST = "raft-medium-dirs"
@@ -193,6 +196,17 @@ def _plan_checks(surface: SurfaceInput, options: Options, index: IndexInfo) -> l
             checks.append(_planned(check_id, tool, reason, args, depends_on=depends_on))
 
     deep("header_findings", "httpx", "web")
+    if options.scan_profile == "light":
+        # REQ-MODE-011: daily change detection. The cheap, stable signal only:
+        # fingerprint, TLS, headers and the takeover check - no content discovery,
+        # no template sweeps, no crawling. Never more than `standard` would run.
+        for check_id, tool in (("ffuf", "ffuf"), ("screenshot", "screenshot"), ("katana", "katana")):
+            checks.append(_skipped(check_id, tool, "light_profile"))
+        if dup_reason:
+            checks.append(_skipped("nuclei", "nuclei", dup_reason))
+        else:
+            checks.append(_planned("nuclei:takeover", "nuclei", "web", {"mode": "takeover"}))
+        return [dataclasses.replace(c, budget_s=_declared_budget(c)) if c.state == "planned" else c for c in checks]
     deep("ffuf", "ffuf", "web", {"wordlist": "quickhits"})
     deep("screenshot", "screenshot", "switch_on", enabled=options.screenshots)
     deep("katana", "katana", "switch_on", enabled=options.crawling)

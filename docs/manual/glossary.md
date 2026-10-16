@@ -10,15 +10,18 @@
 | **Active (mode)** | a tool grant for tools that send requests to the target. Compare *passive* |
 | **Allow / deny** | the two kinds of scope row. Deny always wins |
 | **Approval** | a person's one-time decision on one stored request. See [Approve or deny a tool call](guides/approve-or-deny-a-tool-call.md) |
+| **Assessment** | an engagement used for a test: a person starts the runs and decides the sensitive steps. Compare *monitoring* |
 | **Asset** | something in scope or discovered: a host, an address, a service |
 | **Asset review** | an optional pause after discovery in which you drop hosts that should not be scanned |
 | **Attack surface** | everything about your organisation that can be reached from the internet |
 | **Attestation** | your confirmation, per active allow row, that you are permitted to test it |
 | **Audit log** | the append-only, hash-chained record of everything the system did. See [Audit](reference/audit.md) |
+| **Automatic runs** | a monitoring engagement started by itself every set number of days (1 to 90), counted from its last run. See [Monitor an attack surface](guides/monitor-an-attack-surface.md#automatic-runs) |
 | **Backup codes** | ten one-time codes shown once at enrolment; the way in if the authenticator is lost |
 | **Baseline** | the previous run a run is compared with. The first run has none |
-| **Budget** | a limit on a run: tool calls (200 by default), agent iterations (50), and a time limit per check (30 minutes at most) |
+| **Budget** | a limit on a run: tool calls (200 by default, one global setting; a run that uses it up is *reduced coverage*), agent iterations (50), and a time limit per check (30 minutes at most) |
 | **Campaign** | one engagement's own settings, as opposed to the installation-wide defaults. See *override* |
+| **Capability** | a function of the scanner (for example vulnerability templates) that a monitoring engagement switches on or off once, for every run |
 | **CIDR** | a range of IP addresses written like `203.0.113.0/28` |
 | **CNAME** | a DNS alias; the *DNS & hosting* view shows the full chain |
 | **Confidence** | *validated* (demonstrated) or *inferred* (reasoned). See [Concepts](concepts.md#confidence-validated-or-inferred) |
@@ -38,10 +41,13 @@
 | **Finding** | one problem on one target, with evidence, a score and a status |
 | **Force on / Force off** | a campaign override for one tool. It cannot create a grant |
 | **Grant (tool grant)** | the authorisation for a category of tools on an engagement. See [Control which tools run](guides/control-which-tools-run.md) |
+| **Held host** | a newly found host that a monitoring engagement inventories but does not test until you release it |
+| **Inbox** | the list of everything that needs a person: held hosts, suggestions, runs that need a decision or were degraded, a quiet monitor. See [Inbox](reference/inbox.md) |
 | **Inferred** | see *confidence* |
 | **KEV** | the public list of vulnerabilities known to be exploited in the wild; a listed CVE is scored critical |
 | **Lens Agent** | the AI model that explains a finding in plain language |
 | **MFA / TOTP** | two-factor authentication with a time-based code from an authenticator app |
+| **Monitoring** | an engagement that runs without anyone watching and tells you what changed. Compare *assessment*. See [Monitor an attack surface](guides/monitor-an-attack-surface.md) |
 | **nuclei template** | one small, individually written check for one known issue |
 | **OSINT** | information from public sources; what *passive* tools use |
 | **Out-of-band** | a test where the target has to contact a server, so a blind weakness can be confirmed |
@@ -58,10 +64,11 @@
 | **Scope** | the allow and deny rows that define what may be tested |
 | **Scope Gateway** | the deterministic check that authorises every tool call. See [Concepts](concepts.md#scope-gateway) |
 | **Severity** | critical, high, medium, low or info, derived from the risk score |
+| **Supervision** | how much a person is present for a run: *attended* (decides live), *semi-attended* (notified when a decision is needed) or *unattended* (never asked) |
 | **Surface** | one open port with its service class: web, redirect only, TLS service, other service |
 | **Takeover (subdomain)** | a name whose DNS points at a de-provisioned third-party service an attacker may claim |
 | **Test window** | the dates in which scanning is authorised |
-| **Thorough** | the deeper scan depth: every template, plus a deep content-discovery sweep |
+| **Thorough** | the deeper scan depth: all non-intrusive web templates, identified product or not, plus a deep content-discovery sweep |
 | **Triage** | giving a finding a status: resolved, accepted risk, false positive, or open |
 | **Validated** | see *confidence* |
 | **Vector Agent** | the AI model that proposes further checks. It cannot execute anything |

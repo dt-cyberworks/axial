@@ -56,7 +56,7 @@ What it deliberately does **not** do: exploit systems, test credentials
 at scale, scan anything outside the authorized scope and time window, or
 let the AI act without the gateway's decision.
 
-The binding functional/legal specification lives in
+The technical specification lives in
 [`docs/spec/`](docs/spec/) (seven documents). The developer-facing writeup
 with diagrams is in **[`docs/`](docs/)**.
 
@@ -78,7 +78,7 @@ way out runs through the egress proxy.
 flowchart LR
     UI["Operator console"] --> CP["control-plane<br/>+ Scope Gateway"]
     CP --> DB[("postgres<br/>+ audit log")]
-    CP -->|commissions| TR["tool-runner<br/>(isolated, ephemeral)"]
+    CP -->|commissions| TR["tool-runner<br/>(isolated)"]
     WK["worker"] -->|authorize| CP
     TR -->|the only way out| EP["egress-proxy<br/>(2nd scope check)"]
     EP --> NET(["authorized targets"])
@@ -139,10 +139,9 @@ for each job, and a page for every screen.
 | [`control-plane/`](control-plane/) | FastAPI orchestrator + Scope Gateway; sole DB writer | control plane |
 | [`worker/`](worker/) | Celery; orchestrates scan phases, executes nothing itself | control plane |
 | [`egress-proxy/`](egress-proxy/) | network-level scope enforcement (2nd check) | bridge |
-| [`tool-runner/`](tool-runner/) | HexStrike + Kali tools, ephemeral per engagement | execution plane |
+| [`tool-runner/`](tool-runner/) | HexStrike + Kali tools, isolated execution plane | execution plane |
 | [`frontend/`](frontend/) | operator console (React/TS) | client |
 | `lab/` | isolated test environment + test loop (not yet in the public release) | test |
-| [`deployment/k8s/`](deployment/k8s/) | Job + NetworkPolicy, for tenant-isolated deployments | — |
 | [`docs/`](docs/) | technical documentation (diagrams) | — |
 
 ## Documentation
@@ -154,10 +153,10 @@ for each job, and a page for every screen.
 | [security-model.md](docs/security-model.md) | gateway, defense in depth, audit, threat model |
 | [data-model.md](docs/data-model.md) | entities, ER diagram, scope resolution, scoring |
 | [api.md](docs/api.md) | REST/SSE contracts |
-| [INSTALL.md](INSTALL.md) | Install, run in Compose or Kubernetes, hardening |
+| [INSTALL.md](INSTALL.md) | Install, run with Docker Compose, hardening |
 | [testing.md](docs/testing.md) | test concept, lab test loop, positive/negative/regression |
-| [roadmap.md](docs/roadmap.md) | maturity path + implementation status |
-| [legal.md](docs/legal.md) | ⚖ legal prerequisites |
+| [roadmap.md](docs/roadmap.md) | what is built, and what is next |
+| [legal.md](docs/legal.md) | legal prerequisites |
 
 ## Legal
 

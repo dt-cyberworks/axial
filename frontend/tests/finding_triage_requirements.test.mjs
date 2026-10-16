@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/finding-triage.md");
+const requirementDoc = readRecord("requirements", "finding-triage.md");
 // The findings list, the shared detail panel (triage), and the shared status helpers.
 const findingsSection = read("frontend/src/components/FindingsSection.tsx");
 const findingsLib = read("frontend/src/lib/findings.ts");
@@ -13,7 +14,7 @@ const findings = [findingsSection, read("frontend/src/components/FindingDetail.t
 const client = read("frontend/src/api/client.ts");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 const tests = [];

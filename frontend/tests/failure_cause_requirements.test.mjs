@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirements = read("docs/requirements/scan-pipeline.md");
+const requirements = readRecord("requirements", "scan-pipeline.md");
 const activity = read("frontend/src/lib/runActivity.ts");
 const planView = read("frontend/src/components/ScanPlanView.tsx");
 const report = read("control-plane/app/report_builder.py");
 
 // REQ-PIPE-021 (GitHub issue #49): a failed or safety-stopped run says why.
-assert.match(requirements, /## REQ-PIPE-021:/);
+record.match(requirements, /## REQ-PIPE-021:/);
 
 // The console explains the real reason instead of "Technical reason: Pipeline Error".
 assert.match(activity, /cancellation_status_unavailable:\s*\n?\s*"The control plane could not say whether the operator had cancelled/,

@@ -14,6 +14,19 @@ from app.planner import IndexInfo, Options, SurfaceInput, plan_surface, resolve_
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
+def _record(kind: str, name: str) -> str:
+    """Requirement and design records live only in the private repository (GitHub issue #56).
+    Private tree (CLAUDE.md exists): a missing record fails the test, so a deleted record
+    cannot pass silently. Public tree: the record is not published, so only the assertions
+    that compare the code with it are skipped."""
+    path = REPO / "docs" / kind / name
+    if path.is_file():
+        return path.read_text()
+    if (REPO / "CLAUDE.md").is_file():
+        raise AssertionError(f"the {kind} record {name} is missing from the private tree: a record cannot be deleted silently")
+    pytest.skip(f"the {kind} record {name} is not published in this tree")
+
+
 def _ids(checks, state="planned"):
     return [c.check_id for c in checks if c.state == state]
 
@@ -134,8 +147,8 @@ def test_req_pipe_016_the_fallback_list_is_the_documented_one():
 
 
 def test_req_pipe_016_code_and_design_document_agree():
-    design = (REPO / "docs" / "design" / "scan-pipeline-architecture.md").read_text()
-    requirement = (REPO / "docs" / "requirements" / "scan-pipeline.md").read_text()
+    design = _record("design", "scan-pipeline-architecture.md")
+    requirement = _record("requirements", "scan-pipeline.md")
     listed = ", ".join(planner.COMMON_PRODUCTS)
     flat = re.sub(r"\s+", " ", design)
     assert re.sub(r"\s+", " ", listed) in flat or all(p in flat for p in planner.COMMON_PRODUCTS)

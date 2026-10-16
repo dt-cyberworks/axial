@@ -1,8 +1,9 @@
 import type { ScanProfile } from "../api/client";
 
 // REQ-PIPE-005: how deep a scan goes. Standard picks its checks from what the
-// scan finds; thorough runs every template on every web service. Neither
-// widens scope, tool grants or the discovery switches.
+// scan finds; thorough runs every non-intrusive template that applies to a web
+// service, identified product or not (the index of REQ-PIPE-004; issue #66).
+// Neither widens scope, tool grants or the discovery switches.
 export const SCAN_DEPTHS: { value: ScanProfile; label: string; help: string }[] = [
   {
     value: "standard",
@@ -12,7 +13,7 @@ export const SCAN_DEPTHS: { value: ScanProfile; label: string; help: string }[] 
   {
     value: "thorough",
     label: "Thorough",
-    help: "Every template on every web service, whatever the scan identified, plus a deep sweep of about 30,000 likely paths per web service (roughly 25 minutes each). Much slower; use it when a complete sweep matters more than time.",
+    help: "Every non-intrusive template that applies to a web service, whether or not the scan identified its product, plus a deep sweep of about 30,000 likely paths per web service (roughly 25 minutes each). Much slower; use it when the widest coverage matters more than time.",
   },
 ];
 

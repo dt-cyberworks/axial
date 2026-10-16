@@ -8,16 +8,16 @@ from app.db.base import Base
 
 
 class AppSetting(Base):
-    """Betriebs-Einstellungen, die zur Laufzeit (auch ueber die GUI) aenderbar
-    sein muessen und NICHT je Deploy im Image festliegen sollen.
+    """Operating settings that must be changeable at runtime (also through the
+    GUI) and must NOT be fixed per deploy in the image.
 
-    Aktuell einziger Schluessel: 'llm_config' (OpenAI-kompatibler Vector-Agent-
-    Provider: base_url/model/api_key). Bewusst generisches Key-Value (JSONB),
-    damit weitere Betriebsschalter ohne Migration dazukommen koennen.
+    Currently the only key is 'llm_config' (OpenAI-compatible Vector Agent
+    provider: base_url/model/api_key). Deliberately a generic key-value store
+    (JSONB) so further switches can be added without a migration.
 
-    Sicherheitshinweis: der api_key liegt hier im Klartext (wie
-    scope_signing_secret im M1-Skeleton) - in Produktion gehoert er in
-    Vault/SOPS. GET-Endpunkte maskieren ihn (nur 'gesetzt: ja/nein')."""
+    Security note: the api_key is stored here in plaintext (like
+    scope_signing_secret in local development) - in production it belongs in
+    Vault/SOPS. GET endpoints mask it (only 'set: yes/no')."""
 
     __tablename__ = "app_setting"
 

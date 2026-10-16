@@ -321,6 +321,45 @@ def test_a_connect_tunnel_response_with_no_headers_of_its_own_passes_through():
     assert out == raw
 
 
+# REQ-EGRESS-005: the tunnel handshake now carries a `Proxy-Agent` header line (the exact bytes of
+# egress-proxy's CONNECT_ESTABLISHED). The first block is parsed like any other: its header line stays
+# readable, and the real response behind it is still scanned.
+
+HANDSHAKE_WITH_HEADER = "HTTP/1.1 200 Connection Established\r\nProxy-Agent: asm-egress-proxy\r\n\r\n"
+
+
+def test_negative_req_egress_005_a_handshake_header_does_not_hide_the_real_responses_session_cookie():
+    session = "9c1d0f3a5be44d7aa1c2e8f6b7d03512"
+    raw = (
+        HANDSHAKE_WITH_HEADER
+        + "HTTP/1.1 200 OK\r\nServer: nginx\r\n"
+        + f"Set-Cookie: PHPSESSID={session}; Path=/; HttpOnly\r\n"
+        + "\r\n<html>logged in</html>"
+    )
+    out = cr.redact_http_response(raw)
+    assert session not in out, f"SECRET LEAKED INTO AUDIT: {session}"
+    assert "HTTP/1.1 200 Connection Established" in out
+    assert "Proxy-Agent: asm-egress-proxy" in out
+    assert "Server: nginx" in out
+    assert out.count("Set-Cookie:") == 1
+    assert "<html>logged in</html>" in out
+
+
+def test_req_egress_005_a_handshake_with_a_header_and_a_clean_response_passes_through_unchanged():
+    raw = (HANDSHAKE_WITH_HEADER + "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n<h1>404</h1>")
+    assert cr.redact_http_response(raw) == raw.replace("\r\n", "\n")
+
+
+def test_negative_req_egress_005_truncation_inside_the_second_block_after_a_handshake_header_still_redacts():
+    full = HANDSHAKE_WITH_HEADER + "HTTP/1.1 200 OK\r\nSet-Cookie: PHPSESSID=deadbeefcafe1234abcdef; Path=/"
+    cut = full.index("PHPSESSID=") + 20
+    truncated = full[:cut]
+    assert "deadbeef" in truncated  # sanity: the fragment is there before redaction
+    out = cr.redact_http_response(truncated)
+    assert "deadbeef" not in out
+    assert "Proxy-Agent: asm-egress-proxy" in out
+
+
 def test_a_response_truncated_mid_header_inside_the_second_tunneled_block_still_redacts():
     """Truncation can land mid-header in the SECOND block too, after the
     first (tunnel handshake) block was already fully parsed."""

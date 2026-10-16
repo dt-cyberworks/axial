@@ -15,6 +15,12 @@ A scan runs on its own, with three exceptions. A call waits for you when:
 
 The run then shows `waiting_approval` and a popup appears **on whichever page you are on**, naming the engagement it belongs to. If you are not at the screen, the request simply waits.
 
+## When you are not there
+
+A test run can be started *semi-attended*: choose **Notify me when you need me** next to **Start run**. When the agent needs a decision the run is parked instead of waiting: it holds no worker slot, the request shows in the [inbox](../reference/inbox.md) and a "run needs you" alert goes to the engagement's webhook. You decide whenever you come back, within the approval timeout; the run then continues from where it stopped. A request that is decided *no*, or that nobody answers in time, is reported to the agent as not executed and the run carries on.
+
+A **monitoring** engagement has nobody to decide at all. It never asks: a call that would need approval is not made, and is kept in the inbox as a suggestion for you to test yourself.
+
 ## Read the popup
 
 ![The approval popup: what the request will do, why the agent wants it, and its risk](../img/approval-popup.png)

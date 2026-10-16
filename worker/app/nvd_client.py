@@ -92,8 +92,7 @@ def _product_matches(product_key: str, cpe_product: str | None) -> bool:
     anchors the first word; `php:php_fi` - "php" anchors the first word):
     an exact-match-only filter was already rejected for those on
     false-negative grounds (Apache's own CPE product is `http_server`, not
-    `apache`/`apache httpd`) - see docs/requirements/
-    live-vulnerability-correlation.md. This narrows recall further without
+    `apache`/`apache httpd`) - see REQ-CORR-001..008. This narrows recall further without
     reintroducing that regression."""
     if not cpe_product:
         return False

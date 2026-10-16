@@ -2,7 +2,10 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, LlmConfig, NvdConfig, ToolPolicyEntry } from "../api/client";
+import MailSettingsPanel from "../components/MailSettingsPanel";
+import MonitoringDefaultsPanel from "../components/MonitoringDefaultsPanel";
 import SubfinderKeys from "../components/SubfinderKeys";
+import ToolCallBudgetPanel from "../components/ToolCallBudgetPanel";
 
 const SOURCE_LABEL: Record<LlmConfig["source"], string> = {
   db: "configured in console",
@@ -343,6 +346,8 @@ export default function Settings() {
         {maxTokensMutation.isSuccess && <div className="success-block">Saved.</div>}
       </section>
 
+      <ToolCallBudgetPanel />
+
       <section className="form-panel settings-panel">
         <h2>Manual approval timeout (global default)</h2>
         <div className="warning-block">
@@ -366,6 +371,10 @@ export default function Settings() {
         {approvalTimeoutMutation.isError && <div className="error-block">Save failed: {(approvalTimeoutMutation.error as Error).message}</div>}
         {approvalTimeoutMutation.isSuccess && <div className="success-block">Saved.</div>}
       </section>
+
+      <MailSettingsPanel />
+
+      <MonitoringDefaultsPanel />
 
       <section className="form-panel settings-panel">
         <h2>Vector Agent instructions (global default)</h2>

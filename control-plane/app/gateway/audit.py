@@ -1,9 +1,8 @@
-"""Hash-verketteter, append-only Audit-Trail (Architektur Kap. 3.4).
+"""Hash-chained, append-only audit trail (Architecture Ch. 3.4).
 
-row_hash = sha256(prev_hash || canonical_json(row)) macht nachtraegliche
-Aenderungen erkennbar - der Nachweis gegenueber Kunde, Bug-Bounty-Betreiber
-und Berufshaftpflicht, dass jede Aktion im Scope lag und wann sie
-freigegeben wurde.
+row_hash = sha256(prev_hash || canonical_json(row)) makes after-the-fact
+changes detectable - the proof that every action stayed in scope and when it
+was authorized.
 """
 
 from __future__ import annotations

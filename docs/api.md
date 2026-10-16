@@ -52,7 +52,7 @@ caller may change it; the server enforces the rule either way).
 | `GET` | `/engagements/{id}/summary` | risk light, open-finding counts by severity, `counts_by_status` for all four statuses, top actions |
 | `POST` | `/engagements/{id}/report` | PDF export (async, returns `job_id`) |
 | `GET` | `/approvals?state=requested` | operator queue |
-| `POST` | `/approvals/{id}/approve` | authorizes exactly one tool call ⚖ |
+| `POST` | `/approvals/{id}/approve` | authorizes exactly one tool call |
 | `POST` | `/approvals/{id}/reject` | rejects an authorization |
 | `GET` | `/settings/llm` | Vector/Lens Agent LLM provider (OpenAI-compatible); `api_key` masked (`api_key_set`) |
 | `PUT` | `/settings/llm` | set the provider (`base_url`/`model`/`api_key`); an empty `api_key` keeps the stored one |
@@ -60,6 +60,28 @@ caller may change it; the server enforces the rule either way).
 | `PUT` | `/settings/nvd` | set the key; left empty keeps the stored one |
 | `GET` | `/settings/subfinder` | optional subfinder provider keys (REQ-COVER-001): per provider only `key_set`, never the key |
 | `PUT` | `/settings/subfinder` | set keys; provider names from an allowlist, key characters restricted, empty keeps the stored key |
+
+### Operating modes (REQ-MODE-001..019, REQ-MON-002)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/engagements` | body may carry `operating_mode` (`monitoring` \| `assessment`, default `assessment`); a monitoring engagement starts from the monitoring defaults and cannot have `asset_review_enabled` |
+| `POST` | `/engagements/{id}/scan` | optional body `{supervision, hosts, retest_finding_id, scan_profile}`; the run records `trigger`, `initiated_by`, `supervision`; `hosts` must be in scope (422 otherwise) |
+| `POST` | `/engagements/{id}/pause` · `resume` · `close` · `revoke` | lifecycle; owner or admin; pause and revoke stop the active run |
+| `GET`/`PUT` | `/engagements/{id}/schedule` | monitoring-only: the interval in days (`{"every_days": 1..90 \| null}`), the next run and why a due run waits; `PUT` is owner/admin, audited, 422 outside 1..90, 409 for an assessment (REQ-MON-001) |
+| `GET`/`PUT` | `/engagements/{id}/capabilities` | the capability view (over grants, tool overrides and switches) and its application; `PUT` is monitoring-only, one audit row, widening after activation needs `confirm_widening` and no active run |
+| `GET` | `/engagements/{id}/changes` · `/health` | the change feed (`run_id`, `kind`, `limit`, `offset`) and the monitor's health |
+| `GET`/`POST`/`DELETE` | `/engagements/{id}/notification-targets` | signed webhook targets; the secret is write-only (`has_secret`); a non-public https URL is refused |
+| `GET` | `/engagements/{id}/alerts` | delivery state of queued alerts |
+| `GET` | `/inbox` · `/inbox/count` | open items across the caller's engagements (admin: all): approvals, reviews, held hosts, suggestions, health items |
+| `POST` | `/inbox/{id}/acknowledge` · `/inbox/release-held?engagement_id=` | acknowledge (a held host is released); owner or admin |
+| `GET`/`PUT` | `/settings/tool-call-budget` | admin; the tool-call budget a new run starts with (`{"value": 20..5000}`, default 200; response also carries `min` and `max`); a run keeps the value it started with, and no per-engagement or per-request value exists (REQ-BUDGET-001) |
+| `GET`/`PUT` | `/settings/monitoring-defaults` | admin; what a new monitoring engagement starts with (copied at creation) |
+
+Internal (worker → control plane), additionally to the table below: `POST /internal/scan-runs/{id}/hold`
+(which discovered hosts are tested), `/internal/scan-runs/{id}/park` and `/internal/scan-runs/resume-parked`
+(semi-attended runs), `POST /internal/engagements/{id}/suggestions`, `POST /internal/approvals/{id}/withdraw`,
+`GET /internal/alerts/due`, `POST /internal/alerts/{id}/result`, `POST /internal/monitoring/housekeeping`, `POST /internal/monitoring/run-due-schedules` (one scheduler tick, REQ-MON-003).
 
 Every `/settings/*` endpoint — the two above and the scan policy, tool policy, agent prompt, agent budgets, and approval timeout — requires the `admin` role for reading and writing (REQ-IAM-013), because it affects every user's engagements. Per-engagement configuration (`/engagements/{id}/config`) stays with the engagement's owner.
 
@@ -79,10 +101,10 @@ the DB directly; it goes exclusively through these endpoints
 | `GET` | `/internal/llm-config` | the full LLM provider config incl. `api_key` (cluster-internal only) for the Vector Agent; the public Lens endpoint uses the same provider config server-side |
 | `POST` | `/internal/engagements/{id}/materialize-dns` | audited DNS resolution of the name scope to IPs (raw egress); deny takes precedence at the IP level |
 | `POST` | `/internal/engagements/{id}/rate-reservation` | the egress proxy reserves a bug-bounty `max_rps` slot before forwarding (limit taken from the program; REQ-RATE-005) |
-| `GET` | `/internal/engagements/{id}/raw-egress-policy` | the generated NetworkPolicy for nmap/raw-scan IP/CIDR egress (incl. materialized IPs) |
 | `POST` | `/internal/engagements/{id}/raw-egress-leases` | a short-lived signed nmap lease for `configured_tcp` or opt-in `targeted_udp`; the envelope comes only from engagement state |
 | `POST` | `/internal/engagements/{id}/scan-runs` | create a scan run |
 | `POST` | `/internal/scan-runs/{id}/claim` | a worker task takes ownership of a run and gets `attempt`, `phase`, `checkpoint`; 409 for finished runs or a live foreign attempt (REQ-RESUME-002) |
+| `GET` | `/internal/engagements/{id}/known-open-ports?ip=&scan_run_id=` | TCP ports that the newest three earlier runs found open on an address (the union), for the worker's comparison with a new port scan (REQ-PORTSCAN-004); read-only |
 | `GET` | `/internal/engagements/{id}/scan-settings` | scan depth and the parallel-check limit (2; a bug-bounty program's own concurrency cap can only lower it) |
 | `POST` | `/internal/scan-runs/{id}/plan` | store the plan's surfaces and their planned/skipped checks; idempotent (existing rows keep their state); stale `attempt` gets 409 |
 | `GET` | `/internal/scan-runs/{id}/plan` | the plan with fingerprints, for the worker's resume |

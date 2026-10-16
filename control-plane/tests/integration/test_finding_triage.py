@@ -1,4 +1,4 @@
-"""REQ-TRIAGE-001..004 (docs/requirements/finding-triage.md).
+"""REQ-TRIAGE-001..004.
 
 HTTP cases go through a TestClient because engagement ownership is enforced
 by a router-level dependency. Re-observation goes through the same internal

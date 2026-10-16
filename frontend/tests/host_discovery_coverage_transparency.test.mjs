@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/cidr-host-discovery.md");
+const requirementDoc = readRecord("requirements", "cidr-host-discovery.md");
 const wizard = read("frontend/src/pages/EngagementWizard.tsx");
 const edit = read("frontend/src/pages/EngagementEdit.tsx");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 function contains(source, pattern, message) {
@@ -23,8 +24,8 @@ function test(name, fn) { tests.push({ name, fn }); }
 
 test("REQ-CIDRDISC-002 (2026-08-12 amendment) documents the coverage caveat", () => {
   requirement("REQ-CIDRDISC-002");
-  contains(requirementDoc, "GitHub issue #36", "requirement doc must record the issue this amendment closes");
-  contains(requirementDoc, "80/443", "requirement doc must name the fixed discovery ports");
+  record.contains(requirementDoc, "GitHub issue #36", "requirement doc must record the issue this amendment closes");
+  record.contains(requirementDoc, "80/443", "requirement doc must name the fixed discovery ports");
 });
 
 test("the wizard's Scope step shows a coverage note when a cidr asset is present", () => {

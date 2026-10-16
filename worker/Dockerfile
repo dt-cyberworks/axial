@@ -37,11 +37,10 @@ USER worker
 
 # GitHub issue #29: --beat runs the periodic scheduler (app/tasks/reap.py)
 # embedded in this same process - fine at the current single-worker-replica
-# deployment scale (docs/deployment.md's M1-M3 maturity stages: one Docker
-# Compose host). Running MULTIPLE worker replicas with --beat would each run
+# deployment scale (one Docker Compose host, docs/deployment.md). Running MULTIPLE worker replicas with --beat would each run
 # their own scheduler and duplicate-dispatch every periodic task; a
 # dedicated `celery beat` process (or a scheduler with a distributed lock,
-# e.g. redbeat) is needed before that becomes true (M4+, per the same doc).
+# e.g. redbeat) is needed before that becomes true.
 #
 # --schedule points beat's persistence file at /tmp: WORKDIR (/app, the
 # default schedule location) is owned by root from the build stage, and this

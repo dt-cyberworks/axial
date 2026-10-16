@@ -8,7 +8,7 @@
 
 .PHONY: help env up down logs bootstrap-admin scope-check install-smoke \
         test test-unit test-integration frontend-build frontend-requirements \
-        requirements-check requirements-test traceability manual-check verify scan
+        script-test manual-check verify scan
 
 help:  ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -47,15 +47,9 @@ scope-check:  ## Prove the Scope Gateway denies out-of-scope targets and unsafe 
 install-smoke:  ## Follow the install guide end to end on a copy of the tree (STAGE=local|production|all); needs free ports; removes only its own containers
 	bash scripts/install_smoke.sh $(or $(STAGE),all)
 
-# --- Requirements as code / SDLC ---
-requirements-check:  ## Validate requirements, test cases, and the generated traceability matrix
-	python3 scripts/requirements_pipeline.py check
-
-requirements-test:  ## Unit tests for the requirements pipeline
+# --- Repository scripts ---
+script-test:  ## Tests for the repository scripts (install guide, user manual, edge, container hardening)
 	python3 -m pytest scripts/tests -q
-
-traceability:  ## Regenerate the requirements-to-tests matrix
-	python3 scripts/requirements_pipeline.py generate
 
 # --- User manual (REQ-MANUAL-001..006) ---
 manual-check:  ## Check docs/manual: links, anchors, UI labels, codes, images, no private data (standard library only)
@@ -83,7 +77,7 @@ frontend-build:  ## Build the operator console (typecheck + Vite)
 frontend-requirements:  ## Executable requirement tests for the operator console
 	cd frontend && npm run test:requirements
 
-verify: requirements-check manual-check requirements-test test frontend-requirements frontend-build  ## Full local SDLC verification (DB required)
+verify: manual-check script-test test frontend-requirements frontend-build  ## Full local verification (DB required)
 
 # Private-checkout-only targets (lab, UAT, reference scan, manual screenshots).
 -include Makefile.private

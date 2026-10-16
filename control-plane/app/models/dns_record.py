@@ -18,7 +18,7 @@ class DnsRecord(Base):
     gespeicherte CNAME-Ziel ist NIE ein scanbares Asset und wird NIE nach
     resolved_host materialisiert. Das Scope Gateway bleibt die einzige Instanz,
     die aktives Scannen freigibt. Siehe
-    docs/requirements/dns-cname-inventory-and-takeover.md (REQ-DNS-001..003)."""
+    REQ-DNS-001..003."""
 
     __tablename__ = "dns_record"
 

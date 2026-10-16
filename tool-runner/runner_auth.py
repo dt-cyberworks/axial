@@ -13,7 +13,7 @@ predicate can be unit-tested directly AND injected into the vendored
 ``hexstrike_server.py`` by ``patch_hexstrike.py`` without importing Flask.
 
 The check is intentionally minimal and fail-closed:
-  * ``/health`` is always allowed (the Compose/K8s liveness probe carries no
+  * ``/health`` is always allowed (the Compose healthcheck carries no
     secret and reveals nothing).
   * every other path requires a configured token AND a caller-supplied token
     that matches it in constant time.

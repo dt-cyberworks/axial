@@ -1,18 +1,17 @@
 """Phase 3 - Vulnerability Correlation (REQ-CORR-001..008).
 
-Live NVD/EPSS/CISA-KEV correlation for real (non-lab) engagements. Rechnerisch
-gegen Drittanbieter-Datenquellen - kein Ziel-Kontakt, daher kein Gateway-Call
-noetig (dieselbe Klasse wie discovery.py's passive OSINT-Quellen).
+Live NVD/EPSS/CISA-KEV correlation for real (non-lab) engagements. Computed
+against third-party data sources - no contact with the target, so no gateway
+call is needed (the same class as discovery.py's passive OSINT sources).
 
-Lab-Engagements bleiben unveraendert: `known_vulns.py` ist weiterhin direkt in
-fingerprint.py's `_nmap_scan` verdrahtet (REQ-CORR-006), damit `make lab-test`
-deterministisch und ohne Internetzugriff bleibt - diese Phase ueberspringt
-Lab-Ziele explizit statt sie ebenfalls gegen NVD zu pruefen.
+Lab engagements stay unchanged: `known_vulns.py` is still wired directly into
+fingerprint.py's `_nmap_scan` (REQ-CORR-006) so that the lab test loop stays
+deterministic and works without internet access - this phase explicitly skips
+lab targets instead of also checking them against NVD.
 
-`services`: die von fingerprint.run() aggregierte Liste - eine Mischung aus
-nmap-Eintraegen (`product`/`product_name`/`version`) und httpx-Eintraegen
-(`tech`: Liste von Strings), s. docs/design/live-vulnerability-correlation-
-architecture.md Abschnitt 0.2.
+`services`: the list aggregated by fingerprint.run() - a mix of nmap entries
+(`product`/`product_name`/`version`) and httpx entries (`tech`: list of
+strings), see REQ-CORR-007.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """Credential redaction for generated customer reports (REQ-REPORT-002).
 
 A report is the one artifact that deliberately LEAVES the platform: an
-operator sends the PDF to a customer, an insurer, or an auditor. Everything
+operator sends the PDF to a customer or an auditor. Everything
 rendered into it therefore gets a redaction pass, even though the report
 deliberately never dumps raw tool output (spec Kap. 6.2: raw requests and tool
 output stay in the evidence store, not the report text).

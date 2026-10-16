@@ -132,6 +132,9 @@ export default function RunDetail() {
           <p>
             Phase {run?.phase ?? "?"} · {fmtDuration(run?.started_at ?? null, run?.finished_at ?? null, now)} ·
             Tool budget {run ? `${run.budget_tool_calls_used}/${run.budget_tool_calls_max}` : "?"}
+            {run?.trigger ? ` · started ${run.trigger === "scheduled" ? "by schedule" : `by ${run.initiated_by ?? "a person"}`}` : ""}
+            {run?.supervision ? ` · ${run.supervision.replace("_", "-")}` : ""}
+            {run?.scope_hosts && run.scope_hosts.length > 0 ? ` · limited to ${run.scope_hosts.join(", ")}` : ""}
             {run?.state_reason ? ` · ${run.state_reason}` : ""}
           </p>
         </div>

@@ -78,7 +78,7 @@ def build_probe_packet(callback_url: str, gadget: str = "spring-fsxml-cve-2023-4
     # header's own trailing lone nibble is consistent with (it's the "0" that
     # starts a 4-nibble/2-byte length field, not a stray artifact) - live-
     # verified against this project's own confirmed-vulnerable benchmark
-    # target (docs/requirements/raw-protocol-testing.md, REQ-AGENT-027)
+    # target (REQ-AGENT-027)
     # rather than trusted from the reference text alone.
     length_prefix = struct.pack(">H", len(resource_bytes))
     return header + length_prefix + resource_bytes

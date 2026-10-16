@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/attack-surface-graph.md");
+const requirement = readRecord("requirements", "attack-surface-graph.md");
 const client = read("frontend/src/api/client.ts");
 const graph = read("frontend/src/components/SurfaceGraph.tsx");
 const detail = read("frontend/src/pages/EngagementDetail.tsx");
 
 // REQ-GRAPH-004/005 exist as requirements.
-assert.match(requirement, /## REQ-GRAPH-004:/);
-assert.match(requirement, /## REQ-GRAPH-005:/);
+record.match(requirement, /## REQ-GRAPH-004:/);
+record.match(requirement, /## REQ-GRAPH-005:/);
 
 // The client exposes the scoped, read-only graph endpoint and its types.
 assert.match(client, /surfaceGraph:\s*\(id: string\)/);

@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import dataclasses
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
 from app.nmap_parse import (
-    nmap_xml_target_count, parse_nmap_xml, parse_nmap_xml_live_hosts, parse_nmap_xml_port_states,
+    nmap_xml_state_counts, nmap_xml_target_count, parse_nmap_xml, parse_nmap_xml_live_hosts,
+    parse_nmap_xml_port_states,
 )
 from app.raw_egress_client import raw_egress_gateway
 from app.tool_runner_client import tool_runner
 
 SERVICE_BATCH_SIZE = 128
 MAX_VERSION_PORTS = 1024
+# GitHub issue #60: a port that earlier runs found open and this scan did not is probed once
+# more, slowly, before the scan is accepted. Bounded, and never faster than this many packets
+# per second (a handful of ports needs no more).
+MAX_REPROBE_PORTS = 64
+REPROBE_MAX_RATE = 100
+# Reasons a scan that ran to the end is still not a clean port scan (outcome `partial`).
+PROBES_DROPPED = "probes_dropped"
+PORTS_NO_LONGER_OPEN = "ports_no_longer_open"
 TARGETED_UDP_PORT_RANGE = "53,123,161,443,500,1900,4500,5060,5353"
 
 @dataclass(frozen=True)
@@ -36,6 +45,23 @@ class HostDiscoveryOutcome:
     live_hosts: list[str]
 
 _T = TypeVar("_T")
+
+def count_dropped_probes(stderr: str | None) -> int:
+    """GitHub issue #60: probes the local firewall refused to send. nmap logs each as
+    `sendto in send_ip_packet_sd: sendto(...) => Operation not permitted` and carries on as if it
+    had been sent; the host then looks silent. nmap stops printing after a few messages, so this
+    is a lower bound: zero means none were reported, any number above zero means the scan has
+    holes."""
+    return sum(1 for line in str(stderr or "").splitlines() if "Operation not permitted" in line)
+
+def _ports_in_range(ports: Iterable[int], port_range: str) -> list[int]:
+    """The given ports that lie inside an nmap `-p` style range ("1-65535" or "22,80-90")."""
+    spans: list[tuple[int, int]] = []
+    for part in str(port_range).split(","):
+        first, _, last = part.strip().partition("-")
+        if first.isdigit() and (not last or last.isdigit()):
+            spans.append((int(first), int(last or first)))
+    return sorted({port for port in ports if any(lo <= port <= hi for lo, hi in spans)})
 
 def _failed(reason: str, detail: str = "") -> dict:
     return {
@@ -112,8 +138,14 @@ def _with_active_lease(
 def execute_configured_tcp_scan(
     ip: str, lease_token: str, *, reservation_token: str, max_rate: int,
     port_range: str = "1-65535", scan_run_id: str | None = None,
+    expected_ports: Iterable[int] = (),
 ) -> RawNmapOutcome:
-    """Discover exactly the configured TCP range, then fingerprint open ports."""
+    """Discover exactly the configured TCP range, then fingerprint open ports.
+
+    `expected_ports` are ports earlier runs found open on this address. One that this scan did not
+    find is probed again, slowly, in the same lease (GitHub issue #60); if it is still absent, or if
+    the local firewall dropped probes, the scan is reported `partial` rather than clean.
+    """
     def operation() -> RawNmapOutcome:
         discovery = tool_runner.run(
             "nmap", ip, {
@@ -129,6 +161,11 @@ def execute_configured_tcp_scan(
             discovered = parse_nmap_xml(discovery.get("stdout", ""))
         except ValueError as exc:
             return RawNmapOutcome(result=_failed(str(exc)), services=[], port_range=port_range)
+        try:
+            state_counts = nmap_xml_state_counts(discovery.get("stdout", ""))
+        except ValueError:  # the document parsed above, so this is only defensive
+            state_counts = {}
+        dropped = count_dropped_probes(discovery.get("stderr"))
         open_ports = sorted({item["port"] for item in discovered if item.get("protocol") == "tcp"})
         fingerprinted: list[dict] = []
         warnings: list[str] = []
@@ -140,6 +177,7 @@ def execute_configured_tcp_scan(
                     "ports": ",".join(str(port) for port in batch), "max_rate": max_rate,
                 }, scan_run_id=scan_run_id,
             )
+            dropped += count_dropped_probes(service_result.get("stderr"))
             if not service_result.get("success"):
                 warnings.append(service_result.get("error_reason") or "service_detection_failed")
                 continue
@@ -149,14 +187,63 @@ def execute_configured_tcp_scan(
                 warnings.append(str(exc))
         if len(open_ports) > MAX_VERSION_PORTS:
             warnings.append(f"version_detection_capped:{MAX_VERSION_PORTS}/{len(open_ports)}")
+
+        # Ports that earlier runs found open and this scan did not: ask again, slowly.
+        missing = [
+            port for port in _ports_in_range(expected_ports, port_range) if port not in set(open_ports)
+        ][:MAX_REPROBE_PORTS]
+        reprobed: dict[str, str] = {}
+        reconfirmed: list[int] = []
+        if missing:
+            reprobe = tool_runner.run(
+                "nmap", ip, {
+                    "stage": "service", "flags": ["-sV"],
+                    "ports": ",".join(str(port) for port in missing),
+                    "max_rate": min(max_rate, REPROBE_MAX_RATE),
+                }, scan_run_id=scan_run_id,
+            )
+            if reprobe.get("success"):
+                try:
+                    rows = [r for r in parse_nmap_xml_port_states(reprobe.get("stdout", "")) if r["protocol"] == "tcp"]
+                    reprobed = {str(row["port"]): row["state"] for row in rows}
+                    reprobe_dropped = count_dropped_probes(reprobe.get("stderr"))
+                    dropped += reprobe_dropped
+                    found = [
+                        {key: value for key, value in row.items() if key != "state"}
+                        for row in rows if row["state"] == "open"
+                    ]
+                    fingerprinted.extend(found)
+                    reconfirmed = sorted(item["port"] for item in found)
+                except ValueError as exc:
+                    warnings.append(str(exc))
+            else:
+                warnings.append(reprobe.get("error_reason") or "reprobe_failed")
+        still_missing = [port for port in missing if port not in reconfirmed]
+
         services = _merge_services(discovered, fingerprinted)
+        partial: list[str] = []
+        if dropped:
+            partial.append(PROBES_DROPPED)
+            warnings.append(f"{PROBES_DROPPED}:{dropped}")
+        if still_missing:
+            partial.append(PORTS_NO_LONGER_OPEN)
+            warnings.append(f"{PORTS_NO_LONGER_OPEN}:{','.join(str(port) for port in still_missing)}")
+        if reconfirmed:
+            warnings.append(f"ports_reconfirmed:{','.join(str(port) for port in reconfirmed)}")
+        state_text = "tcp_states:" + ",".join(f"{key}={state_counts[key]}" for key in sorted(state_counts))
         result = dict(discovery)
         result["stderr"] = "\n".join(
-            part for part in [str(discovery.get("stderr") or ""), *warnings] if part
+            part for part in [state_text if state_counts else "", *warnings, str(discovery.get("stderr") or "")] if part
         )[:1000]
         result["warning_reason"] = ",".join(warnings)[:500] or None
-        result["outcome_summary"] = {"protocol": "tcp", "open": len(services)}
-        return RawNmapOutcome(result=result, services=services, port_range=port_range)
+        summary: dict = {"protocol": "tcp", "open": len(services), "states": state_counts, "dropped_probes": dropped}
+        if missing:
+            summary.update(expected_missing=missing, reprobed=reprobed, reconfirmed=reconfirmed)
+        if partial:
+            summary["partial_reasons"] = partial
+            result["outcome"] = "partial"
+        result["outcome_summary"] = summary
+        return RawNmapOutcome(result=result, services=services, port_range=port_range, state_counts=state_counts)
     return _with_active_lease(
         lease_token, reservation_token, operation,
         make_failed=lambda r: RawNmapOutcome(result=r, services=[]), scan_run_id=scan_run_id,

@@ -32,7 +32,7 @@ stateDiagram-v2
   draft --> active: Activate engagement
 ```
 
-Only an **active** engagement can scan, and only inside its test window. Outside the window every tool call is denied, so a scan is blocked before it starts. The statuses `awaiting_signature`, `paused`, `completed` and `revoked` are defined and respected where they matter (a `completed` or `revoked` engagement can no longer change its tool grants), but this version has no screen that sets them. Each engagement belongs to the operator who created it; see [Roles and ownership](#roles-and-ownership).
+Only an **active** engagement can scan, and only inside its test window. Outside the window every tool call is denied, so a scan is blocked before it starts. An active engagement can be **paused** (every call is denied until it is resumed), **closed** (a finished test; it cannot be resumed) or **revoked** (the kill switch; final). The status `awaiting_signature` is defined but no screen sets it. Each engagement belongs to the operator who created it; see [Roles and ownership](#roles-and-ownership).
 
 ## Scope
 
@@ -42,6 +42,22 @@ The scope is a list of rows, each of which *allows* or *denies* a target: a doma
 - **Nothing is allowed by default.** A target that no allow row matches is out of scope and receives nothing.
 
 An allow row for a domain also covers its subdomains. Each row can additionally carry a port range that narrows the engagement's overall port ceiling for that one target, never widens it. See [Define an engagement and its scope](guides/define-an-engagement.md).
+
+## Operating modes
+
+An engagement is used in one of two ways, chosen when it is created and fixed once it is active.
+
+| | Monitoring | Test (assessment) |
+|---|---|---|
+| For | Watching a scope again and again and saying what changed | A penetration test, a customer assessment, a bug-bounty hunt |
+| A run is started by | A person with **Run now** | A person with **Start run** |
+| A person is needed during a run | Never. Nothing pauses on a popup or a review | For the sensitive steps, as before |
+| What needs a decision is | Not done, and listed in the [inbox](reference/inbox.md) | Waited for, or parked until you decide |
+| What you get | A list of what changed, alerts, a run health | Findings with evidence and a report |
+
+A run also records how **supervised** it was. A monitoring run is always *unattended*. When you start a test you choose between *I will watch*, where a decision is waited for live as before, and *Notify me when you need me*, a *semi-attended* run: when its agent needs a decision the run is parked, holds no worker slot, tells you, and continues when you decide. See [Monitor an attack surface](guides/monitor-an-attack-surface.md).
+
+The mode never widens what the Scope Gateway allows. It selects defaults and decides how a decision that needs a person is handled.
 
 ## Scan run
 
@@ -56,7 +72,7 @@ One execution of the pipeline. An engagement can have many runs over time, and a
 | Score | Calculates a risk score and severity for each finding | no |
 | Report | Prepares the data for the PDF | no |
 
-A run can be stopped at any time. Its state is `running`, or `waiting_approval` while it waits for you, for example to approve a request, and it ends as `done`, `failed` or `aborted`.
+A run can be stopped at any time. Its state is `running`, or `waiting_approval` while it waits for you, for example to approve a request, and it ends as `done`, `failed` or `aborted`. The run's **health** says whether it can be trusted as a comparison: *ok*, *degraded* (a tool failed or a check was cut short) or *failed*.
 
 ## Scope Gateway
 
@@ -116,7 +132,7 @@ Most real applications keep their interesting functions behind a login, so a sca
 
 ## Audit log
 
-Every gateway decision, every network request, every state change and every agent event is written to an append-only log. Each row contains a hash of the previous row, so a change, a removal or a re-ordering afterwards is detectable. The log is the evidence for the customer, a bug-bounty operator or an insurer that every action was inside the scope and when it was approved. See [Audit](reference/audit.md).
+Every gateway decision, every network request, every state change and every agent event is written to an append-only log. Each row contains a hash of the previous row, so a change, a removal or a re-ordering afterwards is detectable. The log is the evidence that every action was inside the scope and when it was approved. See [Audit](reference/audit.md).
 
 ## Roles and ownership
 

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/axial-rebrand.md");
+const requirementDoc = readRecord("requirements", "axial-rebrand.md");
 const html = read("frontend/index.html");
 const app = read("frontend/src/App.tsx");
 const authLayout = read("frontend/src/components/AuthLayout.tsx");
@@ -13,7 +14,7 @@ const logo = read("frontend/src/components/Logo.tsx");
 const styles = read("frontend/src/styles.css");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 function contains(source, pattern, message) {

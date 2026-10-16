@@ -7,7 +7,7 @@ structured `ReportModel` rather than pre-formatted text:
   2. Risk overview          - counts by severity + NEW/RESOLVED/PERSIST diff
   3. Detailed findings      - per finding: what, where, proof, remediation
   4. Asset inventory        - discovered assets, services, shadow-IT hints
-  5. Methodology & scope    - ⚖ mandatory: scope, window, exclusions, authorization
+  5. Methodology & scope    - mandatory: scope, window, exclusions, authorization
 
 `app/pdf_report.py` (REQ-REPORT-005) turns this model into the styled PDF.
 Keeping the split means this module owns *what* the report says - the facts,
@@ -33,6 +33,7 @@ Everything rendered goes through report_redaction (REQ-REPORT-002).
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 from dataclasses import dataclass, field
 
@@ -113,6 +114,65 @@ COVERAGE_NOTE = (
     "The results of those checks are incomplete: a short list of findings for the affected "
     "services does NOT mean they are clean. See \"Coverage of this run\" in section 5."
 )
+
+# GitHub issue #60 (REQ-PORTSCAN-003): the run's port scan ran to the end but has holes. The run
+# records it as `coverage_partial:nmap=<n>`; the report must not read as a clean port scan.
+PORT_SCAN_NOTE = (
+    "The port scan of this run had gaps: probes were lost, or ports that earlier runs found open were "
+    "not found again. A port or service missing from this report does NOT mean it is closed."
+)
+
+
+# REQ-BUDGET-002: the run used up its tool-call budget. The worker records it as one item of the
+# `coverage_degraded:` list, `tool_call_budget=exhausted_<n>_denied`. It is a different thing from
+# a load-bearing tool failing, so it gets its own words and DEGRADED_WARNING does not apply to it.
+BUDGET_NOTE = (
+    "This run used up its tool-call budget before it finished its plan: {n} planned call(s) were "
+    "refused, so the checks behind them did not run. A short list of findings does NOT mean the "
+    "services those checks would have examined are clean. An administrator can raise the budget in "
+    "the operational settings; run the scan again afterwards."
+)
+_BUDGET_ITEM = re.compile(r"tool_call_budget=exhausted_(\d+)_denied")
+
+
+def _degraded_items(reason: str | None) -> list[str]:
+    items: list[str] = []
+    for part in str(reason or "").split(";"):
+        part = part.strip()
+        if part.startswith("coverage_degraded:"):
+            items.extend(i.strip() for i in part.removeprefix("coverage_degraded:").split(",") if i.strip())
+    return items
+
+
+def budget_denied_calls(reason: str | None) -> int:
+    """How many calls a run's `state_reason` says were refused for want of tool-call budget."""
+    total = 0
+    for item in _degraded_items(reason):
+        match = _BUDGET_ITEM.fullmatch(item)
+        if match:
+            total += int(match.group(1))
+    return total
+
+
+def _has_tool_degradation(reason: str | None) -> bool:
+    """A load-bearing tool never succeeded (the budget item alone does not count)."""
+    return any(_BUDGET_ITEM.fullmatch(item) is None for item in _degraded_items(reason))
+
+
+def _budget_note(report_run: ScanRun | None) -> str | None:
+    denied = budget_denied_calls(getattr(report_run, "state_reason", None))
+    return BUDGET_NOTE.format(n=denied) if denied else None
+
+
+def _port_scan_note(report_run: ScanRun | None) -> str | None:
+    for part in str(getattr(report_run, "state_reason", None) or "").split(";"):
+        part = part.strip()
+        if part.startswith("coverage_partial:") and any(
+            item.strip().startswith("nmap=") for item in part.removeprefix("coverage_partial:").split(",")
+        ):
+            return PORT_SCAN_NOTE
+    return None
+
 
 # How a skip reads to a customer. Anything not listed is shown as its plain words.
 _SKIP_TEXT = {
@@ -441,10 +501,10 @@ def _asset_inventory(db: Session, engagement_id: uuid.UUID) -> AssetInventory:
 def _methodology_and_scope(
     db: Session, eng: Engagement, runs: list[ScanRun], report_run: ScanRun | None,
 ) -> MethodologyScope:
-    """⚖ Mandatory section (Kap. 6.1/6.4): what was tested, when, what was
+    """Mandatory section (Kap. 6.1/6.4): what was tested, when, what was
     excluded, and under which authorization. This closes the loop with the
-    audit trail and is what proves to a customer and an insurer that only
-    authorized testing took place - it is never omitted, even when empty."""
+    audit trail and shows that only authorized testing took place - it is
+    never omitted, even when empty."""
     assets = list(db.scalars(
         select(ScopeAsset).where(ScopeAsset.engagement_id == eng.id).order_by(ScopeAsset.rule, ScopeAsset.value)
     ))
@@ -474,7 +534,7 @@ def _methodology_and_scope(
         for run in runs[:20]
     ]
 
-    degraded = any((r.state_reason or "").find("coverage_degraded:") >= 0 for r in runs)
+    degraded = any(_has_tool_degradation(r.state_reason) for r in runs)
 
     return MethodologyScope(
         engagement_label=f"{redact_prose(_fmt(eng.title))} ({eng.id})",
@@ -565,6 +625,12 @@ def build_report_model(db: Session, eng: Engagement, report_run: ScanRun | None)
     summary = _executive_summary(findings, counts, diff)
     if coverage is not None and (coverage.partial_total or coverage.failed_total):
         summary.coverage_note = COVERAGE_NOTE.format(partial=coverage.partial_total, failed=coverage.failed_total)
+    port_note = _port_scan_note(report_run)
+    if port_note:
+        summary.coverage_note = f"{summary.coverage_note} {port_note}" if summary.coverage_note else port_note
+    budget_note = _budget_note(report_run)
+    if budget_note:
+        summary.coverage_note = f"{summary.coverage_note} {budget_note}" if summary.coverage_note else budget_note
 
     generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     return ReportModel(
