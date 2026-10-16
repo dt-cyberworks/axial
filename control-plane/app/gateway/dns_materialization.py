@@ -1,20 +1,20 @@
-"""Auditierte DNS-Materialisierung von Namens-Scope zu IPs (raw egress fuer nmap).
+"""Audited DNS materialization of name scope into IPs (raw egress for nmap).
 
-Eine Kubernetes-NetworkPolicy kann nur IP/CIDR erlauben, keine Namen. Bevor ein
-nmap-/Raw-Scan-Job gegen namensbasierten Scope laufen darf, muessen die
-freigegebenen Namen deshalb zu IPs aufgeloest werden. Das ist ein
-sicherheitsrelevanter Schritt und passiert bewusst NUR in der control-plane
-(Trust-Anchor, einziger DB-Schreiber): Aufloesung, deny-Vorrang und Audit sind
-so atomar und nicht von einem weniger vertrauenswuerdigen Akteur beeinflussbar.
+A raw-egress grant (nftables lease) can only allow IP/CIDR, not names. Before
+an nmap/raw scan may run against name-based scope, the authorized names
+therefore have to be resolved to IPs. That is a security-relevant step and is
+deliberately done ONLY in the control plane (trust anchor, sole DB writer):
+resolution, deny precedence and audit are atomic and cannot be influenced by a
+less trusted actor.
 
-Aufgeloest werden:
-  - konkrete `domain`-allow-Assets mit active_allowed=true
-  - in-scope discovered_assets (von der Discovery-Phase; durch allow/wildcard
-    autorisiert, deny bereits auf Namensebene beruecksichtigt)
+What gets resolved:
+  - concrete `domain` allow assets with active_allowed=true
+  - in-scope discovered_assets (from the discovery phase; authorized by
+    allow/wildcard, deny already applied at name level)
 
-deny-Vorrang wird nach der Aufloesung zusaetzlich auf IP-Ebene angewandt: eine
-aufgeloeste Adresse, die unter eine deny-IP/CIDR-Regel faellt, wird verworfen
-(z. B. wenn ein erlaubter Name auf eine ausgenommene IP zeigt).
+Deny precedence is applied again at IP level after resolution: a resolved
+address that falls under a deny IP/CIDR rule is discarded (e.g. when an
+allowed name points at an excluded IP).
 """
 
 from __future__ import annotations
@@ -186,6 +186,6 @@ def materialize(db: Session, engagement_id: uuid.UUID, scan_run_id: uuid.UUID | 
 
 
 def materialized_ips(db: Session, engagement_id: uuid.UUID) -> list[dict]:
-    """Aktuelle Materialisierung (fuer den raw-egress-policy-Renderer)."""
+    """Current materialization (for the raw-egress allowlist, raw_egress_policy.py)."""
     rows = db.scalars(select(ResolvedHost).where(ResolvedHost.engagement_id == engagement_id)).all()
     return [{"hostname": r.hostname, "ip_address": r.ip_address} for r in rows]

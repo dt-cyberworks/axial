@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/engagement-creation-double-submit-guard.md");
+const requirement = readRecord("requirements", "engagement-creation-double-submit-guard.md");
 const wizard = read("frontend/src/pages/EngagementWizard.tsx");
 
-assert.match(requirement, /## REQ-ENGCREATE-001:/);
+record.match(requirement, /## REQ-ENGCREATE-001:/);
 
 // The button must be disabled for the whole in-flight duration, not only
 // while required fields are empty - found live 2026-08-09: two clicks
@@ -36,7 +37,7 @@ console.log("ok - REQ-ENGCREATE-001 engagement creation guards against duplicate
 
 // REQ-ENGCREATE-002 (GitHub issue #46): going back to step 1 and saving again
 // used to POST a second draft and orphan the first.
-assert.match(requirement, /## REQ-ENGCREATE-002:/);
+record.match(requirement, /## REQ-ENGCREATE-002:/);
 
 const createHandler = wizard.slice(
   wizard.indexOf("async function handleCreateEngagement()"),

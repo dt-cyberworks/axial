@@ -3,9 +3,9 @@
 **Who this is for:** operators and admins who want to know what a screen, a tab or a field does.
 **After this page you can:** find the page that describes any screen of the console, and know which address opens it.
 
-<!-- ui-labels: Overview | Findings | New engagement | Admin | Account | Log out | Manual | Page not found -->
+<!-- ui-labels: Overview | Findings | Inbox | New engagement | Admin | Account | Log out | Manual | Page not found -->
 
-The console has one navigation list: **Overview**, **Findings**, **New engagement**, **Admin** (admins only), **Account** and **Log out**. If the administrator built the console with the address of this manual, a **Manual** link also appears there; it opens the manual in a new tab, and without it there is no such link. On a phone or a narrow window the list folds into the menu button (☰) at the top right; it opens as a panel over the page and closes when you pick a page, press Escape or tap outside it. A popup that asks for approval appears on every page, not only on the run it belongs to.
+The console has one navigation list: **Overview**, **Findings**, **Inbox**, **New engagement**, **Admin** (admins only), **Account** and **Log out**. If the administrator built the console with the address of this manual, a **Manual** link also appears there; it opens the manual in a new tab, and without it there is no such link. On a phone or a narrow window the list folds into the menu button (☰) at the top right; it opens as a panel over the page and closes when you pick a page, press Escape or tap outside it. A popup that asks for approval appears on every page, not only on the run it belongs to.
 
 ## Screens
 
@@ -16,7 +16,8 @@ The console has one navigation list: **Overview**, **Findings**, **New engagemen
 | Sign-in | Email, password and a code from your authenticator app | [Account, sign-in and administration](account-and-admin.md) |
 | Overview | Every engagement with its status | [Overview and All findings](overview.md) |
 | All findings | Every finding from every engagement you can see | [Overview and All findings](overview.md) |
-| New engagement | The five-step wizard | [New engagement wizard](wizard.md) |
+| New engagement | The choice between monitoring and testing, then its wizard | [New engagement wizard](wizard.md) |
+| Inbox | Everything that needs a person, in one list | [Inbox](inbox.md) |
 | Engagement detail | The hub of one engagement: readiness, findings, assets, runs and reports | [Engagement](engagement.md) |
 | Edit engagement | Metadata, discovery extras, scan depth, tool grants and overrides, scope | [Engagement](engagement.md) |
 | Run detail | Everything about one run | [Run detail](run-detail.md) |
@@ -33,7 +34,9 @@ Every address the console answers, in one table. The parts written `:id` and `:r
 | `/login` | Sign-in | [Account, sign-in and administration](account-and-admin.md) |
 | `/` | Overview | [Overview and All findings](overview.md) |
 | `/findings` | All findings | [Overview and All findings](overview.md) |
-| `/new` | New engagement wizard. `/new?draft=<id>` resumes a draft | [New engagement wizard](wizard.md) |
+| `/new` | The choice between *Monitor an attack surface* and *Test a target*. `/new?mode=monitoring` and `/new?mode=assessment` open the two wizards; `/new?draft=<id>` resumes a draft | [New engagement wizard](wizard.md) |
+| `/inbox` | Inbox | [Inbox](inbox.md) |
+| `/forgot-password` and `/reset-password` | Ask for a password-reset link, and choose a new password with it. Reachable without signing in; only offered when e-mail is switched on | [Account, sign-in and administration](account-and-admin.md#forgot-password-forgot-password-reset-password) |
 | `/account` | Account | [Account, sign-in and administration](account-and-admin.md) |
 | `/admin` | Admin, with the tabs Operational settings, Users and Account audit | [Settings](settings.md) |
 | `/engagements/:id` | Engagement detail | [Engagement](engagement.md) |

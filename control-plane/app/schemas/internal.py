@@ -89,13 +89,6 @@ class ToolExecutionEventIn(BaseModel):
     response: str | None = Field(default=None, max_length=16384)
 
 
-class RawEgressPolicyOut(BaseModel):
-    policy: dict
-    ip_blocks: list[dict]
-    omitted_assets: list[dict]
-    warnings: list[str]
-
-
 class RawEgressLeaseIn(BaseModel):
     scan_run_id: uuid.UUID
     authorized_target: str = Field(min_length=1, max_length=255)
@@ -143,7 +136,9 @@ class MaterializeDnsOut(BaseModel):
 
 
 class ScanRunCreate(BaseModel):
-    budget_tool_calls_max: int = 200
+    # REQ-BUDGET-001: no budget field. The tool-call budget of a run is the global setting and
+    # nothing in a request can change it (an old caller that still sends one is ignored).
+    pass
 
 
 class ScanRunOut(BaseModel):
@@ -168,6 +163,13 @@ class ScanRunOut(BaseModel):
     current_started_at: datetime.datetime | None = None
     # REQ-PIPE-005: the scan depth this run was started with.
     scan_profile: str | None = None
+    # REQ-MODE-002/012: how the run started, how supervised it is, how it ended.
+    trigger: str = "manual"
+    initiated_by: str | None = None
+    supervision: str | None = None
+    health: str | None = None
+    scope_hosts: list[str] | None = None
+    retest_finding_id: uuid.UUID | None = None
 
 
 class ScanRunUpdate(BaseModel):
@@ -198,6 +200,13 @@ class ScanRunClaimOut(BaseModel):
     state: str
     cancel_requested: bool
     checkpoint: dict | None = None
+    # REQ-MODE-002/011/017: what the worker needs to know about this run.
+    supervision: str | None = None
+    scan_profile: str | None = None
+    trigger: str = "manual"
+    scope_hosts: list[str] | None = None
+    retest_finding_id: str | None = None
+    operating_mode: str = "assessment"
 
 
 class AgentStepIn(BaseModel):

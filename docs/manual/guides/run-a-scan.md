@@ -3,7 +3,7 @@
 **Who this is for:** operators running scans.
 **After this page you can:** start a run, tell what it is doing at any moment, deal with the two things that can pause it, stop it, and understand how it ended.
 
-<!-- ui-labels: Start run | Scan readiness | Progress | Plan | Diff | Vector Agent | Activity | Stop scan | Stop requested | Review discovered assets | Continue with selected | Approval required — state-changing request | A run is already active | Open active run → | reduced coverage | partial coverage -->
+<!-- ui-labels: Start run | Run now | Scan readiness | Progress | Plan | Diff | Vector Agent | Activity | Stop scan | Stop requested | Review discovered assets | Continue with selected | Approval required — state-changing request | A run is already active | Open active run → | reduced coverage | partial coverage -->
 
 ## Before you start
 
@@ -19,7 +19,7 @@ If one is missing, the panel says *This engagement cannot scan yet* and lists ea
 
 ## Start the run
 
-Choose **Start run**. Only one run per engagement can be active at a time: while one is going, the button reads **A run is already active** and a link, **Open active run →**, opens it. The run starts in the background and appears at the top of the runs table on the **Runs & reports** tab; click it to open the run.
+Choose **Start run** (for a monitoring engagement, **Run now**). On a test you can first choose how you will supervise it: *I will watch* or *Notify me when you need me*, see [Approve or deny a tool call](approve-or-deny-a-tool-call.md#when-you-are-not-there). Only one run per engagement can be active at a time: while one is going, the button reads **A run is already active** and a link, **Open active run →**, opens it. The run starts in the background and appears at the top of the runs table on the **Runs & reports** tab; click it to open the run.
 
 ## Watch it
 

@@ -1,14 +1,14 @@
-"""Minimaler Tool-Runner fuer den Lab-Testloop (M1-Live-Test).
+"""Minimal tool runner for the lab test loop.
 
-Ersetzt fuer diesen Live-Test bewusst die volle HexStrike/Kali-Integration
-(runner.Dockerfile, Roadmap M3) durch einen schlanken HTTP-Server mit genau
-den zwei Tools, die der Lab-Testloop braucht: nmap (Service-Scan) und ein
-einfacher HTTP-Security-Header-Check.
+For this live test it deliberately replaces the full HexStrike/Kali
+integration (runner.Dockerfile) with a slim HTTP server offering exactly the
+two tools the lab test loop needs: nmap (service scan) and a simple HTTP
+security-header check.
 
-Nur Gateway-freigegebene Calls erreichen diesen Server ueberhaupt (s.
-worker/app/tasks/fingerprint.py: erst client.authorize(), dann Dispatch).
-Trotzdem validiert der Server Eingaben eigenstaendig (Defense in Depth, kein
-Vertrauen in den Aufrufer) - dieselbe Haltung wie beim Egress-Proxy.
+Only gateway-approved calls reach this server at all (see
+worker/app/tasks/fingerprint.py: client.authorize() first, then dispatch).
+The server still validates its input on its own (defense in depth, no trust in
+the caller) - the same stance as the egress proxy.
 """
 
 from __future__ import annotations

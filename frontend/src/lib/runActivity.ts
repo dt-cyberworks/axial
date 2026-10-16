@@ -104,7 +104,7 @@ const REASON_COPY: Record<string, string> = {
   task_time_limit_exceeded: "The scan ran into the worker's task time limit and was stopped.",
   pipeline_error: "The scan stopped because of an internal error; this older run did not record which one.",
   deterministic_full_scan_only: "Full Nmap discovery is pipeline-owned and was not repeated by Vector Agent.",
-  raw_egress_unavailable: "The scope-restricted raw network path was unavailable.",
+  raw_egress_unavailable: "The raw network path (the lease gateway) was unavailable.",
   lease_issued: "A short-lived scope-bound network rule was issued for Nmap.",
   raw_egress_lease_denied: "The scope-bound raw network rule was not issued, so Nmap was not started.",
   raw_egress_queue_timeout: "The shared Nmap gateway queue did not become available within its bounded wait time.",
@@ -112,6 +112,8 @@ const REASON_COPY: Record<string, string> = {
   raw_egress_queue_or_dispatch_failed: "The shared Nmap gateway could not safely schedule or start this scan.",
   raw_egress_heartbeat_failed: "The active Nmap network lease lost its heartbeat and was closed.",
   raw_egress_reservation_release_failed: "The Nmap queue slot could not be confirmed as released.",
+  probes_dropped: "The scanner's own firewall refused to send some of nmap's probes, so ports that are open may have looked silent. Treat this port list as incomplete and scan again.",
+  ports_no_longer_open: "Ports that earlier runs found open were not found this time, even after a second, slower check. They may have been closed, or the target may be blocking the scanner. Check the target before relying on this list.",
   udp_results_ambiguous: "UDP returned only filtered or open-or-filtered states. This is inconclusive, not a clean target.",
   udp_no_port_states: "UDP returned no port states. This is incomplete, not a clean target.",
   udp_discovery_not_enabled: "Bounded UDP discovery is not enabled for this engagement.",
@@ -181,16 +183,25 @@ export function humanize(value: string | null | undefined): string {
 function compoundReasonExplanation(reason: string): string | null {
   if (reason.startsWith("coverage_degraded:")) {
     const detail = reason.slice("coverage_degraded:".length);
-    const tools = detail
-      .split(",")
+    const items = detail.split(",").map((part) => part.trim()).filter(Boolean);
+    // REQ-BUDGET-002: the run used up its tool-call budget; this is not a tool failing.
+    const budgetItem = items.find((part) => /^tool_call_budget=exhausted_\d+_denied/.test(part));
+    const denied = budgetItem ? Number(/exhausted_(\d+)_denied/.exec(budgetItem)?.[1] ?? 0) : 0;
+    const tools = items
+      .filter((part) => part !== budgetItem)
       .map((part) => part.split("=")[0])
       .filter(Boolean)
       .join(", ");
-    return (
-      `Reduced detection coverage: ${tools || "a core tool"} was attempted but never once succeeded ` +
-      `during this run, so this result is NOT a clean bill of health — parts of the attack surface ` +
-      `were never actually examined. Technical detail: ${detail}.`
-    );
+    const budgetText = budgetItem
+      ? `The run used up its tool-call budget: ${denied} planned call${denied === 1 ? " was" : "s were"} refused, ` +
+        `so the checks behind them did not run. A short findings list does NOT mean those services are clean. ` +
+        `An administrator can raise the budget in Admin → Operational settings. `
+      : "";
+    const toolText = tools
+      ? `Reduced detection coverage: ${tools} was attempted but never once succeeded during this run, ` +
+        `so this result is NOT a clean bill of health — parts of the attack surface were never actually examined. `
+      : "";
+    return `${budgetText}${toolText}Technical detail: ${detail}.`;
   }
   if (reason.startsWith("coverage_partial:")) {
     const detail = reason.slice("coverage_partial:".length);
@@ -418,10 +429,23 @@ function translateToolExecution(entry: RunLogEntry, phase: PhaseId): HumanActivi
   if (hasServiceCount) facts.push({ label: "Services found", value: String(services) });
   if (Object.keys(states).length) {
     facts.push({
-      label: "UDP states",
+      label: protocol === "UDP" ? "UDP states" : `${protocol || "Port"} states`,
       value: Object.entries(states).map(([state, count]) => `${state}: ${numberValue(count)}`).join(", "),
     });
   }
+  // GitHub issue #60: what the scan itself reported about its own completeness.
+  const dropped = numberValue(outcomeSummary.dropped_probes);
+  if (dropped) facts.push({ label: "Probes refused by the local firewall", value: `${dropped} or more` });
+  const reprobed = record(outcomeSummary.reprobed);
+  if (Object.keys(reprobed).length) {
+    facts.push({
+      label: "Checked again",
+      value: Object.entries(reprobed).map(([port, state]) => `${port}: ${text(state)}`).join(", "),
+    });
+  }
+  const partialReasons = Array.isArray(outcomeSummary.partial_reasons)
+    ? (outcomeSummary.partial_reasons as unknown[]).map((reason) => String(reason))
+    : [];
   if (exit) facts.push({ label: "Exit code", value: exit });
   // REQ-AUDIT-006/007: http_request's response IS the evidence (status,
   // headers, body) - full and worker-redacted, shown under Technical details.
@@ -452,6 +476,31 @@ function translateToolExecution(entry: RunLogEntry, phase: PhaseId): HumanActivi
       source: entry.actor,
       decision: entry.decision,
       ts: entry.ts,
+      countsAsAttention: true,
+    };
+  }
+
+  if (partialReasons.length) {
+    return {
+      id: activityKey(entry),
+      phase,
+      title: `${title}, but the result is incomplete`,
+      summary: [
+        `${resultParts.join(" ")}.`,
+        ...partialReasons.map((reason) => REASON_COPY[reason] ?? `Technical reason: ${humanize(reason)}.`),
+      ].join(" "),
+      outcome: "Partial",
+      tone: "attention",
+      routine: false,
+      tool: label,
+      target,
+      facts,
+      reasonCode: partialReasons[0],
+      errorSummary: text(payload.stderr_summary) || undefined,
+      source: entry.actor,
+      decision: entry.decision,
+      ts: entry.ts,
+      countsAsCompletedTool: true,
       countsAsAttention: true,
     };
   }

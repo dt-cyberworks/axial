@@ -26,9 +26,6 @@ def test_raw_egress_policy_uses_ip_blocks_and_deny_exceptions():
     )
 
     assert rendered.ip_blocks == [{"cidr": "203.0.113.0/24", "except": ["203.0.113.10/32"]}]
-    assert rendered.policy["spec"]["egress"] == [
-        {"to": [{"ipBlock": {"cidr": "203.0.113.0/24", "except": ["203.0.113.10/32"]}}]}
-    ]
 
 
 def test_raw_egress_policy_omits_names_until_ips_are_materialized():
@@ -36,9 +33,8 @@ def test_raw_egress_policy_omits_names_until_ips_are_materialized():
     rendered = build_raw_egress_policy(engagement_id, [_asset("allow", "domain", "example.com")])
 
     assert rendered.ip_blocks == []
-    assert rendered.policy["spec"]["egress"] == []
     assert rendered.omitted_assets[0]["reason"] == "raw_egress_requires_ip_or_cidr"
-    assert "no active IP/CIDR allow assets; rendered policy denies raw egress" in rendered.warnings
+    assert "no active IP/CIDR allow assets; the allowlist denies raw egress" in rendered.warnings
 
 
 def test_materialized_ips_become_allow_blocks():
@@ -49,10 +45,7 @@ def test_materialized_ips_become_allow_blocks():
         materialized_ips=[{"hostname": "example.org", "ip_address": "93.254.65.195"}],
     )
     # Der Name ist jetzt via /32-Block erlaubt, nicht mehr fail-closed.
-    assert {"cidr": "93.254.65.195/32"} in rendered.ip_blocks
-    assert rendered.policy["spec"]["egress"] == [
-        {"to": [{"ipBlock": {"cidr": "93.254.65.195/32"}}]}
-    ]
+    assert rendered.ip_blocks == [{"cidr": "93.254.65.195/32"}]
 
 
 def test_materialized_ip_under_deny_is_suppressed():

@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/tool-grants.md");
+const requirementDoc = readRecord("requirements", "tool-grants.md");
 const wizard = read("frontend/src/pages/EngagementWizard.tsx");
 const registry = read("control-plane/app/tools/registry.py");
 const gateway = read("control-plane/app/gateway/authorize.py");
 const audit = read("frontend/src/pages/Audit.tsx");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 function contains(source, pattern, message) {
   if (pattern instanceof RegExp) assert.match(source, pattern, message);

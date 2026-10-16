@@ -1,7 +1,7 @@
 """TC-MANUAL-006: the process names the manual and not the removed in-app page (REQ-MANUAL-006).
 
-Only files the public export keeps are asserted for sure; CLAUDE.md is private and is
-checked when present."""
+Only files the public export keeps are asserted for sure; CLAUDE.md and the Definition of Done
+(a private engineering record, GitHub issue #56) are private and are checked when present."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-PUBLIC = ["AGENTS.md", "docs/engineering/definition-of-done.md"]
+PUBLIC = ["AGENTS.md"]
+PRIVATE = ["definition-of-done.md"]  # a private engineering record since GitHub issue #56
 REMOVED_PAGE = re.compile(r"Documentation\.tsx|in-app docs? page|in-app documentation page", re.I)
 
 
@@ -24,6 +25,16 @@ def test_the_process_files_name_the_manual_and_its_check(rel):
     text = read(rel)
     assert "docs/manual/" in text, f"{rel} must send a user-visible change to the manual"
     assert "make manual-check" in text, f"{rel} must require `make manual-check`"
+
+
+@pytest.mark.parametrize("rel", PRIVATE)
+def test_the_private_process_files_name_the_manual_and_its_check_when_present(rel):
+    if not (ROOT / "CLAUDE.md").is_file():
+        pytest.skip("the private process records are not part of this tree")
+    text = (ROOT / "docs" / "engineering" / rel).read_text(encoding="utf-8")  # a missing file fails here, it is not a skip
+    assert "docs/manual/" in text, f"{rel} must send a user-visible change to the manual"
+    assert "make manual-check" in text, f"{rel} must require `make manual-check`"
+    assert not REMOVED_PAGE.search(text), f"{rel} still names the in-app documentation page"
 
 
 @pytest.mark.parametrize("rel", PUBLIC + ["Makefile", ".github/workflows/sdlc.yml"])

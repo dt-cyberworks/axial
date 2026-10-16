@@ -51,6 +51,15 @@ DEFAULT_APPROVAL_TIMEOUT_SECONDS = 900
 MIN_APPROVAL_TIMEOUT_SECONDS = 60
 MAX_APPROVAL_TIMEOUT_SECONDS = 86400
 
+# REQ-BUDGET-001: how many tool calls one scan run may make. A global guardrail, deliberately not
+# per engagement. 200 is what every run had before this was configurable, so an unconfigured
+# installation behaves exactly as before. The Scope Gateway reads the value from the run row it is
+# copied onto at the run's start (scan_lifecycle.start_scan_run).
+TOOL_CALL_BUDGET_KEY = "tool_call_budget"  # global: {value: int}
+DEFAULT_TOOL_CALL_BUDGET = 200
+MIN_TOOL_CALL_BUDGET = 20
+MAX_TOOL_CALL_BUDGET = 5000
+
 
 class SettingsCipherUnavailable(RuntimeError):
     """GitHub issue #25: raised - and deliberately never swallowed into an
@@ -285,6 +294,30 @@ def set_global_approval_timeout_seconds(db: Session, value: int) -> int:
         )
     _put_setting(db, APPROVAL_TIMEOUT_SECONDS_KEY, {"value": int(value)})
     return get_global_approval_timeout_seconds(db)
+
+
+def get_global_tool_call_budget(db: Session) -> int:
+    """REQ-BUDGET-001: the tool-call budget a new run starts with. Unset, unreadable or out of
+    range reads as the built-in default (200), never as an error: a damaged setting must not stop
+    scans from starting."""
+    row = db.get(AppSetting, TOOL_CALL_BUDGET_KEY)
+    if row and isinstance(row.value, dict):
+        try:
+            value = int(row.value.get("value"))
+        except (TypeError, ValueError):
+            return DEFAULT_TOOL_CALL_BUDGET
+        if MIN_TOOL_CALL_BUDGET <= value <= MAX_TOOL_CALL_BUDGET:
+            return value
+    return DEFAULT_TOOL_CALL_BUDGET
+
+
+def set_global_tool_call_budget(db: Session, value: int) -> int:
+    if isinstance(value, bool) or not MIN_TOOL_CALL_BUDGET <= value <= MAX_TOOL_CALL_BUDGET:
+        raise ValueError(
+            f"tool_call_budget must be between {MIN_TOOL_CALL_BUDGET} and {MAX_TOOL_CALL_BUDGET}"
+        )
+    _put_setting(db, TOOL_CALL_BUDGET_KEY, {"value": int(value)})
+    return get_global_tool_call_budget(db)
 
 
 def _read_stored_api_key(db: Session, row: AppSetting | None, stored: dict) -> tuple[str, bool]:

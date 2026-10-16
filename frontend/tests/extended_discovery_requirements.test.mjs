@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/extended-discovery.md");
+const requirementDoc = readRecord("requirements", "extended-discovery.md");
 const switches = read("frontend/src/components/DiscoverySwitches.tsx");
 const section = read("frontend/src/components/DiscoverySection.tsx");
 const keys = read("frontend/src/components/SubfinderKeys.tsx");
@@ -16,7 +17,7 @@ const settings = read("frontend/src/pages/Settings.tsx");
 const client = read("frontend/src/api/client.ts");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 const tests = [];

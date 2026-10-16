@@ -27,7 +27,7 @@ that stops working is found before you are.
 | Try the API and UI locally | [Local evaluation](#3-local-evaluation) |
 | Run authorized active scans from a workstation | Local evaluation, then [enable active scanning](#enable-active-scanning) |
 | Install a persistent internet-facing service | [Single-host production](#4-single-host-production) |
-| Isolate each customer in Kubernetes | [Kubernetes](#7-kubernetes) |
+| Keep several customers apart | [Several customers](#7-several-customers) |
 
 ## 2. Prepare the host
 
@@ -424,14 +424,12 @@ Confirm the stack started with `--profile runner`, then inspect
 `raw-egress-gateway`, `tool-runner`, `worker`, and `egress-proxy`. Never work
 around a failure by broadening networks, capabilities, or firewall rules.
 
-## 7. Kubernetes
+## 7. Several customers
 
-Kubernetes is the preferred direction when customer or bug-bounty deployments
-need stronger per-engagement isolation. [`deployment/k8s/`](deployment/k8s/)
-contains runner Job and NetworkPolicy building blocks, not a turnkey cluster
-installer. Complete cluster-specific ingress, secrets, storage, monitoring,
-backup, and policy integration before production use. See
-[docs/spec/deployment-architecture.md](docs/spec/deployment-architecture.md).
+Axial runs on Docker Compose and has no Kubernetes deployment. To keep customers
+apart, run one separate Compose stack per customer (its own host, or its own
+project name, ports and `.env` file, as in [single-host production](#4-single-host-production)),
+so that no database, object store or network is shared.
 
 ## 8. Security checklist
 

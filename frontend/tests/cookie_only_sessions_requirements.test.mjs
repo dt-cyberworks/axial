@@ -1,19 +1,22 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 // REQ-IAM-018 / REQ-IAM-019 (GitHub issue #41): the console never holds a
 // session credential and marks every request as its own.
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/cookie-only-sessions.md");
+const requirement = readRecord("requirements", "cookie-only-sessions.md");
 const client = read("frontend/src/api/client.ts");
 const login = read("frontend/src/pages/Login.tsx");
 const account = read("frontend/src/pages/Account.tsx");
 
-assert.match(requirement, /## REQ-IAM-018:/);
-assert.match(requirement, /## REQ-IAM-019:/);
+record.match(requirement, /## REQ-IAM-018:/);
+record.match(requirement, /## REQ-IAM-019:/);
+record.match(requirement, /## REQ-IAM-026:/);
+record.match(requirement, /## REQ-IAM-027:/);
 
 // No token handling left in the console.
 for (const [name, source] of [["client.ts", client], ["Login.tsx", login], ["Account.tsx", account]]) {
@@ -32,4 +35,12 @@ assert.match(client, /\.\.\.CONSOLE_HEADERS,\s+\.\.\.\(init\?\.headers/);
 assert.match(client, /headers: CONSOLE_HEADERS,\s+credentials: "include"/);
 assert.equal((client.match(/await fetch\(/g) ?? []).length, 2, "a new fetch() call must be reviewed for the CSRF header");
 assert.equal((client.match(/credentials: "include",/g) ?? []).length, 2);
+
+// REQ-IAM-026 (GitHub issue #57): the one refusal the console always avoids gets a plain sentence;
+// the request line stays in it, and no other 403 is reworded.
+assert.match(client, /const CSRF_REFUSAL = "missing anti-CSRF header"/);
+assert.match(client, /res\.status === 403 && detail === CSRF_REFUSAL/);
+assert.match(client, /STALE_CONSOLE_HINT\} \(\$\{summary\}\)/);
+assert.match(client, /Reload it without the cache \(Ctrl\+Shift\+R\)/);
+assert.equal((client.match(/CSRF_REFUSAL/g) ?? []).length, 2, "only the missing-header refusal is reworded");
 console.log("ok");

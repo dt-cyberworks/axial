@@ -49,10 +49,23 @@ RUNNER_API_TOKEN = os.environ.get("RUNNER_API_TOKEN", "")
 # Adresse aus Sicht des tool-runner (nicht des worker); im Lab-Netz nicht
 # gesetzt (dort erreichen die Tools die Ziele direkt, kein Proxy noetig).
 EGRESS_PROXY_URL = os.environ.get("EGRESS_PROXY_URL", "")
-# Raw sockets cannot traverse the HTTP proxy. This flag may be enabled only
-# when the deployment has installed the current per-engagement raw-egress
-# allowlist (Kubernetes NetworkPolicy). Compose sets it explicitly to disabled.
-RAW_NETWORK_MODE = os.environ.get("ASM_RAW_NETWORK_MODE", "disabled").lower()
+# Raw sockets cannot traverse the HTTP proxy. They run only through the Compose
+# lease gateway (nftables rules opened per signed lease), which this client asks
+# whether it is enforcing before every raw-network tool. Any other value,
+# including the removed mode "scope-restricted", is treated as
+# disabled: a mode this code cannot verify must never switch raw egress on.
+RAW_NETWORK_MODES = ("lease-gateway", "disabled")
+
+
+def _raw_network_mode(value: str | None) -> str:
+    mode = (value or "disabled").strip().lower()
+    if mode in RAW_NETWORK_MODES:
+        return mode
+    logger.warning("ASM_RAW_NETWORK_MODE=%r is not one of %s; raw-network tools stay disabled", value, RAW_NETWORK_MODES)
+    return "disabled"
+
+
+RAW_NETWORK_MODE = _raw_network_mode(os.environ.get("ASM_RAW_NETWORK_MODE"))
 CANCEL_POLL_SECONDS = max(0.1, min(float(os.environ.get("ASM_CANCEL_POLL_SECONDS", "1")), 5.0))
 CANCEL_TERMINATE_GRACE_SECONDS = max(1.0, min(
     float(os.environ.get("ASM_CANCEL_TERMINATE_GRACE_SECONDS", "8")), 30.0
@@ -215,6 +228,35 @@ def _bounty_ident_for(engagement_id: str) -> dict | None:
     return cached
 
 
+# GitHub issue #60 (REQ-PORTSCAN-001): the raw-egress gateway enforces a lease's packet rate with a
+# kernel token bucket that DROPS whatever exceeds it. nmap sends in bursts, so asking it for the
+# same rate as the lease loses some of its own probes: `sendto ... Operation not permitted`, a host
+# that looks silent, ports that are not found, and a scan that takes four to eight times as long
+# because nmap backs off. Two measures together (limiter 1000/s, 20,000 ports per scan):
+#   * nmap gets only half of the lease's rate (`--max-rate`); that alone still lost probes in one
+#     scan of three at 500, and in one of two at 600 and at 800;
+#   * `--scan-delay` spaces the probes evenly, which removes the bursts: 0 refused probes in
+#     9 of 9 scans, 42 s each.
+# The kernel limit itself is never loosened.
+NMAP_RATE_SHARE = 0.5
+
+
+def nmap_send_rate(lease_rate: int) -> int:
+    """The `--max-rate` nmap is started with for a lease of `lease_rate` packets per second:
+    always below the lease's own limit (except for a limit of 1, which cannot be split)."""
+    return max(1, min(int(lease_rate) - 1, int(int(lease_rate) * NMAP_RATE_SHARE)))
+
+
+def nmap_scan_delay_ms(send_rate: int) -> int:
+    """The `--scan-delay` that makes nmap's probes evenly spaced at no more than `send_rate` per second."""
+    return max(1, math.ceil(1000 / max(1, int(send_rate))))
+
+
+def _nmap_pacing(lease_rate: int) -> str:
+    rate = nmap_send_rate(lease_rate)
+    return f"--max-rate {rate} --scan-delay {nmap_scan_delay_ms(rate)}ms"
+
+
 # tool-Name -> (HexStrike-Endpunkt, Funktion die (target, args) -> Request-Body baut)
 def _nmap_body(target: str, args: dict) -> dict:
     stage = str(args.get("stage", ""))
@@ -225,6 +267,7 @@ def _nmap_body(target: str, args: dict) -> dict:
         raise ValueError("tool_runner_client: invalid nmap max_rate") from exc
     if not 1 <= max_rate <= 1000:
         raise ValueError("tool_runner_client: nmap max_rate outside the safe range")
+    pacing = _nmap_pacing(max_rate)
 
     if stage == "discovery":
         if args.get("flags") != ["-sS"] or not _NMAP_DISCOVERY_PORTS_RE.fullmatch(ports):
@@ -237,12 +280,12 @@ def _nmap_body(target: str, args: dict) -> dict:
         # eines ueberwiegend gefilterten Hosts braucht selbst bei 1000 pps ~200s;
         # bei 280s riss der Host-Timeout mittendrin ab -> nmap verwarf den Host und
         # meldete 0 offene Ports. 600s liegt sicher unter der Lease-TTL (900s).
-        extra = f"--privileged -T3 -Pn -n --max-rate {max_rate} --max-retries 2 --host-timeout 600s -oX -"
+        extra = f"--privileged -T3 -Pn -n {pacing} --max-retries 2 --host-timeout 600s -oX -"
     elif stage == "udp_discovery":
         if args.get("flags") != ["-sU"] or ports != _TARGETED_UDP_PORT_RANGE or max_rate > 100:
             raise ValueError("tool_runner_client: invalid nmap UDP discovery profile")
         scan_type = "-sU"
-        extra = f"--privileged -T3 -Pn -n --max-rate {max_rate} --max-retries 1 --host-timeout 180s -oX -"
+        extra = f"--privileged -T3 -Pn -n {pacing} --max-retries 1 --host-timeout 180s -oX -"
     elif stage == "host_discovery":
         # REQ-CIDRDISC-002: liveness-only sweep of a whole CIDR/IP scope
         # asset - no port scan, no -Pn (that would SKIP host discovery,
@@ -254,7 +297,7 @@ def _nmap_body(target: str, args: dict) -> dict:
         if args.get("flags") != ["-sn"] or ports:
             raise ValueError("tool_runner_client: invalid nmap host_discovery profile")
         scan_type = "-sn"
-        extra = f"--privileged -T3 -n -PS80,443 --max-rate {max_rate} --max-retries 1 --host-timeout 30s -oX -"
+        extra = f"--privileged -T3 -n -PS80,443 {pacing} --max-retries 1 --host-timeout 30s -oX -"
     elif stage in {"service", "udp_service"}:
         expected_flags = ["-sV"] if stage == "service" else ["-sU", "-sV"]
         if args.get("flags") != expected_flags or not _NMAP_SERVICE_PORTS_RE.fullmatch(ports):
@@ -266,7 +309,7 @@ def _nmap_body(target: str, args: dict) -> dict:
             raise ValueError("tool_runner_client: invalid nmap UDP service ports")
         scan_type = "-sV" if stage == "service" else "-sU -sV"
         retry_bound = 2 if stage == "service" else 1
-        extra = f"--version-light -T3 -Pn -n --max-rate {max_rate} --max-retries {retry_bound} --host-timeout 180s -oX -"
+        extra = f"--version-light -T3 -Pn -n {pacing} --max-retries {retry_bound} --host-timeout 180s -oX -"
     else:
         raise ValueError("tool_runner_client: nmap stage missing")
 
@@ -1166,8 +1209,6 @@ def _reached_own_deadline(tool: str, args: dict, duration_s) -> bool:
 class ToolRunnerClient:
     @staticmethod
     def raw_network_available() -> bool:
-        if RAW_NETWORK_MODE == "scope-restricted":
-            return True  # Kubernetes NetworkPolicy mode.
         if RAW_NETWORK_MODE != "lease-gateway":
             return False
         from app.raw_egress_client import raw_egress_gateway

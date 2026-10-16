@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/scan-run-workflow-and-transparency.md");
+const requirementDoc = readRecord("requirements", "scan-run-workflow-and-transparency.md");
 const runDetail = read("frontend/src/pages/RunDetail.tsx");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 function notContains(source, pattern, message) {

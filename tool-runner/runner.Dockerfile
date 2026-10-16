@@ -1,6 +1,6 @@
-# runner.Dockerfile — offensive Ausfuehrungsebene, isoliert (Deployment-
-# Architektur Kap. 3.2). Laeuft NIE als Dauerdienst, sondern ephemer pro
-# Auftrag (Kubernetes Job, s. deployment/k8s/job-tool-runner.yaml).
+# runner.Dockerfile — offensive execution plane, isolated (Deployment
+# Architecture Ch. 3.2). Runs as the `tool-runner` service in docker-compose.yml
+# (profile `runner`), without access to the control plane's network.
 #
 # Nur die Build-Zeit-Allowlist aus docs/spec/tool-allowlist.md
 # (Kap. 2) wird installiert - NICHT HexStrikes volles 150+-Tool-Arsenal.
@@ -181,8 +181,8 @@ RUN git clone https://github.com/drwetter/testssl.sh.git /opt/testssl \
   && cd /opt/testssl && git checkout --detach "${TESTSSL_SHA}" && cd / \
   && ln -sf /opt/testssl/testssl.sh /usr/local/bin/testssl
 
-# 4. Nicht-root Benutzer; Root-FS wird zur Laufzeit read-only (s. docker-
-#    compose.yml / deployment/k8s Job-Manifest: readOnlyRootFilesystem).
+# 4. Non-root user; the root FS becomes read-only at runtime (see
+#    docker-compose.yml: read_only).
 RUN useradd -r -u 10001 -s /usr/sbin/nologin runner
 
 # 5. Raw-Socket-Faehigkeit gezielt nur fuer nmap (statt root/CAP_ALL).

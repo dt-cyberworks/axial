@@ -9,7 +9,6 @@ All IDs are UUIDv7 (time-sortable).
 
 ```mermaid
 erDiagram
-    customer ||--o{ engagement : "commissions"
     engagement ||--o{ scope_asset : "defines scope"
     engagement ||--o{ tool_grant : "authorizes categories"
     engagement ||--o| bounty_program : "bug_bounty policy"
@@ -27,9 +26,8 @@ erDiagram
 
     engagement {
         uuid id PK
-        enum source "lab|own_domain|bug_bounty|customer"
+        enum source "lab|own_domain|bug_bounty"
         enum status "draft..active..revoked"
-        char scope_doc_sha256 "signature reference (customer)"
         uuid owner_user_id FK "app_user, NOT NULL: who may change it (REQ-IAM-021)"
         timestamptz authorized_from
         timestamptz authorized_until
@@ -42,7 +40,7 @@ erDiagram
         enum asset_type "domain|wildcard|ip|cidr|cloud_account"
         text value
         text path_pattern
-        bool active_allowed "⚖"
+        bool active_allowed "active testing allowed for this asset"
         bool authorization_verified "attested basis: ownership, contract, bounty program, or public invitation to test"
     }
     tool_grant {
@@ -85,7 +83,7 @@ advisory lock per (engagement, path). The rate limit counts these rows inside
 its window; the audit log stays the record of what happened, not the counter.
 Rows older than an hour are pruned (REQ-RATE-005, migration 0033).
 
-## The legal basis: `engagement.source`
+## The authorization record: `engagement.source`
 
 `source` deterministically drives the authorization source, the rules, and
 the report recipient:
@@ -95,7 +93,8 @@ the report recipient:
 | `lab` | isolated environment | no egress restriction needed; all tools free | internal/none |
 | `own_domain` | an authorization attestation per active asset (`scope_asset.authorization_verified`) — the basis can be ownership, a contract, or a public invitation to test | full active testing on authorized assets | internal |
 | `bug_bounty` | program policy (platform + program reference) | deny precedence, `max_rps`, AI/automation gate, optional ident header | bounty submission |
-| `customer` | signed engagement (`scope_doc_sha256`) | scope signature + approval workflow | customer PDF |
+
+> **Dormant schema.** The database still has a `customer` value in the `engagement_source` enum, a `customer` table and the columns `engagement.customer_id`, `scope_signed_by`, `scope_signed_at` and `scope_doc_sha256`. They are not part of any supported workflow: the console offers no way to choose that source, nothing creates a `customer` row, and no document describes it as a mode. The one place that still reads them is an old activation guard (an engagement created through a direct API call with `source=customer` cannot be activated without a recorded signature). Removing them would be a schema and authorization change of its own.
 
 ## Nmap scan envelope
 
@@ -208,7 +207,7 @@ Before a new run is created (and on operator `POST /scan`), the control plane
 hung worker from permanently blocking new scans, and — together with the
 self-healing raw-egress lease (dead-heartbeat reclamation + idempotent release in
 the gateway) — makes the single-slot raw Nmap lifecycle crash-consistent. See
-`docs/requirements/raw-egress-lease-stability.md` (REQ-RAWLEASE-001..003).
+REQ-RAWLEASE-001..003.
 
 ### Extended discovery (migration `0035`, REQ-COVER-003/006/007)
 
@@ -218,7 +217,7 @@ the gateway) — makes the single-slot raw Nmap lifecycle crash-consistent. See
 host, port, method, source, `param_names`, first seen), unique per engagement,
 method and URL. `web_screenshot` holds one PNG per URL (at most 2 MB, cap 200
 per engagement, SHA-256 recorded). Both tables are deleted with the engagement.
-Design: [`design/extended-discovery-architecture.md`](design/extended-discovery-architecture.md).
+Requirements: REQ-COVER-003/006/007.
 
 ### Scan plan (migrations `0036`, `0037`, REQ-PIPE-001/003/005/008)
 
@@ -240,4 +239,22 @@ the engagement:
   `outcome_summary`. Unique per run, surface and check. The row is the check-level
   checkpoint: a resumed run runs `planned` and `running` rows and never the finished ones.
 
-Design: [`design/scan-pipeline-architecture.md`](design/scan-pipeline-architecture.md).
+Requirements: REQ-PIPE-001..021.
+
+### Operating modes (migration `0039`, REQ-MODE-001..019)
+
+- `engagement.operating_mode` (`monitoring` | `assessment`; existing rows `assessment`), `new_asset_policy`
+  (`auto` | `hold`), `fragility_breaker`, `review_at`; `state_changing_requests` exists for the withheld
+  standing consent and is never read. `scan_profile` also accepts `passive` and `light`.
+- `scan_run.trigger` (`manual` | `scheduled`), `initiated_by`, `supervision` (`attended` | `semi_attended` |
+  `unattended`), `health` (`ok` | `degraded` | `failed`), `schedule_id`, `scope_hosts`, `retest_finding_id`.
+  A parked run keeps `state = waiting_approval` and has `checkpoint.parked` and `checkpoint.agent_resume`.
+- `discovered_asset.hold_state` (`held` | `released`), `held_at`, `released_at`, `released_by`.
+- `run_inventory_snapshot` (what one run saw: assets and services), `change_event` (the change feed),
+  `inbox_item` (what needs a person; one open item per `dedupe_key`), `notification_target` (webhooks,
+  secret encrypted), `alert_event` (delivery state and attempts), `engagement_consent` (append-only; for the
+  withheld consent), `engagement_schedule` (from 0039, unused: superseded by the interval below).
+- `engagement.schedule_every_days` (1..90, NULL = none; monitoring only), `schedule_set_at`, `schedule_anchor_at`
+  (the count starts here: latest of set, became active, last run start; next run = anchor + interval),
+  `schedule_skip_reason`, `schedule_skip_since` (migration 0041, REQ-MON-001/003).
+

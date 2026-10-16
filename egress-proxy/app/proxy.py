@@ -1,24 +1,23 @@
-"""Egress-Proxy: Netzwerk-Scope-Enforcement (Deployment-Architektur Kap. 6).
+"""Egress proxy: network-level scope enforcement (Deployment Architecture Ch. 6).
 
-Jeder ausgehende Scan-Request (vom tool-runner-Pod) laeuft ueber diesen
-Proxy. Er ist der einzige Weg nach draussen (NetworkPolicy, Deployment Kap.
-5.2) und prueft scope_asset ein zweites Mal, unabhaengig vom Scope Gateway
-in der control-plane.
+Every outbound scan request (from the tool-runner) goes through this proxy. It
+is the only way out (internal Docker network, Deployment Ch. 4) and checks
+scope_asset a second time, independently of the Scope Gateway in the control
+plane.
 
-Engagement-Zuordnung - zwei Modi:
-  (a) Per-Engagement-Proxy (ASM_ENGAGEMENT_ID gesetzt): der Proxy laeuft
-      scoped auf GENAU einen Auftrag. Entspricht dem ephemeren Modell der
-      K8s-Jobs (Deployment Kap. 5.1: ein Runner + Proxy pro engagement) und
-      ermoeglicht rohe HTTP-Tools (nikto, nuclei, httpx), die den Proxy
-      ueber -useproxy nutzen, ohne einen Custom-Header senden zu koennen.
-  (b) Multiplex-Proxy (kein ASM_ENGAGEMENT_ID): der Client (MCP-Runner) muss
-      pro Request 'X-ASM-Engagement-Id: <uuid>' senden. Ohne beides ->
-      407 (fail-closed).
+Engagement attribution - two modes:
+  (a) Per-engagement proxy (ASM_ENGAGEMENT_ID set): the proxy is scoped to
+      EXACTLY one engagement (one proxy per engagement) and makes raw HTTP
+      tools (nikto, nuclei, httpx) work that use the proxy via -useproxy
+      without being able to send a custom header.
+  (b) Multiplex proxy (no ASM_ENGAGEMENT_ID): the client (MCP runner) must send
+      'X-ASM-Engagement-Id: <uuid>' on every request. Without either -> 407
+      (fail-closed).
 
-Bei TLS-Tunneln (CONNECT) ist der Payload fuer den Proxy opak; die Pflicht-
-Ident-Header-Injektion fuer source='bug_bounty' (Kap. 3.5, Listing 6b) erfolgt
-daher auf Anwendungsebene im MCP-Runner, nicht hier. Fuer Klartext-HTTP
-injiziert dieser Proxy den Header selbst (s. _forward_plain_http).
+For TLS tunnels (CONNECT) the payload is opaque to the proxy; the mandatory
+ident-header injection for source='bug_bounty' (Ch. 3.5, Listing 6b) therefore
+happens at application level in the MCP runner, not here. For plain-text HTTP
+this proxy injects the header itself (see _forward_plain_http).
 """
 
 from __future__ import annotations
@@ -316,6 +315,14 @@ async def _submit_audit_or_deny(
 DENIAL_MARKER_HEADER = "X-ASM-Egress-Denied"
 
 
+# REQ-EGRESS-004/005: the reply to an allowed CONNECT. It carries one fixed header line. A reply
+# that is only a status line and a blank line leaves nuclei's raw HTTP client (every `unsafe: true`
+# template) waiting 60 s for more; it then sends nothing through the tunnel and gives up, so those
+# checks never reached a target. The value is the same for every target and names nothing of the
+# engagement, the target or the scope.
+CONNECT_ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: asm-egress-proxy\r\n\r\n"
+
+
 async def _deny(writer: asyncio.StreamWriter, code: int, reason: str) -> None:
     body = reason.encode()
     # Bound the header value: `reason` can carry an exception string
@@ -466,7 +473,7 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 except OSError as exc:
                     await _deny(writer, 502, f"connect_failed: {exc}")
                     return
-                writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                writer.write(CONNECT_ESTABLISHED)
                 await writer.drain()
                 await _relay(reader, writer, remote_reader, remote_writer)
             finally:
@@ -542,7 +549,7 @@ async def _forward_plain_http(
         # Mirrors the worker's own injection guard (tool_runner_client.py's
         # `if ident_name and ident_value:`).
         if prog and prog.get("ident_header_value"):
-            out_headers[prog["ident_header_name"].lower()] = prog["ident_header_value"]  # ⚖ Pflicht bei bug_bounty, falls konfiguriert
+            out_headers[prog["ident_header_name"].lower()] = prog["ident_header_value"]  # mandatory for bug_bounty, when configured
             if prog.get("ua_suffix") and "user-agent" in out_headers:
                 out_headers["user-agent"] = f"{out_headers['user-agent']} {prog['ua_suffix']}"
 

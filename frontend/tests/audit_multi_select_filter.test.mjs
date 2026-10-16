@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/audit-log-readability.md");
+const requirement = readRecord("requirements", "audit-log-readability.md");
 const client = read("frontend/src/api/client.ts");
 const audit = read("frontend/src/pages/Audit.tsx");
 const multiSelect = read("frontend/src/components/MultiSelectFilter.tsx");
 const streamApi = read("control-plane/app/api/stream.py");
 
-assert.match(requirement, /## REQ-AUDITUI-003:/);
+record.match(requirement, /## REQ-AUDITUI-003:/);
 
 // --- wire format: repeated params, matched with IN ---
 assert.match(client, /actor\?: string\[\];/, "AuditQuery.actor must be a list");

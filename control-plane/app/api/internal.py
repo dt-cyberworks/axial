@@ -1,14 +1,15 @@
-"""Interne Schnittstelle fuer den Worker (Deployment-Architektur Kap. 2:
-control-plane ist der einzige DB-Schreiber; worker fuehrt selbst nichts aus).
+"""Internal interface for the worker (Deployment Architecture Ch. 2: the
+control plane is the only DB writer; the worker executes nothing itself).
 
-Nicht oeffentlich exponieren - in Produktion nur aus dem Cluster-internen
-Netz erreichbar (kein Ingress), s. Deployment-Architektur Kap. 5.
+Never expose publicly - reachable only from the internal Docker networks (no
+ingress, the edge never routes /internal/*), see Deployment Architecture Ch. 4.
 """
 
 import base64
 import binascii
 import datetime
 import hashlib
+import ipaddress
 import threading
 import uuid
 from contextlib import contextmanager
@@ -17,17 +18,17 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app import auth_service, config_resolver, report_service
+from app import auth_service, config_resolver, monitoring, report_service
 from app.db.base import get_db
 from app.gateway.audit import append_audit_log, append_audit_logs
 from app.gateway.authorize import ToolCall, _matching_rules, authorize
 from app.gateway.dns_materialization import materialize
 from app.gateway import rate_reservation
-from app.gateway.raw_egress_policy import render_for_engagement
 from app.gateway.raw_egress_lease import _effective_port_ranges_for_target, issue_raw_egress_lease
 from app.graph.builder import materialize_graph, read_graph
 from app.settings_store import get_llm_config, get_nvd_config, get_subfinder_keys
@@ -43,6 +44,7 @@ from app.models.openwire_callback import OpenwireCallbackToken
 from app.models.scan_plan import ScanCheck, ScanSurface
 from app.models.scan_run import AgentStep, ScanRun
 from app import scan_plan
+from app.scan_lifecycle import park_run, resume_decided_parked_runs
 from app.scan_lifecycle import (
     ScanRunAlreadyActive, ScanRunNotClaimable, claim_scan_run, reap_all_stale_runs, reap_stale_runs, start_scan_run,
 )
@@ -75,7 +77,6 @@ from app.schemas.internal import (
     ProxyAuditEventIn,
     RawEgressLeaseIn,
     RawEgressLeaseOut,
-    RawEgressPolicyOut,
     ScanCheckUpdate,
     ScanPlanIn,
     ScanRunCreate,
@@ -544,28 +545,6 @@ def reserve_proxy_rate_slot(engagement_id: uuid.UUID, db: Session = Depends(get_
             "retry_after_seconds": slot.retry_after_seconds}
 
 
-@router.get("/engagements/{engagement_id}/raw-egress-policy", response_model=RawEgressPolicyOut)
-def raw_egress_policy(engagement_id: uuid.UUID, namespace: str | None = None, db: Session = Depends(get_db)):
-    """Render the nmap/raw-scan NetworkPolicy for this engagement.
-
-    HTTP-aware tools continue to use the egress-proxy. nmap cannot be safely
-    forced through that HTTP proxy, so production runners need a separate
-    L3/L4 allowlist generated from active IP/CIDR scope. Domain/wildcard
-    assets are omitted until an audited DNS-resolution step materializes IPs.
-    """
-    try:
-        rendered = render_for_engagement(db, engagement_id, namespace=namespace)
-    except ValueError as exc:
-        status_code = 404 if str(exc) == "engagement_not_found" else 409
-        raise HTTPException(status_code, str(exc)) from exc
-    return RawEgressPolicyOut(
-        policy=rendered.policy,
-        ip_blocks=rendered.ip_blocks,
-        omitted_assets=rendered.omitted_assets,
-        warnings=rendered.warnings,
-    )
-
-
 @router.post("/engagements/{engagement_id}/materialize-dns", response_model=MaterializeDnsOut)
 def materialize_dns(
     engagement_id: uuid.UUID, scan_run_id: uuid.UUID | None = Query(default=None),
@@ -602,7 +581,7 @@ def create_scan_run(engagement_id: uuid.UUID, body: ScanRunCreate, db: Session =
     unique index is the actual invariant, not this endpoint's own check)."""
     reap_stale_runs(db, engagement_id)
     try:
-        return start_scan_run(db, engagement_id, budget_tool_calls_max=body.budget_tool_calls_max)
+        return start_scan_run(db, engagement_id)  # the budget is the global setting (REQ-BUDGET-001)
     except ScanRunAlreadyActive:
         raise HTTPException(409, "engagement already has an active scan_run") from None
 
@@ -704,13 +683,55 @@ def claim_scan_run_endpoint(scan_run_id: uuid.UUID, body: ScanRunClaimIn, db: Se
         )
     except ScanRunNotClaimable as exc:
         raise HTTPException(409, f"not claimable: {exc.reason}") from None
+    eng = db.get(Engagement, run.engagement_id)
     return ScanRunClaimOut(
         attempt=run.attempt, phase=run.phase, state=run.state,
         cancel_requested=bool(run.cancel_requested), checkpoint=run.checkpoint,
+        supervision=run.supervision, scan_profile=run.scan_profile, trigger=run.trigger or "manual",
+        scope_hosts=list(run.scope_hosts) if run.scope_hosts else None,
+        retest_finding_id=str(run.retest_finding_id) if run.retest_finding_id else None,
+        operating_mode=eng.operating_mode if eng is not None else "assessment",
     )
 
 
 _HEARTBEAT_REFRESH_SECONDS = 15
+
+
+class ParkIn(BaseModel):
+    approval_id: str
+    resume_state: dict
+    attempt: int | None = None
+
+
+@router.post("/scan-runs/{scan_run_id}/park")
+def park_scan_run(scan_run_id: uuid.UUID, body: ParkIn, db: Session = Depends(get_db)):
+    """REQ-MODE-016: a semi-attended run hands itself back while it waits for a decision."""
+    run = db.scalar(select(ScanRun).where(ScanRun.id == scan_run_id).with_for_update())
+    if run is None:
+        raise HTTPException(404, "scan_run not found")
+    _fence(run, body.attempt)
+    if run.state not in ("running", "waiting_approval") or run.cancel_requested:
+        raise HTTPException(409, f"scan_run is '{run.state}' and cannot be parked")
+    ap = db.get(ApprovalRequest, uuid.UUID(body.approval_id))
+    if ap is None or ap.engagement_id != run.engagement_id:
+        raise HTTPException(404, "approval not found for this run")
+    park_run(db, run, approval_id=body.approval_id, resume_state=body.resume_state)
+    db.commit()
+    eng = db.get(Engagement, run.engagement_id)
+    call = ap.tool_call or {}
+    if eng is not None:
+        monitoring.notify_run_needs_you(db, eng, run, ap, f"{call.get('tool', 'A call')} on {call.get('target', '?')}")
+    append_audit_log(
+        db, engagement_id=run.engagement_id, actor="worker", action="scan_run_parked", decision=None,
+        reason="awaiting_operator_approval", payload={"scan_run_id": str(run.id), "approval_id": body.approval_id},
+    )
+    return {"scan_run_id": str(run.id), "state": run.state}
+
+
+@router.post("/scan-runs/resume-parked")
+def internal_resume_parked(db: Session = Depends(get_db)):
+    """Periodic sweep: resume parked runs whose approval was decided or expired."""
+    return {"resumed": resume_decided_parked_runs(db)}
 
 
 @router.get("/scan-runs/{scan_run_id}/cancel-requested")
@@ -811,6 +832,10 @@ def update_scan_run(scan_run_id: uuid.UUID, body: ScanRunUpdate, db: Session = D
             db, engagement_id=run.engagement_id, actor="worker", action="scan_run_transition",
             decision=None, reason=None, payload={"scan_run_id": str(run.id), "phase": run.phase, "state": run.state},
         )
+    if body.state in ("done", "failed", "aborted"):
+        # REQ-MODE-012/013: health, snapshot, change feed, inbox, alerts. Never raises.
+        monitoring.on_run_finished(db, run)
+        db.refresh(run)
     return run
 
 
@@ -893,6 +918,48 @@ def list_discovered_assets(engagement_id: uuid.UUID, in_scope: bool | None = Non
     return [{"id": a.id, "value": a.value, "in_scope": a.in_scope} for a in db.scalars(stmt)]
 
 
+# GitHub issue #60 (REQ-PORTSCAN-004): how many earlier runs count as "ports known to be open".
+KNOWN_PORT_RUNS = 3
+
+
+@router.get("/engagements/{engagement_id}/known-open-ports")
+def known_open_ports(
+    engagement_id: uuid.UUID, ip: Annotated[str, Query(max_length=45)], scan_run_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """TCP ports that earlier runs of this engagement found open on `ip`: the union of
+    the newest KNOWN_PORT_RUNS runs before `scan_run_id` that have a surface on that
+    address. The worker compares a port scan against this list: a port that was open
+    in every recent run and is absent now is re-probed and reported, never silently
+    dropped. Read-only; it decides nothing about scope or authorization."""
+    try:
+        address = str(ipaddress.ip_address(ip))
+    except ValueError as exc:
+        raise HTTPException(422, "ip must be an IP address") from exc
+    current = db.get(ScanRun, scan_run_id)
+    if current is None or current.engagement_id != engagement_id:
+        raise HTTPException(404, "scan_run not found")
+    started = current.started_at
+    stmt = (
+        select(ScanSurface.scan_run_id)
+        .join(ScanRun, ScanRun.id == ScanSurface.scan_run_id)
+        .where(
+            ScanSurface.engagement_id == engagement_id, ScanSurface.ip == address,
+            ScanSurface.scan_run_id != scan_run_id,
+        )
+        .group_by(ScanSurface.scan_run_id, ScanRun.started_at)
+        .order_by(ScanRun.started_at.desc())
+        .limit(KNOWN_PORT_RUNS)
+    )
+    if started is not None:
+        stmt = stmt.where(ScanRun.started_at < started)
+    run_ids = list(db.scalars(stmt))
+    ports = sorted(set(db.scalars(
+        select(ScanSurface.port).where(ScanSurface.scan_run_id.in_(run_ids), ScanSurface.ip == address)
+    ))) if run_ids else []
+    return {"ip": address, "ports": ports, "runs": [str(run_id) for run_id in run_ids]}
+
+
 @router.get("/engagements/{engagement_id}/discovery-options")
 def discovery_options(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     """REQ-COVER-007: the per-engagement switches, for the worker to decide
@@ -914,7 +981,7 @@ MAX_PARALLEL_CHECKS = 2
 
 
 @router.get("/engagements/{engagement_id}/scan-settings")
-def scan_settings(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
+def scan_settings(engagement_id: uuid.UUID, scan_run_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
     """REQ-PIPE-005/015: how deep this engagement's scans go, how many checks
     may run at once and which tools the campaign has switched off. A bug-bounty program's own concurrency cap can only lower
     the number (the stricter limit wins); the egress proxy enforces it on the
@@ -930,7 +997,14 @@ def scan_settings(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     # can say so up front. The gateway still decides every call: this is only
     # what the plan shows, never what is allowed.
     disabled = sorted(c.tool for c in config_resolver.effective_tool_policy(db, engagement_id) if not c.enabled)
-    return {"scan_profile": eng.scan_profile or "standard", "max_parallel_checks": parallel, "disabled_tools": disabled}
+    # REQ-MODE-011: the depth the RUN started with (a schedule tier may differ from
+    # the engagement's default); the engagement's value when no run is named.
+    profile = eng.scan_profile or "standard"
+    if scan_run_id is not None:
+        run = db.get(ScanRun, scan_run_id)
+        if run is not None and run.engagement_id == engagement_id and run.scan_profile:
+            profile = run.scan_profile
+    return {"scan_profile": profile, "max_parallel_checks": parallel, "disabled_tools": disabled}
 
 
 def _run_for_plan(db: Session, scan_run_id: uuid.UUID, attempt: int | None, *, lock: bool = False) -> ScanRun:

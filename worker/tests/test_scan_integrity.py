@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from app import tool_runner_client
+from app import raw_egress_client, tool_runner_client
 from app.known_vulns import KnownVuln
 from app.tasks import fingerprint, pipeline
 
@@ -29,9 +29,42 @@ def test_compose_mode_marks_nmap_unavailable_without_dispatch(monkeypatch):
     assert calls == []
 
 
+# REQ-SCAN-007 (GitHub issue #51): only the Compose lease gateway can enable raw-network tools.
+# The removed mode, and anything else this code cannot verify, means disabled.
+
+def test_negative_scope_restricted_is_no_longer_a_mode_and_means_disabled(monkeypatch):
+    monkeypatch.setattr(tool_runner_client, "RAW_NETWORK_MODE", tool_runner_client._raw_network_mode("scope-restricted"))
+    monkeypatch.setattr(raw_egress_client.raw_egress_gateway, "available", lambda: True)  # even a healthy gateway
+    assert tool_runner_client.RAW_NETWORK_MODE == "disabled"
+    assert tool_runner_client.ToolRunnerClient.raw_network_available() is False
+
+
+def test_negative_unknown_and_empty_modes_mean_disabled(caplog):
+    for value in ("scope-restricted", "enabled", "true", "lease_gateway", "cluster", "lease-gateway;"):
+        assert tool_runner_client._raw_network_mode(value) == "disabled", value
+    assert tool_runner_client._raw_network_mode(None) == "disabled"
+    assert tool_runner_client._raw_network_mode("") == "disabled"
+    assert "scope-restricted" in caplog.text  # a typo is visible, not silent
+
+
+def test_the_two_valid_modes_are_accepted_case_insensitively():
+    assert tool_runner_client.RAW_NETWORK_MODES == ("lease-gateway", "disabled")
+    assert tool_runner_client._raw_network_mode(" Lease-Gateway ") == "lease-gateway"
+    assert tool_runner_client._raw_network_mode("DISABLED") == "disabled"
+
+
+def test_lease_gateway_mode_follows_the_gateways_own_enforcement_answer(monkeypatch):
+    monkeypatch.setattr(tool_runner_client, "RAW_NETWORK_MODE", "lease-gateway")
+    monkeypatch.setattr(raw_egress_client.raw_egress_gateway, "available", lambda: True)
+    assert tool_runner_client.ToolRunnerClient.raw_network_available() is True
+    monkeypatch.setattr(raw_egress_client.raw_egress_gateway, "available", lambda: False)
+    assert tool_runner_client.ToolRunnerClient.raw_network_available() is False
+
+
 def test_nmap_zero_target_is_failure_even_with_exit_zero(monkeypatch):
     runner = tool_runner_client.ToolRunnerClient("http://runner")
-    monkeypatch.setattr(tool_runner_client, "RAW_NETWORK_MODE", "scope-restricted")
+    monkeypatch.setattr(tool_runner_client, "RAW_NETWORK_MODE", "lease-gateway")
+    monkeypatch.setattr(raw_egress_client.raw_egress_gateway, "available", lambda: True)
     monkeypatch.setattr(
         runner._client,
         "post",
@@ -51,7 +84,8 @@ def test_nmap_zero_target_is_failure_even_with_exit_zero(monkeypatch):
 
 def test_nmap_zero_target_without_dns_error_is_failure_even_with_exit_zero(monkeypatch):
     runner = tool_runner_client.ToolRunnerClient("http://runner")
-    monkeypatch.setattr(tool_runner_client, "RAW_NETWORK_MODE", "scope-restricted")
+    monkeypatch.setattr(tool_runner_client, "RAW_NETWORK_MODE", "lease-gateway")
+    monkeypatch.setattr(raw_egress_client.raw_egress_gateway, "available", lambda: True)
     monkeypatch.setattr(
         runner._client,
         "post",
@@ -92,7 +126,7 @@ def test_fingerprint_nmap_dispatches_materialized_ip_and_records_outcome(monkeyp
     monkeypatch.setattr(
         fingerprint,
         "execute_configured_tcp_scan",
-        lambda ip, token, reservation_token, max_rate, port_range, scan_run_id: (
+        lambda ip, token, reservation_token, max_rate, port_range, scan_run_id, expected_ports=(): (
             seen.update(
                 ip=ip, token=token, reservation_token=reservation_token,
                 max_rate=max_rate, port_range=port_range, scan_run_id=scan_run_id,
@@ -152,7 +186,7 @@ def test_known_vuln_finding_from_nmap_is_attributed_to_nmap(monkeypatch):
     )
     monkeypatch.setattr(
         fingerprint, "execute_configured_tcp_scan",
-        lambda ip, token, reservation_token, max_rate, port_range, scan_run_id: SimpleNamespace(
+        lambda ip, token, reservation_token, max_rate, port_range, scan_run_id, expected_ports=(): SimpleNamespace(
             result={"success": True, "exit_code": 0, "stderr": "", "error_reason": None, "stdout": "<nmaprun/>"},
             services=[{"port": 21, "protocol": "tcp", "service_name": "ftp", "product": "vsftpd 2.3.4"}],
             port_range="443-8443",
@@ -197,7 +231,7 @@ def test_known_vuln_lookup_skipped_for_non_lab_target(monkeypatch):
     )
     monkeypatch.setattr(
         fingerprint, "execute_configured_tcp_scan",
-        lambda ip, token, reservation_token, max_rate, port_range, scan_run_id: SimpleNamespace(
+        lambda ip, token, reservation_token, max_rate, port_range, scan_run_id, expected_ports=(): SimpleNamespace(
             result={"success": True, "exit_code": 0, "stderr": "", "error_reason": None, "stdout": "<nmaprun/>"},
             services=[{"port": 21, "protocol": "tcp", "service_name": "ftp", "product": "vsftpd 2.3.4"}],
             port_range="443-8443",
@@ -338,7 +372,8 @@ def test_host_discovery_body_is_sn_only_no_pn_no_ports(monkeypatch):
     assert body["ports"] == ""
     assert "-Pn" not in body["additional_args"]
     assert "-PS80,443" in body["additional_args"]
-    assert "--max-rate 500" in body["additional_args"]
+    assert "--max-rate 250" in body["additional_args"]  # half the lease rate (REQ-PORTSCAN-001)
+    assert "--scan-delay 4ms" in body["additional_args"]  # evenly spaced probes (REQ-PORTSCAN-001)
 
     import pytest
     with pytest.raises(ValueError):

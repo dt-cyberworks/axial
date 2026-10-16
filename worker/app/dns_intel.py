@@ -1,9 +1,9 @@
-"""Passive DNS-Intelligenz fuer die Discovery-Phase (REQ-DNS-001..003).
+"""Passive DNS intelligence for the discovery phase (REQ-DNS-001..003).
 
-Loest die CNAME-Kette eines in-scope FQDN auf, klassifiziert den Hosting-Provider
-und erkennt Dangling-DNS (Subdomain-Takeover) - AUSSCHLIESSLICH auf DNS-Ebene.
+Resolves the CNAME chain of an in-scope FQDN, classifies the hosting provider
+and detects dangling DNS (subdomain takeover) - at DNS level ONLY.
 
-Sicherheits-/Scope-Prinzip (siehe docs/requirements/dns-cname-inventory-and-takeover.md):
+Security/scope principle (see REQ-DNS-001..003):
   - Der FQDN ist das Asset. Das CNAME-Ziel (elb.amazonaws.com, okta.com, ...) ist
     NUR Metadatum - es wird nie zu einem scanbaren Asset und nie materialisiert.
   - Dangling-Erkennung macht KEINE HTTP-Anfrage an das Drittziel (das waere ein

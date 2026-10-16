@@ -36,7 +36,7 @@ def test_dedicated_tool_endpoints_require_matching_token():
 
 
 def test_health_is_always_open():
-    # The Compose/K8s liveness probe carries no secret and reveals nothing.
+    # The Compose healthcheck carries no secret and reveals nothing.
     assert is_authorized("/health", None, TOKEN) is True
     assert is_authorized("/health", None, None) is True
 

@@ -1,17 +1,15 @@
 # Tool Allowlist
 
-Which tools HexStrike gets. The binding positive list for the runner image &
+Which tools HexStrike gets. The authoritative positive list for the runner image &
 `tool_grant` mapping.
 
 Build-time allowlist · runtime grants · argument hardening
 
-Version 1.0 · Companion document to Architecture v2.1 & Deployment v1.0
-
 > [!NOTE]
 > **Core statement.** By default, HexStrike loads its full arsenal of 150+
 > Kali tools — including password crackers, exploit generators, and
-> credential harvesting. For a managed ASM service that is far too large an
-> attack surface and liability. This document binds what tools get
+> credential harvesting. That is far too large an
+> attack surface. This document fixes what tools get
 > installed at all (build time) and how they map onto the `tool_grant`
 > categories (runtime). A tool that isn't installed can't be misused.
 
@@ -26,7 +24,7 @@ other.
 | Runtime grant | per engagement | `tool_grant` + gateway + HexStrike `--profile` | Subset: what runs on this engagement |
 
 > [!IMPORTANT]
-> **⚖ LEGAL / SECURITY — build time is the hardest boundary.** A tool that
+> **Build time is the hardest boundary.** A tool that
 > isn't installed in the runner image can't be invoked by HexStrike or the
 > LLM — regardless of any prompt or bug. That's why the image deliberately
 > contains ONLY the allowlisted tools, not HexStrike's full arsenal.
@@ -63,7 +61,7 @@ for external assessments.
 | `wafw00f` | WAF detection | active (light) |
 
 > [!IMPORTANT]
-> **⚖ LEGAL / SECURITY — nmap: hardened arguments only.** nmap is permitted,
+> **Nmap: hardened arguments only.** nmap is permitted,
 > but the gateway enforces safe flags: only `-sV`/`-sS` on the ports allowed
 > by the grant, NO exploit NSE scripts (`--script=exploit*` is blocked), no
 > aggressive full-range UDP scan. Details in Ch. 4.
@@ -77,7 +75,7 @@ for external assessments.
 | (in-house checks) | headers, `.git`/`.env` exposure, takeover | active |
 
 > [!IMPORTANT]
-> **⚖ LEGAL / SECURITY — nuclei: safe templates only.** Nuclei ships 4,000+
+> **Nuclei: safe templates only.** Nuclei ships 4,000+
 > templates, including intrusive and DoS ones. Only templates tagged `safe`,
 > or without `intrusive`/`dos`, are permitted. The gateway filters the
 > template selection; everything else is blocked.
@@ -86,10 +84,10 @@ for external assessments.
 
 | Tool | Purpose | Mode |
 |---|---|---|
-| (in-house default-credential check; retired, REQ-COVER-005: not enabled) | known default logins only, max. 3 attempts | active ⚖ |
+| (in-house default-credential check; retired, REQ-COVER-005: not enabled) | known default logins only, max. 3 attempts | active |
 
 > [!IMPORTANT]
-> **⚖ LEGAL / SECURITY — no brute force, no general-purpose crackers.**
+> **No brute force, no general-purpose crackers.**
 > hydra/medusa/patator are deliberately NOT installed. The only permitted
 > credential test is a narrowly scoped check for vendor-known default
 > logins — and only with `tool_grant` (`cred`, active), `active_allowed=true`,
@@ -112,8 +110,8 @@ installed:
 > **✕ EXCLUDED — the principle.** If a tool's primary purpose is to break
 > into a system, harvest credentials, or execute payloads, it does NOT
 > belong in a managed ASM service. Such capabilities would at most be part
-> of a separate offering — contractually and insurance-wise scoped on its
-> own — not the scanner's core product.
+> of a separate offering — scoped on its own — not the scanner's core
+> product.
 
 ## 4. Mapping: allowlist → HexStrike profile → `tool_grant`
 
@@ -144,7 +142,7 @@ def hexstrike_profile(engagement):
 > else is locked. Even if an unintended tool were somehow present in the
 > image, the gateway would still reject the call (`tool_not_whitelisted`).
 
-### 4.1 Argument hardening (repeated from the Architecture doc, binding)
+### 4.1 Argument hardening (repeated from the Architecture doc, enforced by the gateway)
 
 | Tool | Enforced | Blocked |
 |---|---|---|
@@ -166,14 +164,12 @@ RUN set -e; for bad in hydra john hashcat medusa metasploit responder \
 ```
 
 > [!IMPORTANT]
-> **⚖ LEGAL / SECURITY — the allowlist is a versioned artifact.** This list
+> **The allowlist is a versioned artifact.** This list
 > is version-controlled (Git) and is part of the release process for a new
 > runner image. Every addition of an active/offensive tool is a deliberate
-> decision requiring renewed legal/insurance review — never an incidental
+> decision that needs maintainer review — never an incidental
 > `apt install`.
 
 ---
 
-**Note:** Technical specification, not legal advice. Operating offensive
-tools is subject to computer-misuse and related law in your jurisdiction and
-should be secured with qualified legal counsel.
+This is a technical document, not legal advice. Only test systems you are authorized to test; see `docs/legal.md`.

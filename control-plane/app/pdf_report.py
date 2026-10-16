@@ -541,7 +541,7 @@ def _coverage_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]) -
     coverage = model.coverage
     if coverage is None or not coverage.rows:
         return []
-    depth = "thorough (every template on every web service)" if coverage.scan_depth == "thorough" else \
+    depth = "thorough (all non-intrusive web templates on every web service)" if coverage.scan_depth == "thorough" else \
         "standard (checks chosen from what the scan found)"
     flowables: list = [
         Spacer(1, 8), Paragraph("Coverage of this run", styles["H2"]),

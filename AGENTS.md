@@ -2,11 +2,11 @@
 
 ## Mandatory engineering lifecycle
 
-All non-trivial changes must follow [`docs/engineering/sdlc.md`](docs/engineering/sdlc.md).
-Before editing, classify the change, locate or create its `REQ-*` record, and
-identify the applicable `TC-*` records and verification gates. Work is not
-complete until the applicable [`Definition of Done`](docs/engineering/definition-of-done.md)
-is satisfied and `make requirements-check` passes.
+All non-trivial changes follow the same order: describe the behaviour change,
+classify its risk (`R0`-`R4`, defined in [CONTRIBUTING.md](CONTRIBUTING.md#risk-classes)),
+add tests that verify it directly, and run the public gates (`make verify`)
+before it is considered done. A change to user-visible behaviour also updates the
+matching page of the user manual.
 
 Security-sensitive `R3`/`R4` changes require negative tests and human security
 review. Automated agents cannot approve their own SDLC exceptions or weaken a
@@ -35,7 +35,6 @@ The Scope Gateway in `control-plane/app/gateway/authorize.py` is the core safety
 - `lab/`: isolated vulnerable targets and end-to-end test loop. The negative out-of-scope test is a hard safety gate.
 - `docs/`: developer-facing architecture, security, API, deployment, data model, testing, legal, and roadmap docs.
 - `docs/spec/`: the original product specification (business, legal, and architecture requirements), translated from the former Word documents.
-- `deployment/k8s/`: Kubernetes job and NetworkPolicy manifests for later maturity stages.
 
 ## Non-Negotiable Invariants
 
@@ -50,7 +49,7 @@ The Scope Gateway in `control-plane/app/gateway/authorize.py` is the core safety
 - Raw Nmap in Compose may run only through `raw-egress-gateway`: bounded FIFO reservation, signed current lease, audited materialized IP, exact configured TCP or fixed opt-in UDP ports, deny-all baseline, one active lease, heartbeat-bound kernel expiry, and immediate cleanup. Never set general runner Internet egress or move NET_ADMIN into the runner.
 - Preserve the append-only audit hash-chain behavior in `control-plane/app/gateway/audit.py`.
 - Do not introduce destructive exploitation, credential attacks, mass scanning, or out-of-scope network behavior. The current allowlist intentionally excludes dangerous tools.
-  - **Documented exception (R4, security-engineering):** the Vector Agent may *propose* state-changing HTTP requests (`http_request` with POST/PUT/DELETE/PATCH or a body). These never run autonomously — the Scope Gateway routes them to mandatory, per-command human approval with an LLM-assessed risk statement (the compensating control). Reads stay autonomous; scope/deny/window/egress isolation are unchanged. See `docs/requirements/manual-approval-and-full-http.md`.
+  - **Documented exception (R4, security-engineering):** the Vector Agent may *propose* state-changing HTTP requests (`http_request` with POST/PUT/DELETE/PATCH or a body). These never run autonomously — the Scope Gateway routes them to mandatory, per-command human approval with an LLM-assessed risk statement (the compensating control). Reads stay autonomous; scope/deny/window/egress isolation are unchanged. See REQ-HTTP-002/003 and REQ-APPROVAL-001..006.
 - Lab targets must remain isolated. Never expose Metasploitable2, DVWA, Juice Shop, or similar vulnerable targets on host/public ports.
 
 ## Implementation Notes
@@ -60,7 +59,8 @@ The Scope Gateway in `control-plane/app/gateway/authorize.py` is the core safety
 - Migrations are SQL files in `control-plane/migrations/`. Keep models, schemas, and migrations aligned when changing persistence.
 - API contracts are described in `docs/api.md`; update docs when changing external behavior.
 - The scan state machine lives in `worker/app/tasks/pipeline.py`: `discovery -> fingerprint -> correlate -> agent -> score -> report`.
-- The fingerprint phase (`worker/app/tasks/fingerprint.py`) is discover -> plan -> execute (REQ-PIPE, `docs/design/scan-pipeline-architecture.md`): open ports become surfaces (`surfaces.py`, `tech_profile.py`), the pure planner (`planner.py`) turns them into a stored plan of `scan_check` rows, and `scan_executor.py` runs it (two checks at a time, resumable per check). nuclei templates are selected from an index baked into the tool-runner image (`tool-runner/nuclei_index.py`), never by path; every check is still one gateway-authorized call. The `thorough` profile adds an `ffuf:deep` check (`raft-medium-dirs`, budget sized to the list by `tool_runner_client.ffuf_budget_s`, REQ-PIPE-017); the agent context lists the run's finished checks (`scan_plan.agent_check_summary`) and an agent ffuf stopped by its 240 s limit is reported PARTIAL, never as "no hits" (REQ-PIPE-018).
+- The fingerprint phase (`worker/app/tasks/fingerprint.py`) is discover -> plan -> execute (REQ-PIPE): open ports become surfaces (`surfaces.py`, `tech_profile.py`), the pure planner (`planner.py`) turns them into a stored plan of `scan_check` rows, and `scan_executor.py` runs it (two checks at a time, resumable per check). nuclei templates are selected from an index baked into the tool-runner image (`tool-runner/nuclei_index.py`), never by path; every check is still one gateway-authorized call. The `thorough` profile adds an `ffuf:deep` check (`raft-medium-dirs`, budget sized to the list by `tool_runner_client.ffuf_budget_s`, REQ-PIPE-017); the agent context lists the run's finished checks (`scan_plan.agent_check_summary`) and an agent ffuf stopped by its 240 s limit is reported PARTIAL, never as "no hits" (REQ-PIPE-018).
+- Operating modes: an engagement is `monitoring` (unattended; nothing waits for a person, a call that needs a decision is withdrawn and kept as an inbox suggestion) or `assessment` (attended or semi-attended; a semi-attended run parks on a decision and resumes). Every run starts through `control-plane/app/operating_modes.py::begin_scan`; the capabilities of a monitoring engagement are a view over its grants and switches (`control-plane/app/capabilities.py`); the worker's waiting and withdrawing of approvals is `worker/app/approval_wait.py`. A monitoring engagement can run by itself every N days (`control-plane/app/scheduling.py`, one interval stored on the engagement; the worker's beat task only pokes `POST /internal/monitoring/run-due-schedules`, and the run still starts through `begin_scan`). A mode never widens what the Scope Gateway allows. See the manual's *Operating modes* and *Monitor an attack surface*.
 - Tool argument safety is enforced in `control-plane/app/gateway/args_safety.py`; update tests when widening accepted arguments.
 - Known lab vulnerability inference is intentionally local/reproducible in `worker/app/known_vulns.py`.
 - Everything is English: UI, docs, API errors, agent messages, log lines, and code comments (REQ-TEXT-001). `scripts/tests/test_english_runtime_text.py` fails on German text in runtime strings. Many older modules still have German comments: write new comments in English, and when you change a module, translate the German comments of the code you touch - in a separate commit, never mixed with a behavior change.
@@ -75,7 +75,7 @@ make logs
 make test-unit
 make test-integration
 make test
-make lab-test
+make verify
 make frontend-build
 ```
 
@@ -89,7 +89,7 @@ cd frontend && npm run build
 
 Integration tests require Postgres and `TEST_DATABASE_URL`; see `docs/testing.md`.
 
-`make lab-test` starts a fuller Docker/lab loop and must keep the isolation and negative scope gates intact. Prefer it for changes touching gateway authorization, egress enforcement, tool dispatch, or lab behavior.
+For changes touching gateway authorization, egress enforcement or tool dispatch, `make scope-check` proves that the Scope Gateway denies out-of-scope targets and unsafe arguments, and the negative tests must stay in place. The maintainers also run a private end-to-end lab loop against deliberately vulnerable targets; it is not part of this repository.
 
 ## Testing Expectations
 
@@ -102,7 +102,7 @@ Integration tests require Postgres and `TEST_DATABASE_URL`; see `docs/testing.md
 ## Safety When Working
 
 - Do not run real scans against public or third-party targets unless the user explicitly provides authorization and scope.
-- Do not broaden tool allowlists, `active_allowed` behavior, egress routing, Docker capabilities, or NetworkPolicies casually.
+- Do not broaden tool allowlists, `active_allowed` behavior, egress routing, Docker capabilities, or network isolation casually.
 - Do not add dependencies that download or execute offensive tooling at runtime without a clear review path.
 - Treat `.env` as local secret/config material. Do not print secrets or commit real credentials.
 - Be careful with Docker commands that remove volumes (`make down`, lab teardown). They are normal here, but still destructive to local state.
@@ -116,8 +116,8 @@ Update these docs when changing corresponding behavior:
 - API shape or SSE behavior: `docs/api.md`
 - Data model, scope resolution, scoring: `docs/data-model.md`
 - Test commands or lab loop: `docs/testing.md`
-- Deployment topology, Compose/K8s, hardening: `INSTALL.md`
-- Maturity/status changes: `docs/roadmap.md`
+- Deployment topology, Compose, hardening: `INSTALL.md`
+- Capability status changes: `docs/roadmap.md`
 - Legal/authorization workflow: `docs/legal.md`
 - User-visible behavior (a screen, a field, a flow, a message or code the console shows, a tool): the matching page of `docs/manual/`, then `make manual-check`. The console has no documentation pages of its own. A changed screen also changes its screenshots: `make manual-screenshots` (throwaway stack, demo data only)
 

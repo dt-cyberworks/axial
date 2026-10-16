@@ -20,8 +20,8 @@ const NODE_TYPES: SurfaceNode["node_type"][] = [
 ];
 
 // Cytoscape draws to canvas, which can't resolve CSS custom properties, so
-// the palette is read once from the live stylesheet (docs/design/axial-brand-design.md
-// is the source of truth for the values) rather than duplicated as literals.
+// the palette is read once from the live stylesheet (the brand design in
+// REQ-BRAND-001 is the source of truth for the values) rather than duplicated as literals.
 function cssVar(name: string, fallback: string): string {
   if (typeof window === "undefined") return fallback;
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();

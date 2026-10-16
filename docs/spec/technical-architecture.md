@@ -5,20 +5,11 @@ implementation.
 
 Data models · security layer · evaluation & reporting layer
 
-Version 2.1 · Developer-ready (bug-bounty integration)
-
-> [!NOTE]
-> **Relationship to document v1.0.** This document deepens the conceptual
-> specification v1.0. It provides concrete schemas, algorithms, interface
-> contracts, and state models. The technology stack should be read as a
-> reference implementation — swappable as long as the contracts are
-> honored. Legally relevant points are again marked ⚖.
-
 ## 1. System context & technology stack
 
-### 1.1 Reference stack
+### 1.1 Stack
 
-| Layer | Technology (reference) | Rationale |
+| Layer | Technology | Rationale |
 |---|---|---|
 | API / orchestrator | Python 3.12 + FastAPI | async, typed, fast tool integration |
 | Task queue | Celery + Redis | distributed, repeatable scan jobs |
@@ -27,7 +18,7 @@ Version 2.1 · Developer-ready (bug-bounty integration)
 | Tool execution | MCP server (in-house) | controlled tool registry per engagement |
 | LLM (reasoning) | Claude (tool use) | reliable structured tool use |
 | Object storage | S3-compatible (SeaweedFS) | raw output, report PDFs, evidence |
-| Secrets | Vault / SOPS | scope signing key, API keys |
+| Secrets | environment files (Vault / SOPS planned, see the roadmap) | scope signing key, API keys |
 
 ### 1.2 Process topology
 
@@ -67,27 +58,23 @@ Scope Gateway.
 Core entities in 3NF; findings as JSONB for flexibility. All IDs are UUIDv7
 (time-sortable).
 
-### 2.1 Engagement & scope (legal basis)
+### 2.1 Engagement & scope (authorization record)
 
 Listing 1: `engagement` — `source` determines the authorization source and
 the rules.
 
 ```sql
--- The engagement is the legal basis for every active scan.
+-- The engagement is the authorization record for every active scan.
 CREATE TABLE engagement (
   id            UUID PRIMARY KEY DEFAULT uuidv7(),
-  customer_id   UUID REFERENCES customer(id),  -- NULL for lab/bug_bounty
   title         TEXT NOT NULL,
   status        engagement_status NOT NULL DEFAULT 'draft',
   source        engagement_source NOT NULL,    -- drives authorization source + rules
 
   -- Authorization source depends on `source`:
-  --   customer     -> scope_doc_sha256 (signed engagement)
   --   bug_bounty   -> platform + program_ref (see bounty_program, 2.3)
   --   own_domain   -> proof of ownership suffices
   --   lab          -> none (isolated environment)
-  scope_doc_sha256   CHAR(64),          -- mandatory only for source='customer'
-  scope_signed_by    TEXT, scope_signed_at TIMESTAMPTZ,
 
   authorized_from    TIMESTAMPTZ NOT NULL,  -- test window start
   authorized_until   TIMESTAMPTZ NOT NULL,  -- test window end
@@ -101,13 +88,12 @@ CREATE TYPE engagement_status AS ENUM (
 
 -- Where does the authorization come from? Drives gateway behavior + report template.
 CREATE TYPE engagement_source AS ENUM (
-  'lab','own_domain','bug_bounty','customer');
+  'lab','own_domain','bug_bounty');
 ```
 
 > [!IMPORTANT]
-> **⚖ CONSENT REQUIRED — engagement as a gate, per `source`.**
-> `customer`: no transition to `active` without `scope_signed_at` + a valid
-> test window. `bug_bounty`: no `active` without a linked, valid
+> **Engagement as a gate, per `source`.**
+> `bug_bounty`: no `active` without a linked, valid
 > `bounty_program` (see 2.3) and an accepted platform policy. `own_domain`:
 > only after verified proof of ownership. `lab`: only in an isolated,
 > non-public environment. In every case, the gateway rejects active calls
@@ -129,7 +115,7 @@ CREATE TABLE scope_asset (
 
   ownership_verified   BOOLEAN NOT NULL DEFAULT false,
   ownership_method     TEXT,           -- 'dns-txt-token'|'signed-list'|'bbp-scope'
-  active_allowed       BOOLEAN NOT NULL DEFAULT false,  -- ⚖
+  active_allowed       BOOLEAN NOT NULL DEFAULT false,
 
   UNIQUE(engagement_id, rule, asset_type, value, path_pattern)
 );
@@ -146,7 +132,7 @@ CREATE TABLE tool_grant (
 ```
 
 > [!IMPORTANT]
-> **⚖ CONSENT REQUIRED — `active_allowed`, `tool_grant` & deny precedence.**
+> **`active_allowed`, `tool_grant` & deny precedence.**
 > `active_allowed=true` per asset AND a matching `tool_grant` with
 > `mode='active'` are both mandatory preconditions for any active action.
 > Missing either → the gateway blocks. Precedence rule: if a target matches
@@ -170,8 +156,8 @@ CREATE TABLE bounty_program (
   program_ref   TEXT NOT NULL,        -- program handle/URL
 
   -- Hard operating limits from the program rules:
-  automation_allowed   BOOLEAN NOT NULL,  -- automated scanners allowed? ⚖
-  ai_testing_allowed   BOOLEAN NOT NULL,  -- AI/agent testing allowed? ⚖
+  automation_allowed   BOOLEAN NOT NULL,  -- automated scanners allowed?
+  ai_testing_allowed   BOOLEAN NOT NULL,  -- AI/agent testing allowed?
   max_rps       NUMERIC(5,2) NOT NULL DEFAULT 2.0,  -- requests/second
   max_concurrency INT NOT NULL DEFAULT 2,
 
@@ -185,7 +171,7 @@ CREATE TABLE bounty_program (
 ```
 
 > [!IMPORTANT]
-> **⚖ CONSENT REQUIRED — the program policy is binding.**
+> **The program policy is authoritative.**
 > `automation_allowed` and `ai_testing_allowed` are NOT assumptions — they
 > must be read from the concrete program rules. If `ai_testing_allowed =
 > false`, the Agent may not run against this program (the gateway
@@ -267,26 +253,26 @@ def authorize(call: ToolCall) -> Decision:
     # 1. Engagement status & time window
     if eng.status != 'active':                 return DENY('engagement_not_active')
     if not (eng.authorized_from <= now() <= eng.authorized_until):
-                                                 return DENY('outside_time_window')  # ⚖
+                                                 return DENY('outside_time_window')
 
     # 2. Scope: deny ALWAYS takes precedence over allow (wildcard + path respected)
     asset = resolve_target(call.target)
-    if matches_deny_rule(asset, call.path, eng): return DENY('explicit_out_of_scope') # ⚖
-    if not matches_allow_rule(asset, call.path, eng): return DENY('target_out_of_scope') # ⚖
+    if matches_deny_rule(asset, call.path, eng): return DENY('explicit_out_of_scope')
+    if not matches_allow_rule(asset, call.path, eng): return DENY('target_out_of_scope')
 
     # 3. Source-specific rules (bug_bounty)
     if eng.source == 'bug_bounty':
         prog = bounty_program_for(eng)
         if call.is_automated and not prog.automation_allowed:
-                                                 return DENY('automation_forbidden')  # ⚖
+                                                 return DENY('automation_forbidden')
         if call.phase == 'agent' and not prog.ai_testing_allowed:
-                                                 return DENY('ai_testing_forbidden')  # ⚖
+                                                 return DENY('ai_testing_forbidden')
 
     # 4. Mode check (passive always ok, active only with a grant)
     if call.mode == 'active':
-        if not asset.active_allowed:           return DENY('active_not_allowed')   # ⚖
+        if not asset.active_allowed:           return DENY('active_not_allowed')
         grant = tool_grant_for(eng, call.category, 'active')
-        if grant is None:                      return DENY('no_tool_grant')        # ⚖
+        if grant is None:                      return DENY('no_tool_grant')
 
     # 5. Tool whitelist (category + specific tool + arguments)
     if call.tool not in WHITELIST[call.category]: return DENY('tool_not_whitelisted')
@@ -294,22 +280,22 @@ def authorize(call: ToolCall) -> Decision:
 
     # 6. Rate limit / blast radius (for bug_bounty, from the program policy)
     limit = prog.max_rps if eng.source=='bug_bounty' else default_rps(eng)
-    if exceeds_rate(eng, call, limit):         return DENY('rate_limited')  # ⚖
+    if exceeds_rate(eng, call, limit):         return DENY('rate_limited')
 
     # 7. Mandatory identification for bug_bounty (see 3.5) is injected at
     #    execution time; here we only check that it's configured.
     if eng.source == 'bug_bounty' and not ident_header_configured(eng):
-                                                 return DENY('missing_ident_header')  # ⚖
+                                                 return DENY('missing_ident_header')
 
     # 8. Human in the loop for anything beyond pure detection
     if grant and grant.requires_manual_approval:
-        return PENDING_APPROVAL(create_approval_request(call))  # ⚖
+        return PENDING_APPROVAL(create_approval_request(call))
 
     return ALLOW(reason='all_checks_passed')
 ```
 
 > [!IMPORTANT]
-> **⚖ CONSENT REQUIRED — control is NOT in the prompt.** No check in this
+> **Control is NOT in the prompt.** No check in this
 > chain depends on what the LLM "says" or how a prompt is phrased.
 > Exclusively signed DB state decides. A model that claims to be authorized
 > changes nothing — steps 1–3 remain authoritative.
@@ -368,9 +354,8 @@ CREATE TABLE audit_log (
 
 > [!NOTE]
 > **Why a hash chain.** The chained hash makes after-the-fact modification
-> detectable. This is your proof to the customer, the bug-bounty operator,
-> and the professional-liability insurer that every action stayed in scope
-> and exactly when it was authorized.
+> detectable, so it can be shown that every action stayed in scope and
+> exactly when it was authorized.
 
 ### 3.5 Identification header & `source`-driven behavior
 
@@ -384,7 +369,7 @@ Listing 6b: enforced test-traffic identification for bug-bounty targets.
 def outbound_http(req, eng):
     if eng.source == 'bug_bounty':
         prog = bounty_program_for(eng)
-        req.headers[prog.ident_header_name] = prog.ident_header_value  # ⚖ mandatory
+        req.headers[prog.ident_header_name] = prog.ident_header_value  # mandatory
         if prog.ua_suffix:
             req.headers['User-Agent'] += f' {prog.ua_suffix}'
     return send(req)
@@ -397,15 +382,10 @@ def outbound_http(req, eng):
 | `lab` | isolated environment | no egress restriction needed; all tools free | internal/none |
 | `own_domain` | proof of ownership | full active testing on your own assets | internal |
 | `bug_bounty` | program policy (platform + program reference) | deny precedence, `max_rps`, AI/automation gate, optional ident header | bounty submission |
-| `customer` | signed engagement (`scope_doc_sha256`) | scope signature + approval workflow | customer PDF |
 
 > [!NOTE]
-> **Two business logics, cleanly separated.** `bug_bounty` serves to harden
-> the engine and findings quality against real targets within a legal
-> framework — the audience is the program operator. `customer` is the
-> actual managed-service business — the audience is the paying customer,
-> on their own infrastructure. The same tool, but `source` deterministically
-> separates the authorization source, the rules, and the report recipient.
+> `source` deterministically separates the authorization source, the rules,
+> and the report recipient.
 
 ## 4. Scan engine & Agent
 
@@ -436,7 +416,7 @@ def agent_loop(run, budget):
         proposal = llm.propose_next_check(context)   # -> ToolCall (JSON)
         # 2. NEVER execute directly -> always through the gateway
         decision = gateway.authorize(proposal)
-        if decision.is_pending:  wait_for_operator(decision)   # ⚖ human in the loop
+        if decision.is_pending:  wait_for_operator(decision)   # human in the loop
         if not decision.allowed: context.record_denied(proposal); continue
         # 3. Execute in the MCP runner, observe the result
         result = mcp.run(proposal)
@@ -449,11 +429,10 @@ def agent_loop(run, budget):
 > [!NOTE]
 > **Budget ceiling.** `budget` caps iterations/cost per run (e.g. max tool
 > calls, max LLM tokens, wall-clock time). This prevents infinite loops and
-> caps the cost per customer — important in a side-business, one-person
-> operation.
+> caps the cost per run.
 
 > [!IMPORTANT]
-> **⚖ CONSENT REQUIRED — the Agent under `bug_bounty`.** The entire
+> **The Agent under `bug_bounty`.** The entire
 > agent phase is blocked by the gateway if the linked `bounty_program` has
 > `ai_testing_allowed=false`. The agent also generates requests on its own —
 > so under `bug_bounty` the program policy's `max_rps` limit applies per
@@ -550,7 +529,7 @@ w_epss=0.35  w_cvss=0.20  w_exposure=0.20  w_context=0.15  w_valid=0.10
 ## 6. Reporting layer & presentation
 
 Two output forms from the same data: an interactive dashboard (ongoing) and
-a PDF report (periodic, the customer product).
+a PDF report (periodic).
 
 ### 6.1 Report structure (generated)
 
@@ -563,11 +542,10 @@ a PDF report (periodic, the customer product).
 | Methodology & scope | what was tested, time window, exclusions, authorization reference | compliance / proof |
 
 > [!IMPORTANT]
-> **⚖ CONSENT REQUIRED — methodology & scope in the report.** Every report
+> **Methodology & scope in the report.** Every report
 > documents the scope, time window, exclusions, and the authorization
-> reference (`scope_doc_sha256`). This closes the loop with the audit trail
-> and proves to the customer and the insurer that only authorized testing
-> took place.
+> reference. This closes the loop with the audit trail and shows that only
+> authorized testing took place.
 
 ### 6.2 Plain-language translation (LLM-assisted, controlled)
 
@@ -595,47 +573,20 @@ GET  /engagements/{id}/diff/{run}
 POST /engagements/{id}/report
   -> generates a PDF (async), returns job_id
 GET  /approvals?state=requested
-  -> pending approvals (operator queue) ⚖
+  -> pending approvals (operator queue)
 POST /approvals/{id}/approve
-  -> authorizes exactly one tool call ⚖
+  -> authorizes exactly one tool call
 ```
 
 ### 6.4 Data protection in the evaluation
 
 > [!IMPORTANT]
-> **⚖ CONSENT REQUIRED — personal data.** Discovery can capture personal
+> **Personal data.** Discovery can capture personal
 > data (e.g. exposed email addresses, names in certificates). This must be
 > marked as such, stored with restricted access, and shown in the report
-> only to the extent needed for the risk assessment. Clarify a deletion
-> policy and data-processing terms with the customer.
-
-## 7. Implementation order (MVP → expansion)
-
-Interlocked with the maturity path of the authorization source (`source`):
-lab → own_domain → bug_bounty → customer. Active capabilities are proven
-first where the legal risk is lowest.
-
-| Stage | Scope | `source` / legal status |
-|---|---|---|
-| M1 | `engagement`/scope model incl. `source` & deny precedence, gateway (Ch. 3), audit log, passive discovery + fingerprint | `lab` — isolated |
-| M2 | CVE correlation, scoring (Ch. 5), PDF report, dashboard | `own_domain` — passive |
-| M3 | active fingerprinting + safe active checks, approval workflow, rate limiting | `own_domain` — ⚖ active |
-| M4 | `bounty_program` model (2.3), ident header (3.5), deny precedence & policy gates verified | `bug_bounty` — ⚖ policy binding |
-| M5 | Agent (4.2) with gateway coupling, validated logic findings | `bug_bounty` (only if permitted) — ⚖ |
-| M6 | scheduler, diff trend, multi-customer, suppression lists, customer reporting | `customer` — ⚖ engagement mandatory |
-
-> [!NOTE]
-> **The ordering logic.** The maturity path runs parallel to the `source`
-> model: build in the lab first, then verify on your own domain, then
-> harden on authorized bug-bounty scopes within the program's terms — and
-> only after that, on a paying customer. The security layer (gateway, deny
-> precedence, ident header, audit trail) is in place at every stage before
-> that stage's new active capability. The Agent (M5) deliberately comes
-> only after the bug-bounty guardrails (M4) are demonstrably working.
+> only to the extent needed for the risk assessment. Redaction and retention
+> are handled technically.
 
 ---
 
-**Note:** Technical specification, not legal advice. Secure the criminal-law
-and contractual assessment (computer-misuse, data-protection,
-secondary-employment law, and related law in your jurisdiction) with
-qualified legal counsel.
+This is a technical document, not legal advice. Only test systems you are authorized to test; see `docs/legal.md`.

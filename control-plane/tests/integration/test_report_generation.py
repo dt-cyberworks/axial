@@ -172,7 +172,7 @@ def test_methodology_section_documents_the_authorization_and_exclusions(db):
     result = request_report(eng.id, db, _Caller())
     text = _pdf_text(bytes(db.get(Report, uuid.UUID(result["report_id"])).content))
 
-    # ⚖ The mandatory section: window, authorization reference, scope, exclusions.
+    # The mandatory section: window, authorization reference, scope, exclusions.
     assert "a" * 64 in text, "scope_doc_sha256 authorization reference must be present"
     assert "What was in scope (tested)" in text
     assert "target.example" in text
@@ -256,6 +256,34 @@ def test_degraded_coverage_is_called_out_so_a_short_list_is_not_read_as_clean(db
 
     assert "reduced coverage" in text.lower()
     assert _has_phrase(text, "does NOT mean the")
+
+
+def test_a_budget_exhausted_run_says_so_and_does_not_blame_a_tool(db):
+    """REQ-BUDGET-002: the report names the budget, the number of refused calls, and does not claim
+    a load-bearing tool failed."""
+    eng = _engagement(db)
+    _scope(db, eng, "allow", "target.example")
+    _run(db, eng, state_reason="coverage_degraded:tool_call_budget=exhausted_95_denied")
+
+    result = request_report(eng.id, db, _Caller())
+    text = _pdf_text(bytes(db.get(Report, uuid.UUID(result["report_id"])).content))
+
+    assert _has_phrase(text, "used up its tool-call budget")
+    assert _has_phrase(text, "95 planned call(s) were refused")
+    assert _has_phrase(text, "does NOT mean")
+    assert "load-bearing tool ever succeeding" not in text
+
+
+def test_a_tool_failure_and_an_exhausted_budget_are_both_reported(db):
+    eng = _engagement(db)
+    _scope(db, eng, "allow", "target.example")
+    _run(db, eng, state_reason="coverage_degraded:nmap=runner_dispatch_failed,tool_call_budget=exhausted_4_denied")
+
+    result = request_report(eng.id, db, _Caller())
+    text = _pdf_text(bytes(db.get(Report, uuid.UUID(result["report_id"])).content))
+
+    assert _has_phrase(text, "used up its tool-call budget")
+    assert _has_phrase(text, "load-bearing tool ever succeeding")
 
 
 def test_report_without_any_completed_run_still_generates(db):
@@ -581,7 +609,7 @@ def test_req_pipe_011_thorough_depth_is_named_in_the_coverage_section(db):
     run.scan_profile = "thorough"
     db.commit()
     _plan(db, eng, run, [("target.example", 443, "web", [], [("wafw00f", "complete", "web", None)])])
-    assert _has_phrase(_report_text(db, eng), "thorough (every template on every web service)")
+    assert _has_phrase(_report_text(db, eng), "thorough (all non-intrusive web templates on every web service)")
 
 
 def test_req_pipe_011_the_plan_of_an_older_run_is_not_mixed_into_the_report_run(db):

@@ -3,7 +3,7 @@
 **Who this is for:** everyone who signs in; administrators for the last two sections.
 **After this page you can:** sign in for the first time, manage your own password, authenticator and sessions, and, as an admin, invite users and read the account audit.
 
-<!-- ui-labels: Sign in | Email | Password | Code | Set your password | New password (min. 12 characters) | Set up two-factor authentication | Can't scan? Enter manually: | Enter your authentication code | Save your backup codes | I've saved these codes — continue | Account | Change password | Current password | Two-factor authentication | Re-enroll two-factor authentication | Confirm | Cancel | Active sessions | Revoke | this device | Log out | Users | Invite a new user | Display name | Role | All users | Disable | Enable | Reset password | Reset MFA | Account audit -->
+<!-- ui-labels: Forgot password? | Forgot your password? | Send reset link | Choose a new password | Set new password | Check your e-mail | Sign in | Email | Password | Code | Set your password | New password (min. 12 characters) | Set up two-factor authentication | Can't scan? Enter manually: | Enter your authentication code | Save your backup codes | I've saved these codes — continue | Account | Change password | Current password | Two-factor authentication | Re-enroll two-factor authentication | Confirm | Cancel | Active sessions | Revoke | this device | Log out | Users | Invite a new user | Display name | Role | All users | Disable | Enable | Reset password | Reset MFA | Account audit -->
 
 ## Signing in (`/login`)
 
@@ -24,9 +24,20 @@ A new account starts with a one-time temporary password that an admin gave you.
 2. **Set up two-factor authentication:** scan the QR code, or use **Can't scan? Enter manually:**, then enter the 6-digit code.
 3. **Save your backup codes.** Ten codes are shown **once**; each works once. They are the only way in if you lose your authenticator. Choose **I've saved these codes — continue**.
 
+### Forgot password? (`/forgot-password`, `/reset-password`)
+
+When an administrator has switched e-mail on (**E-mail (SMTP relay)** in [Settings](settings.md)), the sign-in page offers **Forgot password?**. Without e-mail it does not, and an administrator resets the password as before.
+
+1. Enter the e-mail address of your account on **Forgot your password?** and choose **Send reset link**. The page answers the same whether or not the address belongs to an account.
+2. Open the link from the message. It works once and expires after 30 minutes. A new request makes the earlier link useless, and at most three links are sent per account per hour.
+3. On **Choose a new password**, enter the new password (at least 12 characters) twice and a code from your authenticator app, or one of your backup codes. Choose **Set new password**.
+4. You are not signed in by this. All of your sessions end, the lockout is cleared, and you sign in as usual with the new password and your authenticator.
+
+The reset never touches your two-factor authentication. If you also lost the authenticator and your backup codes, an administrator has to **Reset MFA** first. An account that has not finished its first sign-in, and a disabled account, get no link.
+
 ### When sign-in fails
 
-Five wrong passwords in a row lock the account for a short time that grows with each further failure, from 30 seconds up to 15 minutes. A code is valid for five minutes and five attempts. Many attempts from one address are refused with *too many sign-in attempts from this address - try again later* for a few minutes (30 attempts in five minutes); this does not affect other addresses. Sessions end after 12 hours without activity or 7 days in total. If you cannot get in, ask an admin to reset your password or your two-factor authentication. See [Users and two-factor authentication](../guides/users-and-mfa.md).
+Five wrong passwords in a row lock the account for a short time that grows with each further failure, from 30 seconds up to 15 minutes. A code is valid for five minutes and five attempts. Many attempts from one address are refused with *too many sign-in attempts from this address - try again later* for a few minutes (30 attempts in five minutes); this does not affect other addresses. Sessions end after 12 hours without activity or 7 days in total. If you cannot get in, use **Forgot password?** when it is offered, or ask an admin to reset your password or your two-factor authentication. See [Users and two-factor authentication](../guides/users-and-mfa.md).
 
 ## Account (`/account`)
 

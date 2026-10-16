@@ -28,7 +28,7 @@ from app.models.surface_graph import SurfaceEdge, SurfaceNode
 
 # Node key = (node_type, ref_table, ref_id). engagement_id is implicit (one
 # graph per engagement). Values match the enumerations in
-# docs/requirements/attack-surface-graph.md (REQ-GRAPH-001).
+# REQ-GRAPH-001.
 NodeKey = tuple[str, str, str]
 
 

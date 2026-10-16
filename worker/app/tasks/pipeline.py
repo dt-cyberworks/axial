@@ -15,7 +15,7 @@ from app import tool_execution
 from app.cancel_probe import CancelProbe, CancellationStatusUnavailable
 from app.celery_app import celery_app
 from app.control_plane_client import ScanRunNotClaimable, ScanRunSuperseded, client
-from app.tasks import agent, asset_review, correlate, discovery, fingerprint, report, score
+from app.tasks import agent, asset_hold, asset_review, correlate, discovery, fingerprint, report, score
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,13 @@ def _coverage_warning(scan_run_id) -> str | None:
     but not full coverage. None when neither applies."""
     warnings = []
     degraded = tool_execution.degraded_tools(str(scan_run_id), LOAD_BEARING_TOOLS)
-    if degraded:
-        parts = [f"{tool}={'|'.join(reasons) or 'unknown'}" for tool, reasons in sorted(degraded.items())]
+    parts = [f"{tool}={'|'.join(reasons) or 'unknown'}" for tool, reasons in sorted(degraded.items())]
+    # REQ-BUDGET-002: planned work the gateway refused for want of tool-call budget. The run is
+    # degraded: a short findings list does not mean the checks that never ran came back clean.
+    denied = tool_execution.budget_exhausted_calls(str(scan_run_id))
+    if denied:
+        parts.append(f"tool_call_budget=exhausted_{denied}_denied")
+    if parts:
         warnings.append("coverage_degraded:" + ",".join(parts))
     partial = tool_execution.partial_tools(str(scan_run_id))
     if partial:
@@ -169,10 +174,19 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
                 client.update_scan_run(scan_run_id, checkpoint={"discovered": _plain(discovered), "review_done": True})
             if _stopped():
                 return _aborted()
-            services = fingerprint.run(
-                engagement_id, discovered, scan_run_id=str(scan_run_id),
-                resume_services=checkpoint.get("fp_services"),
-            )
+            # REQ-MODE-017: a run limited to some hosts tests only those. REQ-MODE-008: in a
+            # monitoring engagement a new host is held until it is acknowledged.
+            run_info = client.run_info(scan_run_id)
+            discovered = asset_hold.limit_to_hosts(discovered, run_info.get("scope_hosts"))
+            discovered = asset_hold.apply(str(scan_run_id), discovered)
+            if run_info.get("scan_profile") == "passive":
+                # REQ-MODE-011: a passive run touches no target; nothing is fingerprinted.
+                services = []
+            else:
+                services = fingerprint.run(
+                    engagement_id, discovered, scan_run_id=str(scan_run_id),
+                    resume_services=checkpoint.get("fp_services"),
+                )
             client.materialize_graph(uuid.UUID(engagement_id))
             client.update_scan_run(scan_run_id, phase="correlate",
                                    checkpoint={"services": _plain(services), "coverage_warning": _coverage()})
@@ -190,15 +204,32 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
             phase = "agent"
             if _stopped():
                 return _aborted()
-            # scan_run_id to the agent: it records steps + checks the stop itself.
-            agent_context = agent.run(
-                engagement_id, budget_max_iterations, scan_run_id=str(scan_run_id),
-                approval_timeout_seconds=approval_timeout_seconds,
-            )
-            agent_warning = (
-                f"agent_incomplete:{agent_context.incomplete_reason}"
-                if agent_context.incomplete_reason else None
-            )
+            if client.run_info(scan_run_id).get("scan_profile") == "passive":
+                # REQ-MODE-011: the agent only proposes active calls; a passive run makes none.
+                agent_warning = None
+            else:
+                # REQ-MODE-016: a run that parked on a decision is picked up here again.
+                resume_state = checkpoint.get("agent_resume") if claim.get("attempt", 1) > 1 else None
+                if resume_state:
+                    client.update_scan_run(scan_run_id, checkpoint={"agent_resume": None})
+                # scan_run_id to the agent: it records steps + checks the stop itself.
+                agent_context = agent.run(
+                    engagement_id, budget_max_iterations, scan_run_id=str(scan_run_id),
+                    approval_timeout_seconds=approval_timeout_seconds, resume_state=resume_state,
+                )
+                if getattr(agent_context, "parked", None) is not None:
+                    # Semi-attended and a decision is needed: hand the run back and end
+                    # this task, so no worker slot is held while nobody answers. The
+                    # control plane resumes the same run when the decision is made.
+                    parked = agent_context.parked
+                    client.park_scan_run(
+                        scan_run_id, approval_id=str(parked["park"]["approval_id"]), resume_state=_plain(parked),
+                    )
+                    return {"scan_run_id": str(scan_run_id), "state": "parked"}
+                agent_warning = (
+                    f"agent_incomplete:{agent_context.incomplete_reason}"
+                    if agent_context.incomplete_reason else None
+                )
             # REQ-SCAN-014: surface a gutted detection phase alongside (not
             # instead of) the agent warning - independent failures, both shown.
             run_warning = _combine_reasons(_coverage(), agent_warning)

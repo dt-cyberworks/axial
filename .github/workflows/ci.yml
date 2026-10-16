@@ -41,6 +41,14 @@ jobs:
         run: |
           pip install -r requirements.txt
           python -m pytest tests -q
+      # The egress proxy is the second scope check and the only way out for HTTP tools. Its tests include
+      # the guards on its reply to CONNECT (REQ-EGRESS-004/005): without that reply nuclei's raw-request
+      # templates silently never reach a target. They must run on every push, not only on a developer machine.
+      - name: egress-proxy unit tests (scope re-check, CONNECT reply)
+        working-directory: egress-proxy
+        run: |
+          pip install -r requirements.txt
+          python -m pytest tests -q
 
   frontend:
     name: operator-console (typecheck + build)

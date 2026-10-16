@@ -13,7 +13,7 @@
 #     (control-plane:8000), unaffected by the host port binding.
 #   - ASM_DOMAIN (DNS already pointing at this host).
 #   - Real secrets for every *_change-me-in-dev value - see docs/deployment.md
-#     and docs/design/authentication-and-authorization-architecture.md §7/§9.
+#     and REQ-IAM-002..011.
 #     ENVIRONMENT=production makes app/config.py's own validator fail closed
 #     on any secret still at its dev default, so a misconfigured deploy
 #     refuses to start rather than run insecurely.

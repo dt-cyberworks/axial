@@ -1,6 +1,6 @@
-# Operator-Konsole (Vite/React). Fuer den nebenberuflichen M1-M3-Start reicht
-# `npm run dev` gegen die lokale control-plane (s. README). Dieses Image ist
-# fuer einen spaeteren produktiven Build gedacht (statisch, hinter Reverse-Proxy).
+# Operator console (Vite/React). Locally, `npm run dev` against the local
+# control plane is enough (see README). This image is meant for a production
+# build (static, behind a reverse proxy).
 FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./

@@ -1,7 +1,7 @@
 import datetime
 import uuid
 
-from sqlalchemy import ForeignKey, Numeric, String, func
+from sqlalchemy import ForeignKey, Numeric, SmallInteger, String, func
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,7 +25,7 @@ class Customer(Base):
 
 
 class Engagement(Base):
-    """Die Rechtsgrundlage jedes aktiven Scans (Architektur Kap. 2.1)."""
+    """The authorization record of every active scan (Architecture Ch. 2.1)."""
 
     __tablename__ = "engagement"
 
@@ -44,8 +44,8 @@ class Engagement(Base):
     emergency_contact: Mapped[str | None] = mapped_column(String)
     # Opt-in fuer autonome KI-Aktionen (Vector Agent, phase='agent'), alle sources.
     ai_testing_allowed: Mapped[bool] = mapped_column(server_default="false")
-    # Persistierte, rechtlich autorisierte Nmap-Envelopes. Der Worker darf
-    # diese Werte nie pro Lauf verbreitern. Gleiche TCP-Grenzen = Einzelport.
+    # Persisted, authorized Nmap envelopes. The worker must never widen these
+    # values per run. Equal TCP bounds = a single port.
     tcp_port_from: Mapped[int] = mapped_column(server_default="1")
     tcp_port_to: Mapped[int] = mapped_column(server_default="65535")
     udp_discovery_enabled: Mapped[bool] = mapped_column(server_default="false")
@@ -73,9 +73,31 @@ class Engagement(Base):
     oob_enabled: Mapped[bool] = mapped_column(server_default="false")
     screenshots_enabled: Mapped[bool] = mapped_column(server_default="false")
     # REQ-PIPE-005: scan depth. `standard` selects checks from what the scan
-    # observed; `thorough` runs every template on every web surface. Neither
+    # observed; `thorough` runs every non-intrusive template (the index) on every
+    # web surface, identified product or not. Neither
     # widens scope, grants or switches.
     scan_profile: Mapped[str] = mapped_column(String(16), nullable=False, server_default="standard")
+    # REQ-MODE-001: what the engagement is used for. `monitoring` runs unattended on a
+    # schedule and never waits for a person; `assessment` is attended or semi-attended
+    # testing (today's behaviour, and the value of every pre-existing row).
+    operating_mode: Mapped[str] = mapped_column(String, nullable=False, server_default="assessment")
+    # REQ-MODE-008: `hold` inventories a newly discovered host and gives it no active
+    # check until it is acknowledged.
+    new_asset_policy: Mapped[str] = mapped_column(String, nullable=False, server_default="auto")
+    # REQ-MODE-009: capability. Effective only together with a current consent record.
+    state_changing_requests: Mapped[bool] = mapped_column(server_default="false")
+    # REQ-MODE-010: stop on a target that fails after state-changing requests.
+    fragility_breaker: Mapped[bool] = mapped_column(server_default="true")
+    # REQ-MODE-012: standing authorization is reviewed at this date.
+    review_at: Mapped[datetime.datetime | None]
+    # REQ-MON-001: run every N days (monitoring only). NULL = no automatic runs. The next run is due
+    # `schedule_every_days` after `schedule_anchor_at` (latest of: set, became active, last run start).
+    schedule_every_days: Mapped[int | None] = mapped_column(SmallInteger)
+    schedule_set_at: Mapped[datetime.datetime | None]
+    schedule_anchor_at: Mapped[datetime.datetime | None]
+    # REQ-MON-003: why a due run did not start (visible with the schedule).
+    schedule_skip_reason: Mapped[str | None] = mapped_column(String)
+    schedule_skip_since: Mapped[datetime.datetime | None]
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
     # REQ-IAM-007/021: wer dieses Engagement angelegt hat/besitzt. Immer gesetzt
     # (NOT NULL, Migration 0038): lesen darf jeder angemeldete Nutzer, aendern nur

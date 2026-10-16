@@ -213,7 +213,7 @@ def test_python_interpreter_does_not_match_unrelated_activepython(monkeypatch):
 
 def test_product_matches_still_allows_documented_first_token_residual_cases():
     """The previously-documented, explicitly-accepted lower-severity residual
-    cases (docs/requirements/live-vulnerability-correlation.md, "Implementation
+    cases (REQ-CORR-001..008, "Implementation
     status") must keep matching: "nginx" anchors the first word of
     `nginx_proxy_manager`, "php" anchors the first word of `php_fi`. An
     exact-match-only filter was already rejected for false-negative reasons

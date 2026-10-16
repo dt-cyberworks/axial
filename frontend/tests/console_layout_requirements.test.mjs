@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/console-layout-and-navigation.md");
+const requirementDoc = readRecord("requirements", "console-layout-and-navigation.md");
 const app = read("frontend/src/App.tsx");
 const styles = read("frontend/src/styles.css");
 const adminHome = read("frontend/src/pages/AdminHome.tsx");
@@ -17,7 +18,7 @@ const account = read("frontend/src/pages/Account.tsx");
 const useLogout = read("frontend/src/lib/useLogout.ts");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 function notContains(source, pattern, message) {
@@ -73,7 +74,7 @@ test("REQ-CONSOLE-003 removes the static sidebar guardrail banner", () => {
 
 test("REQ-CONSOLE-004 legacy shared token is documented as answered, not built", () => {
   requirement("REQ-CONSOLE-004");
-  contains(requirementDoc, /no shared\/legacy-token page or menu anywhere in the console\s+today/, "doc must state the answer plainly");
+  record.contains(requirementDoc, /no shared\/legacy-token page or menu anywhere in the console\s+today/, "doc must state the answer plainly");
 });
 
 test("REQ-CONSOLE-005 account nav entry is labeled, not named", () => {

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/operator-authorization.md");
+const requirementDoc = readRecord("requirements", "operator-authorization.md");
 const wizard = read("frontend/src/pages/EngagementWizard.tsx");
 const engagementDetail = read("frontend/src/pages/EngagementDetail.tsx");
 const dashboard = read("frontend/src/pages/Dashboard.tsx");
@@ -15,7 +16,7 @@ const engagementApi = read("control-plane/app/api/engagements.py");
 const engagementSchema = read("control-plane/app/schemas/engagement.py");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 function notContains(source, pattern, message) {

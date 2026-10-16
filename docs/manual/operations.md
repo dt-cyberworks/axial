@@ -13,7 +13,7 @@ The step-by-step instructions live in [`INSTALL.md`](../../INSTALL.md), so that 
 |---|---|
 | Try it, or scan from a workstation | [Local evaluation](../../INSTALL.md#3-local-evaluation) |
 | Run a persistent service with HTTPS | [Single-host production](../../INSTALL.md#4-single-host-production) |
-| Isolate every customer in Kubernetes | [Kubernetes](../../INSTALL.md#7-kubernetes), building blocks only, not a turnkey installer |
+| Keep several customers apart | [Several customers](../../INSTALL.md#7-several-customers), one Compose stack each |
 
 Plan for roughly 4 CPU cores, 8 GB of memory and 40 GB of disk for one host to start with, and watch the disk: evidence and scan history accumulate. Install Axial only on infrastructure you control.
 
@@ -71,7 +71,7 @@ with SessionLocal() as db:
 
 ## Settings you may change
 
-- **In the console** (administrators): the AI provider, the scan rate, the global tool policy, the agent budgets and the approval timeout, under **Admin → Operational settings**. See [Settings](reference/settings.md).
+- **In the console** (administrators): the AI provider, the scan rate, the global tool policy, the tool-call budget per run, the agent budgets and the approval timeout, under **Admin → Operational settings**. See [Settings](reference/settings.md).
 - **In `.env`**: secrets, ports, host names and a few limits such as the database pool. Every variable is listed with a comment in [`.env.example`](../../.env.example). Production refuses to start while a secret is still at its development default.
 - **At build time**: the console can show a **Manual** link in its navigation if it is built with `VITE_MANUAL_URL` set to the address of this manual, for example `VITE_MANUAL_URL=https://github.com/<owner>/<repo>/tree/main/docs/manual`. Without it there is no link, and the console carries no documentation pages of its own.
 

@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/agent-max-tokens-configuration.md");
+const requirement = readRecord("requirements", "agent-max-tokens-configuration.md");
 const client = read("frontend/src/api/client.ts");
 const settings = read("frontend/src/pages/Settings.tsx");
 
-assert.match(requirement, /## REQ-AGENT-026:/);
+record.match(requirement, /## REQ-AGENT-026:/);
 
 assert.match(client, /getAgentMaxTokens: \(\) => request<AgentMaxTokens>\("\/settings\/agent-max-tokens"\)/);
 assert.match(client, /updateAgentMaxTokens: \(value: number\) =>/);

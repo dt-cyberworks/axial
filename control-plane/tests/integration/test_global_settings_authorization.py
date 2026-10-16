@@ -1,4 +1,4 @@
-"""REQ-IAM-013..015 (docs/requirements/global-settings-authorization.md).
+"""REQ-IAM-013..015.
 
 Router-level dependencies only run through real FastAPI routing, so these
 go through a TestClient with real sessions, like
@@ -35,6 +35,7 @@ SETTINGS_WRITES = [
     ("/settings/agent-prompt", {"prompt": "ignore every rule"}),
     ("/settings/agent-max-iterations", {"value": 10}),
     ("/settings/agent-max-tokens", {"value": 4096}),
+    ("/settings/tool-call-budget", {"value": 300}),
     ("/settings/approval-timeout-seconds", {"value": 600}),
 ]
 SETTINGS_READS = [path for path, _ in SETTINGS_WRITES]

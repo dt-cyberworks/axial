@@ -1,6 +1,5 @@
 # Test Concept & Lab Test Loop
 
-Source: [`docs/spec/lab-environment.md`](spec/lab-environment.md).
 Test infrastructure: `lab/` and
 [`control-plane/tests/`](../control-plane/tests/).
 
@@ -82,8 +81,8 @@ sequenceDiagram
 
 **Hard gates:** Phase 0 (isolation) and Phase 1 (scope enforcement). If
 either fails, the loop ends with exit 1. Phase 2 is informational as long
-as the scan phases (fingerprint/vuln/agent) are still stubs (roadmap
-M2/M3/M5).
+as the scan phases (fingerprint/vuln/agent) are still stubs (see
+[roadmap.md](roadmap.md#where-the-project-stands)).
 
 ## Isolation is mandatory (Phase 0)
 
@@ -106,7 +105,6 @@ any finding on it is a failure.
 
 ## Live scan against the lab
 
-Since the M3 pull-forward ([roadmap.md](roadmap.md#where-the-project-stands)),
 `run-lab-test.sh` triggers a **real** scan, not just gateway decisions:
 
 ```mermaid
@@ -186,16 +184,15 @@ The E2E lab loop (`make lab-test`, above) intentionally does **not** run in
 GitHub Actions. It spins up known-vulnerable targets (Metasploitable2, DVWA,
 Juice Shop) and runs a real scan against them; that stays confined to a
 developer's own machine, not a shared/hosted CI runner. Run it locally before
-merging `R3`/`R4` changes, per the
-[Definition of Done](engineering/definition-of-done.md).
+merging `R3`/`R4` changes.
 
 ## Requirement-based GUI tests
 
 GUI tests are derived from documented requirements, not from the current
 implementation. The process is binding:
 
-1. A UI requirement is documented in `docs/requirements/` with a stable
-   requirement ID and testable acceptance criteria.
+1. A UI requirement is written down with a stable requirement ID and
+   testable acceptance criteria.
 2. A test references that requirement ID and verifies the acceptance
    criteria against the UI/API surface.
 3. If the test fails, first check whether the implementation or the
@@ -205,13 +202,13 @@ implementation. The process is binding:
 
 Current GUI requirement tests:
 
-| Requirement document | Test | Command |
+| Requirements | Test | Command |
 |---|---|---|
-| [`docs/requirements/operator-authorization.md`](requirements/operator-authorization.md) | [`frontend/tests/operator_authorization_requirements.test.mjs`](../frontend/tests/operator_authorization_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
-| [`docs/requirements/scan-rate-policy.md`](requirements/scan-rate-policy.md) | [`frontend/tests/scan_rate_policy_requirements.test.mjs`](../frontend/tests/scan_rate_policy_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
-| [`docs/requirements/tool-grants.md`](requirements/tool-grants.md) | [`frontend/tests/tool_grants_requirements.test.mjs`](../frontend/tests/tool_grants_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
-| [`docs/requirements/agent-naming-and-lens.md`](requirements/agent-naming-and-lens.md) | [`frontend/tests/agent_lens_requirements.test.mjs`](../frontend/tests/agent_lens_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
-| [`docs/requirements/live-activity-progress.md`](requirements/live-activity-progress.md) | [`frontend/tests/live_activity_progress_requirements.test.mjs`](../frontend/tests/live_activity_progress_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
+| `REQ-AUTH-001..006` | [`frontend/tests/operator_authorization_requirements.test.mjs`](../frontend/tests/operator_authorization_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
+| `REQ-RATE-001..005` | [`frontend/tests/scan_rate_policy_requirements.test.mjs`](../frontend/tests/scan_rate_policy_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
+| `REQ-TOOL-001..008` | [`frontend/tests/tool_grants_requirements.test.mjs`](../frontend/tests/tool_grants_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
+| `REQ-AGENT-001`, `REQ-LENS-001..003` | [`frontend/tests/agent_lens_requirements.test.mjs`](../frontend/tests/agent_lens_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
+| `REQ-LIVE-001..006` | [`frontend/tests/live_activity_progress_requirements.test.mjs`](../frontend/tests/live_activity_progress_requirements.test.mjs) | `cd frontend && npm run test:requirements` |
 
 The test is deliberately implemented without an additional browser-test
 dependency, because the current frontend has no installed E2E/DOM test
@@ -225,8 +222,7 @@ tests, not replaced by ad hoc scenarios.
 Playwright is now in the repo (`uat/requirements.txt`) - exactly the step
 flagged above, but as its own UAT layer rather than a replacement for the
 existing GUI requirement tests. Details, risk classification (R3), and
-acceptance criteria: `docs/requirements/user-acceptance-testing.md`
-(REQ-UAT-001..004), verified via `docs/test-cases/user-acceptance-testing.md`.
+acceptance criteria: REQ-UAT-001..004.
 
 Two tiers, both against a real, running deployment (never a mock):
 

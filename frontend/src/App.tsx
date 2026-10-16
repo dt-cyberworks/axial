@@ -6,12 +6,15 @@ import { api } from "./api/client";
 import NotFound from "./pages/NotFound";
 import Dashboard from "./pages/Dashboard";
 import AllFindings from "./pages/AllFindings";
-import EngagementWizard from "./pages/EngagementWizard";
+import Inbox from "./pages/Inbox";
+import NewEngagement from "./pages/NewEngagement";
 import EngagementEdit from "./pages/EngagementEdit";
 import EngagementDetail from "./pages/EngagementDetail";
 import RunDetail from "./pages/RunDetail";
 import Audit from "./pages/Audit";
 import Login from "./pages/Login";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
 import Account from "./pages/Account";
 import AdminHome from "./pages/AdminHome";
 import GlobalApprovalWatcher from "./components/GlobalApprovalWatcher";
@@ -110,6 +113,10 @@ function AuthenticatedShell() {
   // Hooks run unconditionally, before the early returns below.
   const logout = useLogout();
   const nav = useMobileNavigation();
+  // REQ-MODE-014: how many things need a person; shown next to the Inbox link.
+  const inboxCount = useQuery({
+    queryKey: ["inbox-count"], queryFn: api.inboxCount, enabled: !!me, refetchInterval: 20000, retry: false,
+  });
 
   if (isLoading) return null;
   if (isError) {
@@ -144,6 +151,9 @@ function AuthenticatedShell() {
         <nav className="side-nav" aria-label="Primary">
           <NavLink to="/" end>Overview</NavLink>
           <NavLink to="/findings">Findings</NavLink>
+          <NavLink to="/inbox">
+            Inbox{(inboxCount.data?.count ?? 0) > 0 && <span className="nav-badge" aria-label={`${inboxCount.data?.count} waiting`}> {inboxCount.data?.count}</span>}
+          </NavLink>
           <NavLink to="/new">New engagement</NavLink>
           {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
           {MANUAL_URL && <a href={MANUAL_URL} target="_blank" rel="noopener noreferrer">Manual</a>}
@@ -163,7 +173,8 @@ function AuthenticatedShell() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/findings" element={<AllFindings />} />
-          <Route path="/new" element={<EngagementWizard />} />
+          <Route path="/inbox" element={<Inbox />} />
+          <Route path="/new" element={<NewEngagement />} />
           <Route path="/account" element={<Account />} />
           <Route path="/admin" element={<AdminHome />} />
           <Route path="/engagements/:id" element={<EngagementDetail />} />
@@ -189,6 +200,9 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      {/* REQ-IAM-020: reachable without a session; the reset token rides in the fragment. */}
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/*" element={<AuthenticatedShell />} />
     </Routes>
   );

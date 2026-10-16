@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
 import { QR_FAILED, QR_LOADING, qrCodeDataUrl } from "../lib/qrCode";
@@ -34,6 +34,13 @@ export default function Login() {
   const [qrFailed, setQrFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // REQ-MAIL-001: "Forgot password?" is offered only when e-mail is configured and on, so the
+  // link never leads to something that cannot work. A failed check just hides it.
+  const [canReset, setCanReset] = useState(false);
+
+  useEffect(() => {
+    api.recoveryOptions().then((o) => setCanReset(!!o.self_service_reset)).catch(() => setCanReset(false));
+  }, []);
 
   useEffect(() => {
     if (step.name === "mfa_enroll") {
@@ -133,6 +140,11 @@ export default function Login() {
           {error && <div className="error-block">{error}</div>}
           <button type="submit" disabled={busy} style={{ width: "100%" }}>{busy ? "Signing in..." : "Continue"}</button>
         </form>
+        {canReset && (
+          <p className="muted-line" style={{ textAlign: "center", marginTop: 12 }}>
+            <Link to="/forgot-password">Forgot password?</Link>
+          </p>
+        )}
       </AuthLayout>
     );
   }

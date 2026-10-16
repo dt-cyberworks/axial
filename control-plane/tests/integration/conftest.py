@@ -29,6 +29,9 @@ _DATA_TABLES = [
     "tool_grant", "scope_asset", "scan_run", "rate_reservation", "app_setting", "engagement", "customer",
     "account_audit_log", "user_session", "login_challenge", "user_backup_code", "app_user",
     "cve_lookup_cache", "epss_score_cache", "kev_catalog_cache",
+    # No foreign key reaches these two from a truncated table, so they are listed (the
+    # monitoring tables hang off engagement and go with its CASCADE).
+    "mail_outbox", "password_reset_token",
 ]
 
 

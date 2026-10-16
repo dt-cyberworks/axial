@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirementDoc = read("docs/requirements/engagement-visibility.md");
+const requirementDoc = readRecord("requirements", "engagement-visibility.md");
 const client = read("frontend/src/api/client.ts");
 const dashboard = read("frontend/src/pages/Dashboard.tsx");
 const detail = read("frontend/src/pages/EngagementDetail.tsx");
@@ -17,7 +18,7 @@ const findingsSection = read("frontend/src/components/FindingsSection.tsx");
 const notice = read("frontend/src/components/ReadOnlyNotice.tsx");
 
 function requirement(id) {
-  assert.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
+  record.match(requirementDoc, new RegExp(`## ${id}:`), `${id} must be documented before it is tested`);
 }
 
 const tests = [];
@@ -117,10 +118,32 @@ test("REQ-IAM-025 [negative] a new place that changes an engagement must be revi
     "frontend/src/pages/Dashboard.tsx", "frontend/src/pages/EngagementDetail.tsx", "frontend/src/pages/EngagementEdit.tsx",
     "frontend/src/pages/EngagementWizard.tsx", "frontend/src/pages/RunDetail.tsx", "frontend/src/components/FindingDetail.tsx",
     "frontend/src/components/ToolGrantsEditor.tsx", "frontend/src/pages/Audit.tsx",
+    // Reviewed with REQ-MODE-003/006/014 (2026-10-14): each is mounted behind canManage or takes it as a
+    // prop that disables its controls, and the API refuses a non-owner with 403 either way.
+    "frontend/src/components/EngagementLifecycle.tsx", "frontend/src/components/CapabilitiesEditor.tsx",
+    "frontend/src/components/NotificationTargets.tsx", "frontend/src/pages/Inbox.tsx",
+    // Reviewed with REQ-MON-004 (2026-10-15): the controls render only for canManage, the API answers a
+    // non-owner with 403 either way.
+    "frontend/src/components/ScheduleControl.tsx",
+    // The monitoring wizard, like the test wizard, only ever edits the draft its own user just created.
+    "frontend/src/pages/MonitorWizard.tsx",
   ]);
   for (const [file] of users) assert.ok(allowed.has(file), `${file} changes an engagement: review REQ-IAM-025 and add it here`);
   // The files that sit behind a guard in their parent must still be mounted only behind it.
   assert.match(detail, /canManage && isDraft && <ToolGrantsEditor/);
+  assert.match(detail, /\{canManage && !isDraft && <EngagementLifecycle engagement=\{engagement\} \/>\}/, "pause, close, revoke");
+  assert.match(detail, /<CapabilitiesEditor engagementId=\{id\} active=\{engagement\.status === "active"\} canManage=\{canManage\} \/>/);
+  assert.match(detail, /<NotificationTargets engagementId=\{id\} canManage=\{canManage\} \/>/);
+  const caps = read("frontend/src/components/CapabilitiesEditor.tsx");
+  assert.match(caps, /disabled=\{!canManage \|\| !!cap\.unavailable_reason\}/, "capability switches follow canManage");
+  assert.match(caps, /\{canManage && \(\s*<div className="form-actions">/, "Save capabilities");
+  const targets = read("frontend/src/components/NotificationTargets.tsx");
+  assert.match(targets, /\{canManage && \(\s*<div className="form-grid">/, "add webhook");
+  // REQ-MON-004: the schedule's controls are behind canManage, and the engagement page hands it the flag.
+  const schedule = read("frontend/src/components/ScheduleControl.tsx");
+  assert.match(schedule, /\{canManage \? \(\s*<div className="form-actions schedule-actions">/, "change / switch off the interval");
+  assert.match(schedule, /Only the owner or an administrator can change this/);
+  assert.match(detail, /<ScheduleControl engagementId=\{engagement\.id\} canManage=\{canManage\} \/>/);
   assert.match(edit, /if \(!engagement\.can_manage\)/);
 });
 

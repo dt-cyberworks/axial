@@ -23,6 +23,7 @@ from app.config import get_settings
 from app.gateway.audit import append_audit_log
 from app.models.engagement import Engagement
 from app.models.scan_run import ScanRun
+from app.settings_store import get_global_tool_call_budget
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,12 @@ class ScanRunAlreadyActive(Exception):
     past it. Callers translate this to the existing 409."""
 
 
-def start_scan_run(db: Session, engagement_id: uuid.UUID, *, budget_tool_calls_max: int = 200) -> ScanRun:
+def start_scan_run(
+    db: Session, engagement_id: uuid.UUID, *, budget_tool_calls_max: int | None = None,
+    scan_profile: str | None = None, trigger: str = "manual", initiated_by: str | None = None,
+    supervision: str | None = None, scope_hosts: list[str] | None = None,
+    retest_finding_id: uuid.UUID | None = None, schedule_id: uuid.UUID | None = None,
+) -> ScanRun:
     """Create THE one allowed active scan_run for this engagement, race-safe.
 
     GitHub issue #18: starting a scan was a check-then-act with no lock and no
@@ -72,6 +78,11 @@ def start_scan_run(db: Session, engagement_id: uuid.UUID, *, budget_tool_calls_m
         raise ScanRunAlreadyActive()
 
     engagement = db.get(Engagement, engagement_id)
+    # REQ-BUDGET-001: the tool-call budget is one global setting; this is the one place it is read,
+    # so every way of starting a run (Run now, a schedule, a retest, the internal endpoint) gets
+    # it. The run keeps the value it started with, whatever the setting becomes later.
+    if budget_tool_calls_max is None:
+        budget_tool_calls_max = get_global_tool_call_budget(db)
     run = ScanRun(
         engagement_id=engagement_id,
         started_at=datetime.datetime.now(datetime.timezone.utc),
@@ -79,8 +90,12 @@ def start_scan_run(db: Session, engagement_id: uuid.UUID, *, budget_tool_calls_m
         state="running",
         budget_tool_calls_max=budget_tool_calls_max,
         # REQ-PIPE-005: recorded on the run; a later change of the engagement
-        # setting does not rewrite what this run did.
-        scan_profile=engagement.scan_profile if engagement is not None else "standard",
+        # setting does not rewrite what this run did. REQ-MODE-002/011: a schedule
+        # tier or a person may start a run at another depth than the default.
+        scan_profile=scan_profile or (engagement.scan_profile if engagement is not None else "standard"),
+        # REQ-MODE-002: how the run started and how supervised it is.
+        trigger=trigger, initiated_by=initiated_by, supervision=supervision,
+        schedule_id=schedule_id, scope_hosts=scope_hosts, retest_finding_id=retest_finding_id,
     )
     try:
         with db.begin_nested():
@@ -150,11 +165,17 @@ def _reap(db: Session, *, engagement_id: uuid.UUID | None) -> int:
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
         seconds=get_settings().stale_run_seconds
     )
-    conditions = [ScanRun.state.in_(_ACTIVE_STATES), ScanRun.heartbeat_at < cutoff]
+    conditions = [
+        ScanRun.state.in_(_ACTIVE_STATES), ScanRun.heartbeat_at < cutoff,
+        # REQ-MODE-016: a run parked on a person's decision has no worker and polls
+        # nothing; it is not abandoned, it waits (its approval expires on its own).
+        ScanRun.checkpoint["parked"].astext.is_(None),
+    ]
     if engagement_id is not None:
         conditions.append(ScanRun.engagement_id == engagement_id)
     stale = db.scalars(select(ScanRun).where(*conditions).with_for_update()).all()
     resumed: list[ScanRun] = []
+    aborted: list[ScanRun] = []
     reaped = 0
     for run in stale:
         if _try_resume(run):
@@ -163,9 +184,15 @@ def _reap(db: Session, *, engagement_id: uuid.UUID | None) -> int:
         run.state = "aborted"
         run.state_reason = "reaped_stale_heartbeat"
         run.finished_at = datetime.datetime.now(datetime.timezone.utc)
+        aborted.append(run)
         reaped += 1
     if stale:
         db.commit()
+    for run in aborted:
+        # REQ-MODE-012: an abandoned run of a monitor is a failed run, visible as one.
+        from app import monitoring  # local import: monitoring imports models, not this module
+
+        monitoring.on_run_finished(db, run)
     for run in resumed:
         append_audit_log(
             db, engagement_id=run.engagement_id, actor="control-plane", action="scan_run_resumed",
@@ -197,3 +224,83 @@ def _try_resume(run: ScanRun) -> bool:
     run.owner_task_id = None
     run.heartbeat_at = datetime.datetime.now(datetime.timezone.utc)
     return True
+
+
+# ---- semi-attended runs: park on a decision, resume when it is made (REQ-MODE-016) ----
+
+
+def park_run(db: Session, run: ScanRun, *, approval_id: str, resume_state: dict, attempt: int | None = None) -> None:
+    """The worker hands the run back while it waits for a person: the run stays
+    `waiting_approval`, what the agent needs to continue is stored in the checkpoint,
+    and the worker task ends - no worker slot is held while nobody answers.
+
+    The same run stays open on purpose. The approval is bound to this run's id and
+    the gateway re-checks the run when the call is claimed, so approving into a new
+    run would mean re-binding an approval, which must not loosen."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    checkpoint = dict(run.checkpoint or {})
+    checkpoint["parked"] = {"approval_id": approval_id, "since": now.isoformat()}
+    checkpoint["agent_resume"] = resume_state
+    run.checkpoint = checkpoint
+    run.state = "waiting_approval"
+    run.owner_task_id = None
+    run.heartbeat_at = now
+
+
+def resume_parked_run(db: Session, run: ScanRun) -> bool:
+    """Queue the same run again so a worker continues it. Returns True when it was
+    queued. Idempotent: a run that is not parked, or whose approval is still open,
+    is left alone. Never resumes a run the operator stopped."""
+    parked = (run.checkpoint or {}).get("parked")
+    if not isinstance(parked, dict) or run.state != "waiting_approval" or run.cancel_requested:
+        return False
+    from app.models.approval import ApprovalRequest
+
+    approval = db.get(ApprovalRequest, uuid.UUID(str(parked.get("approval_id"))))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if approval is not None and approval.state == "requested":
+        if approval.expires_at >= now:
+            return False  # still waiting for the person
+        approval.state = "expired"
+    params = (run.checkpoint or {}).get("params") or {}
+    kwargs = {k: v for k, v in params.items() if v is not None}
+    try:
+        from app.celery_client import enqueue_scan
+
+        enqueue_scan(str(run.engagement_id), str(run.id), **kwargs)
+    except Exception:  # noqa: BLE001 - stays parked; the next sweep tries again
+        logger.warning("parked scan_run %s: resume could not be queued", run.id, exc_info=True)
+        return False
+    checkpoint = dict(run.checkpoint or {})
+    checkpoint.pop("parked", None)
+    run.checkpoint = checkpoint
+    run.state = "running"
+    run.owner_task_id = None
+    run.heartbeat_at = now
+    try:
+        from app import monitoring  # local import: monitoring imports models, not this module
+
+        monitoring.resolve_inbox_items(db, run.engagement_id, f"run_needs_you:{parked.get('approval_id')}", "system")
+    except Exception:  # noqa: BLE001 - the inbox is a courtesy; the run is what matters
+        logger.warning("could not resolve the inbox item of parked scan_run %s", run.id, exc_info=True)
+    return True
+
+
+def resume_decided_parked_runs(db: Session) -> int:
+    """Sweep: resume every parked run whose approval was decided or has expired. The
+    approve/reject endpoints resume at once; this catches expiry and a failed queue."""
+    runs = db.scalars(
+        select(ScanRun).where(ScanRun.state == "waiting_approval", ScanRun.checkpoint["parked"].astext.is_not(None))
+        .with_for_update(skip_locked=True)
+    ).all()
+    resumed = 0
+    for run in runs:
+        if resume_parked_run(db, run):
+            resumed += 1
+            append_audit_log(
+                db, engagement_id=run.engagement_id, actor="control-plane", action="scan_run_resumed",
+                decision=None, reason="parked_approval_decided",
+                payload={"scan_run_id": str(run.id), "phase": run.phase},
+            )
+    db.commit()
+    return resumed

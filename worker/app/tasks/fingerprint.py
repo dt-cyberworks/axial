@@ -14,6 +14,7 @@ tool-runner laufen, der als einziger Netzwerksicht auf die Ziele hat.
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import ipaddress
 import json
@@ -41,7 +42,7 @@ from app.tech_profile import MAX_PROFILE_ENTRIES, build_profile
 from app.target_envelope import httpx_target, protocol_from_httpx_url, single_port_from_envelope, target_url
 from app.testssl_parse import parse_testssl_json, testssl_scan_problem
 from app.tool_runner_client import FFUF_WORDLISTS, NUCLEI_OOB_PARTS, OOB_SERVER_URL, nuclei_select_budget_s, tool_runner
-from app import scan_executor, tool_execution
+from app import approval_wait, scan_executor, tool_execution
 from app.wafw00f_parse import parse_wafw00f
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,21 @@ class _PortScanResult:
     services: list[dict]
     scanned_by: str
     succeeded: bool
+    # GitHub issue #60: why the scan, although it ran to the end, is not a clean port scan.
+    partial_reasons: tuple[str, ...] = ()
+
+
+# GitHub issue #60: the partial reasons of the port scan being executed, collected in the thread
+# that runs it (the scan returns (services, succeeded); this carries what else the caller needs).
+_PORT_SCAN_PARTIAL: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "asm_port_scan_partial", default=None,
+)
+
+
+def _note_port_scan_partial(reasons: list[str]) -> None:
+    notes = _PORT_SCAN_PARTIAL.get()
+    if notes is not None:
+        notes.extend(reason for reason in reasons if reason not in notes)
 
 
 @dataclasses.dataclass
@@ -97,10 +113,11 @@ def _port_scan_key(ip: str, envelope: dict) -> tuple[str, int | None, int | None
     return (ip, envelope.get("tcp_port_from"), envelope.get("tcp_port_to"))
 
 
-def _reused_result(scanned_by: str) -> dict:
+def _reused_result(scanned_by: str, partial_reasons: tuple[str, ...] = ()) -> dict:
     """REQ-FPEFF-002: reuse is recorded, never silent - the audit trail must
-    show why this host ran no scan of its own and which one covered it."""
-    return {
+    show why this host ran no scan of its own and which one covered it. A reused scan that
+    had holes (GitHub issue #60) is reused with the same verdict, never as a clean one."""
+    result = {
         "success": True,
         "exit_code": 0,
         "stdout": "",
@@ -108,6 +125,10 @@ def _reused_result(scanned_by: str) -> dict:
         "error_reason": None,
         "outcome_summary": {"reused_from": scanned_by},
     }
+    if partial_reasons:
+        result["outcome"] = "partial"
+        result["outcome_summary"]["partial_reasons"] = list(partial_reasons)
+    return result
 
 
 def _web_surface_key(ip: str | None, port: int | None, probe: dict) -> tuple | None:
@@ -156,6 +177,19 @@ def _propose(
         decision = client.authorize(uuid.UUID(engagement_id), payload)
         if decision["allowed"]:
             return decision
+        if decision.get("is_pending"):
+            # REQ-MODE-005: a call that needs a person's decision is waited for (or,
+            # in a run nobody supervises, withdrawn) - never skipped with an
+            # approval request left behind.
+            resolved, reason = approval_wait.resolve_pending(
+                engagement_id, decision, tool=tool, target=target, scan_run_id=scan_run_id,
+                rationale=str(args.get("rationale", "")) if isinstance(args, dict) else "",
+            )
+            if resolved is not None:
+                return resolved
+            logger.info("%s on %s not executed: %s", tool, target, reason)
+            tool_execution.note_denied(tool, reason)
+            return None
         if decision.get("is_throttled") and decision.get("retry_after_seconds") is not None:
             delay = min(max(float(decision["retry_after_seconds"]), 0.1), 5.0)
             logger.info("%s on %s throttled: waiting %.2fs before asking the gateway again", tool, target, delay)
@@ -258,11 +292,18 @@ def _execute_port_scan(
                 port_range=str(tcp_lease.get("port_range") or "configured_tcp"),
             ))
         else:
+            # GitHub issue #60: ports earlier runs found open on this address. Best effort: without
+            # the list the scan is exactly what it was before, only without the comparison.
+            expected_ports: list[int] = []
+            try:
+                expected_ports = client.known_open_ports(uuid.UUID(engagement_id), ip, scan_run_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("known open ports for %s unavailable (%s); no comparison with earlier runs", ip, exc)
             executions.append(execute_configured_tcp_scan(
                 ip, str(tcp_lease["lease_token"]), reservation_token=reservation_token,
                 max_rate=int(tcp_lease.get("max_rate") or 300),
                 port_range=str(tcp_lease.get("port_range") or "1-65535"),
-                scan_run_id=scan_run_id,
+                scan_run_id=scan_run_id, expected_ports=expected_ports,
             ))
             if tcp_lease.get("udp_discovery_enabled"):
                 udp_lease = acquire("targeted_udp")
@@ -321,6 +362,8 @@ def _execute_port_scan(
                 outcome.protocol, target, outcome.result.get("error_reason"),
             )
         services.extend(outcome.services)
+        if tool_execution.outcome_of(outcome.result) == "partial":
+            _note_port_scan_partial(list((outcome.result.get("outcome_summary") or {}).get("partial_reasons") or []))
 
     return _persist_services(engagement_id, asset_id, target, services), any(
         outcome.result.get("success") for outcome in executions
@@ -353,14 +396,19 @@ def _nmap_scan(
             engagement_id, scan_run_id=scan_run_id, tool="nmap", phase="fingerprint",
             authorized_target=target, resolved_target=ip,
             port_range=f"{key[1]}-{key[2]}" if key[1] is not None else "configured_tcp",
-            result=_reused_result(cached.scanned_by),
+            result=_reused_result(cached.scanned_by, cached.partial_reasons),
             discovered_services=len(cached.services),
         )
         # The services still attach to THIS asset - reuse saves the scan, not
         # the inventory.
         return _persist_services(engagement_id, asset_id, target, cached.services), cached.succeeded
 
-    services, succeeded = _execute_port_scan(engagement_id, asset_id, target, ip, scan_run_id)
+    notes: list[str] = []
+    token = _PORT_SCAN_PARTIAL.set(notes)
+    try:
+        services, succeeded = _execute_port_scan(engagement_id, asset_id, target, ip, scan_run_id)
+    finally:
+        _PORT_SCAN_PARTIAL.reset(token)
     # Only a SUCCESSFUL scan is evidence worth reusing. Caching a failure would
     # be wrong twice over: the reuse record would claim a success that never
     # happened (masking REQ-SCAN-014's coverage-degraded signal, which treats
@@ -368,7 +416,9 @@ def _nmap_scan(
     # retry that may well succeed - a stale-materialization denial in
     # particular clears the moment the next host re-materializes.
     if succeeded:
-        ctx.port_scans[key] = _PortScanResult(services=services, scanned_by=target, succeeded=True)
+        ctx.port_scans[key] = _PortScanResult(
+            services=services, scanned_by=target, succeeded=True, partial_reasons=tuple(notes),
+        )
     return services, succeeded
 
 
@@ -1191,6 +1241,11 @@ def run(
     attempt found) reads its stored plan and continues with the checks that were
     not finished (REQ-PIPE-008)."""
     settings = client.get_scan_settings(uuid.UUID(engagement_id))
+    # REQ-MODE-011: the depth the RUN started with (a schedule tier or a person may
+    # choose another than the engagement's default); the claim carries it.
+    run_depth = client.run_info(scan_run_id).get("scan_profile") if scan_run_id else None
+    if run_depth in ("light", "standard", "thorough"):
+        settings = {**settings, "scan_profile": run_depth}
     plan_exists = False
     if scan_run_id is not None and resume_services is not None:
         try:

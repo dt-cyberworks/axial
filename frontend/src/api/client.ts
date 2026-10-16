@@ -5,6 +5,12 @@
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
 export type ScanProfile = "standard" | "thorough";
+// REQ-MODE-011: the depths below `standard` that a monitoring engagement can use.
+export type RunDepth = ScanProfile | "passive" | "light";
+// REQ-MODE-001: what an engagement is used for.
+export type OperatingMode = "monitoring" | "assessment";
+// REQ-MODE-002: how a run is supervised.
+export type Supervision = "attended" | "semi_attended" | "unattended";
 
 export interface Engagement {
   id: string;
@@ -26,6 +32,11 @@ export interface Engagement {
   screenshots_enabled: boolean;
   // REQ-PIPE-005: how deep a scan goes. Never widens scope, grants or switches.
   scan_profile: ScanProfile;
+  // REQ-MODE-001/008/012: monitoring runs unattended and never waits for a person.
+  operating_mode: OperatingMode;
+  new_asset_policy: "auto" | "hold";
+  fragility_breaker: boolean;
+  review_at: string | null;
   authorized_from: string;
   authorized_until: string;
   emergency_contact: string | null;
@@ -55,6 +66,10 @@ export interface EngagementUpdate {
   oob_enabled?: boolean;
   screenshots_enabled?: boolean;
   scan_profile?: ScanProfile;
+  operating_mode?: OperatingMode;
+  new_asset_policy?: "auto" | "hold";
+  fragility_breaker?: boolean;
+  review_at?: string | null;
   // REQ-AUTH-001/003 (amended, GitHub issue #12): source stays hidden from
   // every ROUTINE edit - this field exists only so the one explicit "this
   // engagement follows a bug bounty program" toggle can set it. No other
@@ -257,6 +272,145 @@ export interface ScanRun {
   current_target: string | null;
   current_started_at: string | null;
   scan_profile?: ScanProfile | null;
+  // REQ-MODE-002/012/017
+  trigger?: "manual" | "scheduled";
+  initiated_by?: string | null;
+  supervision?: Supervision | null;
+  health?: "ok" | "degraded" | "failed" | null;
+  scope_hosts?: string[] | null;
+  retest_finding_id?: string | null;
+}
+
+// REQ-MODE-006: a capability is a named function an engagement switches on or off once.
+export interface Capability {
+  id: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  unavailable_reason: string | null;
+}
+export interface Capabilities {
+  operating_mode: OperatingMode;
+  scan_profile: RunDepth;
+  new_asset_policy: "auto" | "hold";
+  fragility_breaker: boolean;
+  capabilities: Capability[];
+}
+export interface CapabilitiesUpdate {
+  capabilities?: Record<string, boolean>;
+  scan_profile?: RunDepth;
+  new_asset_policy?: "auto" | "hold";
+  fragility_breaker?: boolean;
+  confirm_widening?: boolean;
+}
+
+// REQ-MODE-013: what changed between healthy runs.
+export interface ChangeEvent {
+  id: string;
+  kind: string;
+  subject: string;
+  severity: string | null;
+  detail: Record<string, unknown>;
+  scan_run_id: string | null;
+  created_at: string;
+}
+// REQ-MON-001/003/004: run every N days.
+export interface MonitorSchedule {
+  every_days: number | null;
+  next_run_at: string | null;
+  set_at: string | null;
+  skip_reason: string | null;
+  skip_message: string | null;
+  skip_since: string | null;
+  min_days: number;
+  max_days: number;
+}
+export interface MonitorHealth {
+  operating_mode: OperatingMode;
+  status: string;
+  last_ok_run_at: string | null;
+  last_run_health: string | null;
+  last_run_state: string | null;
+  review_at: string | null;
+  authorized_until: string | null;
+  open_inbox_items: number;
+  schedule: MonitorSchedule;
+}
+
+// REQ-MODE-014: everything that needs a person, in one list.
+export interface InboxEntry {
+  id: string;
+  source: "inbox" | "approval" | "asset_review";
+  kind: string;
+  engagement_id: string;
+  engagement_title: string;
+  summary: string;
+  created_at: string;
+  link: string;
+  can_acknowledge: boolean;
+}
+
+// REQ-MON-002: webhook targets (the secret is write-only).
+export interface NotificationTarget {
+  id: string;
+  kind: "webhook";
+  url: string;
+  min_severity: "critical" | "high" | "medium" | "low" | "info";
+  enabled: boolean;
+  has_secret: boolean;
+  created_at: string | null;
+}
+export interface AlertRecord {
+  id: string;
+  event: string;
+  title: string | null;
+  state: "pending" | "delivered" | "failed";
+  attempts: number;
+  immediate: boolean;
+  last_error: string | null;
+  created_at: string;
+  delivered_at: string | null;
+}
+
+// REQ-MODE-006: what a NEW monitoring engagement starts with (admin).
+export interface MonitoringDefaults {
+  capabilities: Record<string, boolean>;
+  scan_profile: RunDepth;
+  new_asset_policy_customer: "auto" | "hold";
+  new_asset_policy_other: "auto" | "hold";
+  fragility_breaker: boolean;
+  max_concurrent_monitoring_runs: number;
+}
+
+// REQ-MAIL-002 (GitHub issue #45): the administrator's mail relay. The password is write-only.
+export interface MailConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  security: "starttls" | "tls";
+  username: string;
+  password_set: boolean;
+  from_address: string;
+  from_name: string;
+  available: boolean;
+  last_test: { state: "pending" | "delivered" | "failed"; attempts: number; error: string | null; at: string } | null;
+}
+export interface MailConfigUpdate {
+  enabled: boolean;
+  host: string;
+  port: number;
+  security: "starttls" | "tls";
+  username: string;
+  password?: string;
+  from_address: string;
+  from_name: string;
+}
+
+export interface ScanStartOptions {
+  supervision?: "attended" | "semi_attended";
+  hosts?: string[];
+  retest_finding_id?: string;
+  scan_profile?: RunDepth;
 }
 
 // REQ-PIPE-003/010: what a run planned, and what became of each check.
@@ -500,6 +654,13 @@ export interface ApprovalTimeoutSeconds {
   value: number;
 }
 
+// REQ-BUDGET-001: the global tool-call budget of a run.
+export interface ToolCallBudget {
+  value: number;
+  min: number;
+  max: number;
+}
+
 export interface EngagementToolConfig {
   tool: string;
   enabled: boolean;
@@ -631,6 +792,10 @@ clearSession();
 // REQ-IAM-019: every request proves it comes from the console. A cross-site
 // page cannot add this header without a CORS preflight, which the API refuses.
 const CONSOLE_HEADERS = { "X-Requested-With": "asm-console" };
+const CSRF_REFUSAL = "missing anti-CSRF header";
+const STALE_CONSOLE_HINT =
+  "This page is out of date or a browser extension removed its security header. " +
+  "Reload it without the cache (Ctrl+Shift+R) and try again; if it persists, try a private window.";
 
 async function request<T>(path: string, init?: RequestInit, isRetry = false): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -658,7 +823,14 @@ async function request<T>(path: string, init?: RequestInit, isRetry = false): Pr
       // Keep the status-only message if the response body is not JSON.
     }
     const suffix = detail ? `: ${detail}` : "";
-    throw new ApiError(`${init?.method ?? "GET"} ${path} -> ${res.status}${suffix}`, res.status);
+    const summary = `${init?.method ?? "GET"} ${path} -> ${res.status}${suffix}`;
+    // REQ-IAM-026: the API refuses a change that arrives without the console's header. The
+    // console always sends it, so this means an old copy of the page is open (or something
+    // between the browser and the API removed the header). Say what to do about it.
+    if (res.status === 403 && detail === CSRF_REFUSAL) {
+      throw new ApiError(`${STALE_CONSOLE_HINT} (${summary})`, res.status);
+    }
+    throw new ApiError(summary, res.status);
   }
   return res.status === 204 ? (undefined as T) : res.json();
 }
@@ -720,7 +892,59 @@ export const api = {
     request<Engagement>(`/engagements/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteEngagement: (id: string) => request<void>(`/engagements/${id}`, { method: "DELETE" }),
   activateEngagement: (id: string) => request<Engagement>(`/engagements/${id}/activate`, { method: "POST" }),
-  startScan: (id: string) => request<{ task_id: string }>(`/engagements/${id}/scan`, { method: "POST" }),
+  startScan: (id: string, options?: ScanStartOptions) =>
+    request<{ task_id: string; scan_run_id?: string; supervision?: Supervision }>(`/engagements/${id}/scan`, {
+      method: "POST",
+      ...(options && Object.keys(options).length > 0 ? { body: JSON.stringify(options) } : {}),
+    }),
+  // REQ-MODE-003: pause stops the active run; resume needs an open window; close and revoke end it.
+  pauseEngagement: (id: string) => request<Engagement>(`/engagements/${id}/pause`, { method: "POST" }),
+  resumeEngagement: (id: string) => request<Engagement>(`/engagements/${id}/resume`, { method: "POST" }),
+  closeEngagement: (id: string) => request<Engagement>(`/engagements/${id}/close`, { method: "POST" }),
+  revokeEngagement: (id: string) => request<Engagement>(`/engagements/${id}/revoke`, { method: "POST" }),
+  // REQ-MODE-006/013/014, REQ-MON-002
+  getCapabilities: (id: string) => request<Capabilities>(`/engagements/${id}/capabilities`),
+  updateCapabilities: (id: string, body: CapabilitiesUpdate) =>
+    request<Capabilities>(`/engagements/${id}/capabilities`, { method: "PUT", body: JSON.stringify(body) }),
+  listChanges: (id: string, params: { run_id?: string; kind?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.run_id) query.set("run_id", params.run_id);
+    if (params.kind) query.set("kind", params.kind);
+    if (params.limit) query.set("limit", String(params.limit));
+    const suffix = query.toString();
+    return request<ChangeEvent[]>(`/engagements/${id}/changes${suffix ? `?${suffix}` : ""}`);
+  },
+  getMonitorHealth: (id: string) => request<MonitorHealth>(`/engagements/${id}/health`),
+  getSchedule: (id: string) => request<MonitorSchedule>(`/engagements/${id}/schedule`),
+  putSchedule: (id: string, everyDays: number | null) =>
+    request<MonitorSchedule>(`/engagements/${id}/schedule`, { method: "PUT", body: JSON.stringify({ every_days: everyDays }) }),
+  listNotificationTargets: (id: string) => request<NotificationTarget[]>(`/engagements/${id}/notification-targets`),
+  addNotificationTarget: (id: string, body: { url: string; secret?: string; min_severity?: NotificationTarget["min_severity"] }) =>
+    request<NotificationTarget>(`/engagements/${id}/notification-targets`, { method: "POST", body: JSON.stringify(body) }),
+  deleteNotificationTarget: (id: string, targetId: string) =>
+    request<void>(`/engagements/${id}/notification-targets/${targetId}`, { method: "DELETE" }),
+  listAlerts: (id: string) => request<AlertRecord[]>(`/engagements/${id}/alerts`),
+  listInbox: () => request<InboxEntry[]>("/inbox"),
+  inboxCount: () => request<{ count: number }>("/inbox/count"),
+  acknowledgeInboxItem: (itemId: string) =>
+    request<{ id: string; state: string; released_asset: string | null }>(`/inbox/${itemId}/acknowledge`, { method: "POST" }),
+  releaseHeldAssets: (engagementId: string) =>
+    request<{ released: string[] }>(`/inbox/release-held?engagement_id=${engagementId}`, { method: "POST" }),
+  // REQ-IAM-020 (GitHub issue #44) / REQ-MAIL-001..004 (#45)
+  recoveryOptions: () => request<{ self_service_reset: boolean }>("/auth/recovery-options"),
+  requestPasswordReset: (email: string) =>
+    request<{ status: string; detail: string }>("/auth/password-reset/request", { method: "POST", body: JSON.stringify({ email }) }),
+  completePasswordReset: (token: string, newPassword: string, code: string) =>
+    request<void>("/auth/password-reset/complete", {
+      method: "POST", body: JSON.stringify({ token, new_password: newPassword, code }),
+    }),
+  getMailConfig: () => request<MailConfig>("/settings/mail"),
+  updateMailConfig: (body: MailConfigUpdate) =>
+    request<MailConfig>("/settings/mail", { method: "PUT", body: JSON.stringify(body) }),
+  sendTestMail: () => request<MailConfig>("/settings/mail/test", { method: "POST" }),
+  getMonitoringDefaults: () => request<MonitoringDefaults>("/settings/monitoring-defaults"),
+  updateMonitoringDefaults: (body: Partial<MonitoringDefaults>) =>
+    request<MonitoringDefaults>("/settings/monitoring-defaults", { method: "PUT", body: JSON.stringify(body) }),
   scanReadiness: (id: string) => request<ScanReadiness>(`/engagements/${id}/scan-readiness`),
   cancelScanRun: (id: string, runId: string) =>
     request<{ scan_run_id: string; cancel_requested: boolean; state: "aborted"; state_reason: string }>(
@@ -854,6 +1078,9 @@ export const api = {
     request<AgentPrompt>("/settings/agent-prompt", { method: "PUT", body: JSON.stringify({ prompt }) }),
   getAgentMaxIterations: () => request<AgentMaxIterations>("/settings/agent-max-iterations"),
   // REQ-AGENT-026
+  getToolCallBudget: () => request<ToolCallBudget>("/settings/tool-call-budget"),
+  updateToolCallBudget: (value: number) =>
+    request<ToolCallBudget>("/settings/tool-call-budget", { method: "PUT", body: JSON.stringify({ value }) }),
   getAgentMaxTokens: () => request<AgentMaxTokens>("/settings/agent-max-tokens"),
   updateAgentMaxTokens: (value: number) =>
     request<AgentMaxTokens>("/settings/agent-max-tokens", { method: "PUT", body: JSON.stringify({ value }) }),

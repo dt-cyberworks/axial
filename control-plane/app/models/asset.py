@@ -32,6 +32,11 @@ class DiscoveredAsset(Base):
     # same confirmed-dead subdomains in every one of 3 consecutive scan runs).
     http_checked_at: Mapped[datetime.datetime | None]
     http_live: Mapped[bool | None]
+    # REQ-MODE-008: `held` = inventoried but not tested until acknowledged.
+    hold_state: Mapped[str | None] = mapped_column(String)
+    held_at: Mapped[datetime.datetime | None]
+    released_at: Mapped[datetime.datetime | None]
+    released_by: Mapped[str | None] = mapped_column(String)
 
 
 class Service(Base):

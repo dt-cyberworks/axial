@@ -25,7 +25,7 @@ import fnmatch
 from app.config import get_settings
 from app.gateway.audit import append_audit_log
 from app.gateway.authorize import Decision, ToolCall, authorize
-from app.gateway.raw_egress_policy import render_for_engagement
+from app.gateway.raw_egress_policy import policy_for_engagement
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset
 from app.models.resolved_host import ResolvedHost
 from app.models.scan_run import ScanRun
@@ -98,7 +98,7 @@ def _audit_denial(
 
 def _ip_is_allowed_by_current_policy(db: Session, engagement_id: uuid.UUID, address: str) -> bool:
     ip = ipaddress.ip_address(address)
-    rendered = render_for_engagement(db, engagement_id)
+    rendered = policy_for_engagement(db, engagement_id)
     for block in rendered.ip_blocks:
         network = ipaddress.ip_network(block["cidr"], strict=False)
         if ip.version != network.version or ip not in network:
@@ -119,7 +119,7 @@ def _network_is_allowed_by_current_policy(db: Session, engagement_id: uuid.UUID,
     (subnet containment) rather than point containment, and rejects any
     overlap with a deny exception rather than only an exact match, since a
     sweep touches every address in the range, not one resolved point."""
-    rendered = render_for_engagement(db, engagement_id)
+    rendered = policy_for_engagement(db, engagement_id)
     for block in rendered.ip_blocks:
         allow_net = ipaddress.ip_network(block["cidr"], strict=False)
         if network.version != allow_net.version or not (network == allow_net or network.subnet_of(allow_net)):

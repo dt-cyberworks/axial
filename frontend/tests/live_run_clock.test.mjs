@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readRecord, record } from "./_records.mjs";
 
 const repo = resolve(import.meta.dirname, "../..");
 const read = (path) => readFileSync(resolve(repo, path), "utf8");
 
-const requirement = read("docs/requirements/operator-console-usability-fixes.md");
+const requirement = readRecord("requirements", "operator-console-usability-fixes.md");
 const ticker = read("frontend/src/lib/useTicker.ts");
 const runs = read("frontend/src/lib/runs.ts");
 const runDetail = read("frontend/src/pages/RunDetail.tsx");
 
-assert.match(requirement, /## REQ-RUNUI-001:/);
+record.match(requirement, /## REQ-RUNUI-001:/);
 
 // A clock exists, ticks once per second, and is cleaned up.
 assert.match(ticker, /setInterval\(/, "the ticker must schedule an interval");
