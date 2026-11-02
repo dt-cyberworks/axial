@@ -28,7 +28,7 @@ Four switches, under **Discovery extras** in the wizard's advanced options and o
 |---|---|---|---|
 | Passive subdomain sources | **on** | you want the most complete list of names | no traffic to your systems; only public sources are asked |
 | Crawling and URL history | off | the site has pages and parameters its front page does not list | a shallow crawl (two levels) of in-scope sites under the rate limit; archived URLs from web archives; nuclei then tests up to 50 URLs with parameters |
-| Out-of-band testing | off | you want blind vulnerabilities found (those where the target has to call back) | needs the platform's own interaction server; if it is not set up the pass is recorded as unavailable |
+| Out-of-band testing | off | you want blind vulnerabilities found (those where the target has to call back) | needs the platform's own interaction server; if it is not set up the pass is recorded as unavailable, and the Plan tab and the report name the template classes that did not run |
 | Web screenshots | off | you want to see what each page looks like and spot forgotten apps | one page load per service; screenshots are shown on the **Assets** tab and kept out of the PDF report |
 
 What each does exactly: [Tools](../tools.md#optional-discovery-extras). The engagement's header lists the ones that are on, and the [authorization PDF](authorize-and-activate.md) states the state of each, so tell your client before you switch one on after they signed.

@@ -34,10 +34,11 @@ DEFAULT_MONITORING_DEFAULTS: dict = {
         "screenshots": False, "out_of_band": False, "agent": False,
     },
     "scan_profile": "standard",
-    # `hold` for customer engagements (the unattended form of the asset review),
-    # `auto` otherwise.
-    "new_asset_policy_customer": "hold",
-    "new_asset_policy_other": "auto",
+    # REQ-BASE-005: what happens to a host found after the baseline: `hold` (inventoried, not
+    # tested until released, the unattended form of the asset review) or `auto`. One value for every
+    # engagement: authorization is what matters, not whose systems they are. Chosen again per
+    # engagement on the target screen.
+    "new_asset_policy": "hold",
     "fragility_breaker": True,
 }
 
@@ -69,9 +70,8 @@ def get_monitoring_defaults(db: Session) -> dict:
                     merged["capabilities"][key] = bool(caps[key])
         if stored.get("scan_profile") in SCAN_PROFILES:
             merged["scan_profile"] = stored["scan_profile"]
-        for key in ("new_asset_policy_customer", "new_asset_policy_other"):
-            if stored.get(key) in ("auto", "hold"):
-                merged[key] = stored[key]
+        if stored.get("new_asset_policy") in ("auto", "hold"):
+            merged["new_asset_policy"] = stored["new_asset_policy"]
         if "fragility_breaker" in stored:
             merged["fragility_breaker"] = bool(stored["fragility_breaker"])
     return merged
@@ -89,11 +89,10 @@ def set_monitoring_defaults(db: Session, values: dict) -> dict:
         if values["scan_profile"] not in SCAN_PROFILES:
             raise ValueError("scan_profile must be passive, light, standard or thorough")
         current["scan_profile"] = values["scan_profile"]
-    for key in ("new_asset_policy_customer", "new_asset_policy_other"):
-        if values.get(key) is not None:
-            if values[key] not in ("auto", "hold"):
-                raise ValueError(f"{key} must be auto or hold")
-            current[key] = values[key]
+    if values.get("new_asset_policy") is not None:
+        if values["new_asset_policy"] not in ("auto", "hold"):
+            raise ValueError("new_asset_policy must be auto or hold")
+        current["new_asset_policy"] = values["new_asset_policy"]
     if values.get("fragility_breaker") is not None:
         current["fragility_breaker"] = bool(values["fragility_breaker"])
     _put(db, MONITORING_DEFAULTS_KEY, current)

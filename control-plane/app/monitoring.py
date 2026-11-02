@@ -156,6 +156,7 @@ def _last_healthy_runs(db: Session, run: ScanRun, limit: int = 2) -> list[ScanRu
         select(ScanRun)
         .where(
             ScanRun.engagement_id == run.engagement_id, ScanRun.id != run.id, ScanRun.health == "ok",
+            ScanRun.trigger != "baseline",  # REQ-BASE-001: a discovery is never a comparison baseline
             ScanRun.started_at < run.started_at,
         )
         .order_by(ScanRun.started_at.desc())
@@ -215,6 +216,12 @@ def _event(db: Session, run: ScanRun, kind: str, subject: str, severity: str | N
     )
     db.add(ev)
     return ev
+
+
+def record_auth_event(db: Session, run: ScanRun, kind: str, item: dict) -> ChangeEvent:
+    """REQ-TESTACCT-008: a monitor learns when its authenticated coverage of a host is lost and when it comes back."""
+    subject = f"Test account {item['label']} on {item['host']}"
+    return _event(db, run, kind, subject, None, {"label": item["label"], "host": item["host"]})
 
 
 def compute_changes(db: Session, run: ScanRun) -> list[ChangeEvent]:
@@ -305,6 +312,18 @@ def apply_retest(db: Session, run: ScanRun) -> None:
     finding = db.get(Finding, run.retest_finding_id)
     if finding is None or finding.engagement_id != run.engagement_id or finding.status != "open":
         return
+    if run.retest_items is not None:
+        # REQ-RETEST-001: a restricted run resolves a finding only when the check that produced it ran completely.
+        from app import open_items  # lazy: open_items imports this module
+
+        if not open_items.retest_complete(db, run, finding):
+            append_audit_log(
+                db, engagement_id=run.engagement_id,
+                actor=f"user:{run.initiated_by}" if run.initiated_by else "control-plane",
+                action="finding_retest", decision="DENY", reason="retest_incomplete",
+                payload={"finding_id": str(finding.id), "scan_run_id": str(run.id)},
+            )
+            return
     still_there = finding.fingerprint in _observed(db, run.id)
     if not still_there:
         finding.status = "resolved"
@@ -328,8 +347,25 @@ def on_run_finished(db: Session, run: ScanRun) -> dict:
             return summary
         run.health = health_of(run)
         summary["health"] = run.health
+        from app import open_items  # lazy: open_items imports this module
+
+        open_items.reconcile_sent(db, run)  # REQ-RETEST-006/007: a confirmed request that was not sent is open again
+        if run.trigger == "baseline":
+            # REQ-BASE-001: opens the selection; no snapshot, change events or health alerts.
+            from app import targets  # lazy: targets imports this module
+
+            targets.on_discovery_finished(db, eng, run)
+            db.commit()
+            return summary
         apply_retest(db, run)
-        if eng.operating_mode != "monitoring":
+        restricted = run.retest_items is not None or bool(run.scope_hosts)
+        if eng.operating_mode != "monitoring" or restricted:
+            # REQ-DIFF-003: an assessment's run is snapshotted too, so the Diff tab can compare hosts and ports.
+            # No change events, alerts or health items: those belong to a monitor. REQ-RETEST-002: a run limited to
+            # some hosts or checks gets the same treatment even on a monitor, because comparing it with a full run
+            # would report everything it did not look at as gone; it is never a baseline (scan_diff._previous_run).
+            if run.health != "failed":
+                build_snapshot(db, run)
             db.commit()
             return summary
         if run.health != "failed":
@@ -381,6 +417,10 @@ def evaluate_hold(db: Session, run: ScanRun, candidates: list[dict]) -> dict:
     row value was declared by the owner and is never held."""
     eng = db.get(Engagement, run.engagement_id)
     ids = [c.get("asset_id") for c in candidates if c.get("asset_id")]
+    # REQ-BASE-001: the discovery of the target baseline tests nothing and its selection screen is
+    # the review, so no host is held (and no inbox item raised) for it.
+    if run.trigger == "baseline":
+        return {"released": ids, "held": []}
     if eng is None or eng.operating_mode != "monitoring" or eng.new_asset_policy != "hold":
         return {"released": ids, "held": []}
 
@@ -435,6 +475,11 @@ def housekeeping(db: Session, now: dt.datetime | None = None) -> dict:
     Safe to call often: every item is raised once until it is resolved."""
     now = now or _now()
     result = {"missed_runs": 0, "expiring": 0}
+    # REQ-TESTACCT-002: accounts of an engagement that ended or whose authorization window closed lose their secret.
+    from app import testaccounts
+
+    # The result keeps its two keys (the internal endpoint and its test pin that shape); the erased count is not part of it.
+    testaccounts.erase_expired(db)
     engagements = db.scalars(
         select(Engagement).where(Engagement.operating_mode == "monitoring", Engagement.status == "active")
     ).all()
@@ -443,7 +488,7 @@ def housekeeping(db: Session, now: dt.datetime | None = None) -> dict:
             window = dt.timedelta(days=int(eng.schedule_every_days)) * MISSED_RUN_FACTOR
             last_ok = db.scalar(
                 select(ScanRun.finished_at)
-                .where(ScanRun.engagement_id == eng.id, ScanRun.health == "ok")
+                .where(ScanRun.engagement_id == eng.id, ScanRun.health == "ok", ScanRun.trigger != "baseline")
                 .order_by(ScanRun.finished_at.desc()).limit(1)
             )
             since = last_ok or eng.schedule_set_at or eng.created_at

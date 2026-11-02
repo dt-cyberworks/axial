@@ -19,6 +19,7 @@ import dataclasses
 import ipaddress
 import json
 import logging
+import os
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -32,7 +33,7 @@ from app.known_vulns import lookup as lookup_known_vuln
 from app.lab_hosts import is_lab_host
 from app.nmap_parse import parse_nmap_grepable
 from app.nuclei_parse import parse_nuclei_jsonl, parse_nuclei_tech
-from app.planner import IndexInfo, Options, SurfaceInput, plan_surface, resolve_products
+from app.planner import IndexInfo, Options, SurfaceInput, plan_surface, resolve_products, restrict_checks
 from app.scan_executor import CheckRun, Handler
 from app.raw_egress_client import raw_egress_gateway
 from app.raw_nmap import RawNmapOutcome, execute_configured_tcp_scan, execute_targeted_udp_scan
@@ -41,7 +42,9 @@ from app.surfaces import classify_open_port, redirect_alias_port
 from app.tech_profile import MAX_PROFILE_ENTRIES, build_profile
 from app.target_envelope import httpx_target, protocol_from_httpx_url, single_port_from_envelope, target_url
 from app.testssl_parse import parse_testssl_json, testssl_scan_problem
-from app.tool_runner_client import FFUF_WORDLISTS, NUCLEI_OOB_PARTS, OOB_SERVER_URL, nuclei_select_budget_s, tool_runner
+from app.tool_runner_client import (
+    FFUF_WORDLISTS, NUCLEI_OOB_PARTS, OOB_SERVER_URL, is_ipv6_literal, nuclei_select_budget_s, tool_runner,
+)
 from app import approval_wait, scan_executor, tool_execution
 from app.wafw00f_parse import parse_wafw00f
 
@@ -102,6 +105,11 @@ class _RunContext:
     # REQ-PIPE-001: host -> web ports httpx confirmed live in this run and that
     # are not themselves aliases; a redirect-only port is an alias of one of them.
     live_web_ports: dict[str, set[int]] = dataclasses.field(default_factory=dict)
+    # REQ-SCAN-016 (GitHub #77): hosts for which an address was attempted and failed its port scan, and whether any
+    # port scan of this run succeeded. When one did, the failure is a hole in an otherwise working scan and is counted
+    # as partial coverage; when none did, the existing "tool never succeeded" rule already degrades the run.
+    unscanned_hosts: list[str] = dataclasses.field(default_factory=list)
+    scanned_any: bool = False
 
     def discovery_options(self, engagement_id: str) -> dict:
         if self.options is None:
@@ -145,6 +153,12 @@ def _web_surface_key(ip: str | None, port: int | None, probe: dict) -> tuple | N
     status = probe.get("status_code")
     if status is None:
         return None
+    if isinstance(status, int) and 300 <= status < 400 and not str(probe.get("title") or "").strip():
+        # A redirect with no title says nothing about what is behind it: two names on one address that both answer
+        # `/` with a redirect to `/login` have the same status, server, (empty) title and length whether they are one
+        # site or two (GitHub #78). No signal, so no deduplication: both are scanned (REQ-FPEFF-004, errs toward
+        # scanning).
+        return None
     return (
         ip,
         port or 443,
@@ -162,6 +176,21 @@ def _add_finding(*args, **kwargs):
     return result
 
 
+_CHECK_LABELS = {
+    "nuclei": "Nuclei templates", "ffuf": "Content discovery", "testssl": "TLS test", "wafw00f": "WAF detection",
+    "httpx": "HTTP probe", "katana": "Crawl", "screenshot": "Screenshot", "nikto": "Web server scan",
+}
+
+
+def automatic_scan_reason(tool: str, args: dict | None) -> str:
+    """REQ-APPROVAL-002: what an automatic check is for, in a sentence, so that a person who is asked to approve
+    it (or who reads the audit row) is told why it runs, not shown an empty reason."""
+    args = args if isinstance(args, dict) else {}
+    detail = args.get("wordlist") or args.get("group") or args.get("mode")
+    label = _CHECK_LABELS.get(tool, tool)
+    return f"{label}{f' ({detail})' if isinstance(detail, str) and detail else ''}, part of the automatic scan"
+
+
 def _propose(
     engagement_id: str, tool: str, category: str, target: str, args: dict,
     scan_run_id: str | None, phase: str = "fingerprint",
@@ -169,6 +198,7 @@ def _propose(
     payload = {
         "tool": tool, "category": category, "mode": "active", "target": target, "args": args,
         "is_automated": True, "phase": phase, "scan_run_id": scan_run_id,
+        "rationale": automatic_scan_reason(tool, args),
     }
     cancel_probe = CancelProbe.for_run(scan_run_id) if scan_run_id else None
     for attempt in range(8):
@@ -183,7 +213,6 @@ def _propose(
             # approval request left behind.
             resolved, reason = approval_wait.resolve_pending(
                 engagement_id, decision, tool=tool, target=target, scan_run_id=scan_run_id,
-                rationale=str(args.get("rationale", "")) if isinstance(args, dict) else "",
             )
             if resolved is not None:
                 return resolved
@@ -576,7 +605,7 @@ def _tls_scan(
         _add_finding(
             engagement_id, asset_id=asset_id, category="misconfig",
             title=f["title"], confidence="validated", severity_override=f["severity"],
-            evidence={"check": f["id"], "tool": "testssl"},
+            evidence={"check": f["id"], "tool": "testssl", "tested_name": target, **({"cve": f["cve"]} if f.get("cve") else {})},
             exposure_factor=1.0, business_factor=0.4,
         )
 
@@ -620,7 +649,8 @@ def _tls_service_scan(
         _add_finding(
             engagement_id, asset_id=asset_id, category="misconfig",
             title=f"{f['title']} ({label} on port {port})"[:240], confidence="validated", severity_override=f["severity"],
-            evidence={"check": f["id"], "tool": "testssl", "port": port, "service": label, "starttls": starttls},
+            evidence={"check": f["id"], "tool": "testssl", "port": port, "service": label, "starttls": starttls,
+                      "tested_name": target, **({"cve": f["cve"]} if f.get("cve") else {})},
             exposure_factor=1.0, business_factor=0.4,
         )
 
@@ -960,17 +990,35 @@ def _non_web_surfaces(
     return rows
 
 
-def _materialize(engagement_id: str, scan_run_id: str | None) -> dict[str, str]:
-    """Audited control-plane DNS materialization -> {hostname: ip}.
+def _is_ipv6(address: str) -> bool:
+    return is_ipv6_literal(address)
+
+
+def nmap_ipv6_enabled() -> bool:
+    """GitHub #77: IPv6 addresses are port-scanned like IPv4 ones. `NMAP_SCAN_IPV6=false` switches that off on purpose
+    (an installation whose tool-runner network carries no IPv6); the address is then recorded as skipped, never as
+    scanned."""
+    return os.environ.get("NMAP_SCAN_IPV6", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _materialize(engagement_id: str, scan_run_id: str | None) -> dict[str, list[str]]:
+    """Audited control-plane DNS materialization -> {hostname: [every audited address]}, IPv4 first.
 
     The worker never resolves DNS itself for this purpose: the snapshot the
     raw-egress lease validates against is control-plane-owned (trust anchor),
     and a worker-side resolution would not be the thing being checked.
+
+    GitHub #77: ALL addresses of a name are kept, not the first one - a dual-stack host whose first answer was the
+    AAAA record was never port-scanned over IPv4 at all.
     """
-    ip_by_host: dict[str, str] = {}
+    by_host: dict[str, list[str]] = {}
     for r in client.materialize_dns(uuid.UUID(engagement_id), scan_run_id=scan_run_id).get("resolved", []):
-        ip_by_host.setdefault(r["hostname"].lower(), r["ip_address"])
-    return ip_by_host
+        addresses = by_host.setdefault(r["hostname"].lower(), [])
+        if r["ip_address"] not in addresses:
+            addresses.append(r["ip_address"])
+    for addresses in by_host.values():
+        addresses.sort(key=_is_ipv6)  # stable: IPv4 addresses first, each family in the order it was answered
+    return by_host
 
 
 def _index_info() -> IndexInfo:
@@ -985,13 +1033,83 @@ def _index_info() -> IndexInfo:
         return IndexInfo()
 
 
+def _scan_every_address(
+    ctx: _RunContext, engagement_id: str, asset_id: str, host: str, addresses: list[str],
+    scan_run_id: str | None, envelope: dict,
+) -> tuple[list[dict], bool]:
+    """GitHub #77: port-scan EVERY address of a host (IPv4 first, then IPv6), merge what is open and report a port that
+    is open on one family only. An address whose scan failed is remembered on the run context, so that it is counted as
+    partial coverage and never reads as "no open ports".
+
+    Returns (services of this host, whether any address was scanned successfully)."""
+    results: list[tuple[str | None, list[dict], bool]] = []
+    for address in addresses or [None]:
+        if address is not None and _is_ipv6(address) and not nmap_ipv6_enabled():
+            tool_execution.record(
+                engagement_id, scan_run_id=scan_run_id, tool="nmap", phase="fingerprint", authorized_target=host,
+                resolved_target=address, port_range="configured_tcp",
+                result=tool_execution.skipped_result("ipv6_scanning_off"), discovered_services=0,
+            )
+            continue
+        services, succeeded = _nmap_scan(ctx, engagement_id, asset_id, host, address, scan_run_id, envelope)
+        results.append((address, services, succeeded))
+
+    merged: dict[tuple[str, int], dict] = {}
+    for _address, services, _ok in results:
+        for svc in services:
+            merged.setdefault((str(svc.get("protocol")), int(svc.get("port") or 0)), svc)
+    any_succeeded = any(ok for _a, _s, ok in results)
+    if any_succeeded:
+        ctx.scanned_any = True
+    if any(address is not None and not ok for address, _s, ok in results):
+        ctx.unscanned_hosts.append(host)
+    _report_family_difference(engagement_id, asset_id, host, results)
+    return list(merged.values()), any_succeeded
+
+
+def _open_tcp_ports(results: list[tuple[str | None, list[dict], bool]], *, ipv6: bool) -> dict[int, list[str]]:
+    ports: dict[int, list[str]] = {}
+    for address, services, ok in results:
+        if not ok or address is None or _is_ipv6(address) != ipv6:
+            continue
+        for svc in services:
+            if svc.get("protocol") == "tcp":
+                ports.setdefault(int(svc["port"]), []).append(address)
+    return ports
+
+
+def _report_family_difference(
+    engagement_id: str, asset_id: str, host: str, results: list[tuple[str | None, list[dict], bool]],
+) -> None:
+    """A port that is open over IPv6 but not over IPv4 is a classic forgotten-firewall exposure: the IPv4 side was
+    hardened and the AAAA address was not. Reported as a finding, only when BOTH families were scanned successfully
+    (otherwise the difference could be a failed scan, not a fact)."""
+    v4, v6 = _open_tcp_ports(results, ipv6=False), _open_tcp_ports(results, ipv6=True)
+    scanned_v4 = any(ok and a is not None and not _is_ipv6(a) for a, _s, ok in results)
+    scanned_v6 = any(ok and a is not None and _is_ipv6(a) for a, _s, ok in results)
+    if not (scanned_v4 and scanned_v6):
+        return
+    for port in sorted(set(v6) - set(v4)):
+        try:
+            _add_finding(
+                engagement_id, asset_id=asset_id, category="exposure",
+                title=f"Port {port} is open over IPv6 only",
+                confidence="validated",
+                evidence={"tool": "nmap", "port": port, "family_difference": "ipv6_only",
+                          "ipv6_addresses": sorted(set(v6[port])), "ipv4_addresses": sorted({a for ps in v4.values() for a in ps})},
+                exposure_factor=1.0, business_factor=0.5,
+            )
+        except Exception as exc:  # noqa: BLE001 - reporting must never fail the scan
+            logger.warning("family difference for %s:%s could not be stored: %s", host, port, exc)
+
+
 def _discover_surfaces(engagement_id: str, discovered: list[dict], scan_run_id: str | None) -> tuple[list[dict], list[dict]]:
     """Stages S3 and S4 for every approved asset: port scan (once per IP), then
     classify each open port as a surface. Returns (services, surface rows)."""
     # DNS-Materialisierung (auditiert): liefert Namen->IP fuer Tools, die DNS
     # lokal aufloesen (testssl) und speist zugleich die Egress-Proxy-IP-
     # Freigabe (resolved_host).
-    ip_by_host: dict[str, str] = {}
+    ip_by_host: dict[str, list[str]] = {}
     try:
         ip_by_host = _materialize(engagement_id, scan_run_id)
     except Exception as exc:  # noqa: BLE001 - Materialisierung ist best effort
@@ -1010,10 +1128,10 @@ def _discover_surfaces(engagement_id: str, discovered: list[dict], scan_run_id: 
         # Portbereiche haben koennen.
         envelope = client.get_scan_envelope(uuid.UUID(engagement_id), host=host)
         single_port = _single_port_from_envelope(envelope)
-        ip = ip_by_host.get(host.lower())
-        if ip is None:
+        addresses = list(ip_by_host.get(host.lower()) or [])
+        if not addresses:
             try:
-                ip = str(ipaddress.ip_address(host))
+                addresses = [str(ipaddress.ip_address(host))]
             except ValueError:
                 pass
 
@@ -1023,11 +1141,11 @@ def _discover_surfaces(engagement_id: str, discovered: list[dict], scan_run_id: 
         # the whole loop went stale for every host after roughly the second, so
         # refresh it here - but only when this host will actually execute a
         # scan, since a cache hit (REQ-FPEFF-002) needs no fresh snapshot.
-        if ip is not None and _port_scan_key(ip, envelope) not in ctx.port_scans:
+        if addresses and any(_port_scan_key(a, envelope) not in ctx.port_scans for a in addresses):
             try:
                 refreshed = _materialize(engagement_id, scan_run_id)
                 ip_by_host.update(refreshed)
-                ip = refreshed.get(host.lower(), ip)
+                addresses = list(refreshed.get(host.lower()) or addresses)
             except Exception as exc:  # noqa: BLE001
                 # Do not scan against a snapshot known to be stale: the lease
                 # would deny it anyway, and proceeding would be scanning an IP
@@ -1035,15 +1153,18 @@ def _discover_surfaces(engagement_id: str, discovered: list[dict], scan_run_id: 
                 logger.warning("DNS re-materialization for %s failed: %s", host, exc)
                 tool_execution.record(
                     engagement_id, scan_run_id=scan_run_id, tool="nmap", phase="fingerprint",
-                    authorized_target=host, resolved_target=ip, port_range="configured_tcp",
+                    authorized_target=host, resolved_target=addresses[0] if addresses else None,
+                    port_range="configured_tcp",
                     result=tool_execution.failed_result("dns_rematerialization_failed", exc),
                     discovered_services=0,
                 )
-                ip = None
+                addresses = []
+        # The primary address (IPv4 first) identifies the web surface; the port scan covers every address.
+        ip = addresses[0] if addresses else None
 
         # nmap first so its discovered web ports can steer the web tools.
-        nmap_services, scan_succeeded = _nmap_scan(
-            ctx, engagement_id, aid, host, ip, scan_run_id, envelope,
+        nmap_services, scan_succeeded = _scan_every_address(
+            ctx, engagement_id, aid, host, addresses, scan_run_id, envelope,
         )
         all_services.extend(nmap_services)
 
@@ -1066,11 +1187,15 @@ def _discover_surfaces(engagement_id: str, discovered: list[dict], scan_run_id: 
                 surfaces.append(surface)
                 web_taken.add(port)
         surfaces.extend(_non_web_surfaces(aid, host, ip, nmap_services, web_taken))
+    if ctx.scanned_any:
+        for _host in ctx.unscanned_hosts:
+            tool_execution.note_partial(scan_run_id, "nmap", "address_not_port_scanned")
     return all_services, surfaces
 
 
-def _plan_payload(surfaces: list[dict], options: Options, index: IndexInfo) -> list[dict]:
-    """The API shape of a plan: each surface row with its planned/skipped checks."""
+def _plan_payload(surfaces: list[dict], options: Options, index: IndexInfo, retest_items: list[dict] | None = None) -> list[dict]:
+    """The API shape of a plan: each surface row with its planned/skipped checks. A restricted run (REQ-RETEST-002)
+    keeps only the checks its items select; the others are listed as skipped, not_in_this_run."""
     payload = []
     for row in surfaces:
         fingerprint = row.get("fingerprint") or {}
@@ -1079,7 +1204,7 @@ def _plan_payload(surfaces: list[dict], options: Options, index: IndexInfo) -> l
             profile=tuple(row.get("profile") or ()), alias_of=row.get("alias_of"),
             duplicate_of=fingerprint.get("duplicate_of"), starttls=fingerprint.get("starttls"),
         )
-        checks = plan_surface(surface_input, options, index)
+        checks = restrict_checks(plan_surface(surface_input, options, index), row["host"], row["port"], retest_items)
         payload.append({**row, "checks": [
             {"check_id": c.check_id, "tool": c.tool, "state": c.state, "reason": c.reason, "args": c.args,
              "depends_on": c.depends_on, "budget_s": c.budget_s}
@@ -1265,7 +1390,8 @@ def run(
             oob=bool(options_raw.get("oob")), oob_available=bool(OOB_SERVER_URL),
             scan_profile=settings["scan_profile"], disabled_tools=frozenset(settings.get("disabled_tools") or ()),
         )
-        client.store_scan_plan(scan_run_id, _plan_payload(surfaces, options, _index_info()))
+        retest_items = client.run_info(scan_run_id).get("retest_items")
+        client.store_scan_plan(scan_run_id, _plan_payload(surfaces, options, _index_info(), retest_items))
         client.update_scan_run(scan_run_id, checkpoint={"fp_services": json.loads(json.dumps(services, default=str))})
     if scan_run_id is None:
         return services

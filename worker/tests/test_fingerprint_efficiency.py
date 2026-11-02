@@ -359,3 +359,27 @@ def test_negative_a_failed_scan_is_never_cached_or_reported_as_a_reused_success(
     assert attempts == hosts
     # And nothing was recorded as a reuse (which would have claimed success).
     assert not [r for r in recorded if "reused_from" in (r.get("result", {}).get("outcome_summary") or {})]
+
+
+def test_negative_two_names_that_both_redirect_without_a_title_are_both_deep_scanned(monkeypatch):
+    """GitHub #78: a root and a vhost on one address both answered `/` with a redirect to `/login`, which has no
+    title. The old key saw one surface and skipped the vhost's deep checks. A redirect carries no signal about what is
+    behind it, so neither name may be treated as a duplicate of the other."""
+    redirect = {"url": "https://a.example.com", "status_code": 302, "webserver": "nginx", "title": "", "content_length": 0}
+    plan = _plan_of(monkeypatch, {"a.example.com": dict(redirect), "b.example.com": dict(redirect)},
+                    [("a.example.com", None), ("b.example.com", None)])
+    assert {h for (h, _), c in plan.items() if c["nuclei:tech"][0] == "planned"} == {"a.example.com", "b.example.com"}
+    assert fingerprint._web_surface_key("1.2.3.4", 443, redirect) is None
+
+
+def test_two_names_with_the_same_titled_page_are_still_one_surface(monkeypatch):
+    """The saving the dedupe exists for is kept: an identical bare 404 (with its title) is still collapsed."""
+    plan = _plan_of(monkeypatch, {"a.example.com": dict(_LIVE), "b.example.com": dict(_LIVE)},
+                    [("a.example.com", None), ("b.example.com", None)])
+    assert sum("nuclei:tech" in c and c["nuclei:tech"][0] == "planned" for c in plan.values()) == 1
+
+
+def test_a_redirect_that_has_a_title_is_still_compared_like_any_other_response():
+    titled = {"url": "https://a.example.com", "status_code": 301, "webserver": "nginx", "title": "Moved", "content_length": 162}
+    assert fingerprint._web_surface_key("1.2.3.4", 443, titled) is not None
+

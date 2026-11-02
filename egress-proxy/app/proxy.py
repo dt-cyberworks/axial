@@ -32,6 +32,8 @@ import time
 import uuid
 from urllib.parse import urlsplit
 
+from app import run_token
+from app.fair_share import DestinationGate, FairShare
 from app.audit_client import AuditBatcher, reserve_rate_slot, submit_audit_batch
 from app.ssrf_guard import BlockedAddressError, vet_target_host
 from app.db import (
@@ -41,6 +43,7 @@ from app.db import (
     is_materialized_ip,
     load_engagement,
     matching_scope_assets,
+    scan_run_live,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,16 @@ PROXY_PORT = int(os.environ.get("EGRESS_PROXY_PORT", "3128"))
 RELAY_CHUNK = 65536
 MAX_CONCURRENT_CLIENTS = max(1, min(int(os.environ.get("EGRESS_MAX_CONCURRENT_CLIENTS", "64")), 512))
 _CLIENT_SLOTS = asyncio.Semaphore(MAX_CONCURRENT_CLIENTS)
+
+# REQ-EGRESS-012/013 (GitHub #81 step 4): no engagement can starve another of the slots above, and a destination can be
+# protected from too many parallel requests however many engagements aim at it.
+RESERVED_SLOTS = int(os.environ.get("EGRESS_RESERVED_SLOTS", "8"))
+MIN_SHARE_SLOTS = int(os.environ.get("EGRESS_MIN_SHARE_SLOTS", "4"))
+SHARE_WINDOW_SECONDS = float(os.environ.get("EGRESS_SHARE_WINDOW_SECONDS", "30"))
+MAX_PER_DESTINATION = int(os.environ.get("EGRESS_MAX_CONCURRENT_PER_DESTINATION", "0"))
+DESTINATION_WAIT_SECONDS = float(os.environ.get("EGRESS_DESTINATION_WAIT_SECONDS", "20"))
+_FAIR_SHARE = FairShare(MAX_CONCURRENT_CLIENTS, RESERVED_SLOTS, MIN_SHARE_SLOTS, SHARE_WINDOW_SECONDS)
+_DESTINATIONS = DestinationGate(MAX_PER_DESTINATION, DESTINATION_WAIT_SECONDS)
 
 # GitHub issue #30: BountyProgram.max_concurrency enforcement. A plain dict
 # keyed by engagement_id, not asyncio.Semaphore(max_concurrency) - a
@@ -79,6 +92,14 @@ def _release_concurrency_slot(engagement_id: str) -> None:
 # Per-Engagement-Modus (a): wenn gesetzt, ist dieser Proxy fest an einen
 # Auftrag gebunden und braucht keinen X-ASM-Engagement-Id-Header pro Request.
 DEFAULT_ENGAGEMENT_ID = os.environ.get("ASM_ENGAGEMENT_ID") or None
+
+# REQ-EGRESS-007/009 (GitHub #81): with this on, a request needs a valid signed run token, the header
+# X-ASM-Engagement-Id is no identity at all, and the destination is never used to guess the engagement. Off while the
+# runner's tools are moved over (the migration mode keeps header and destination as before).
+REQUIRE_TOKEN = os.environ.get("EGRESS_REQUIRE_TOKEN", "false").strip().lower() in ("1", "true", "yes", "on")
+
+# Headers that are for this proxy and never for a target.
+_NEVER_FORWARDED = ("x-asm-engagement-id", "proxy-connection", "proxy-authorization")
 
 
 def _matches_host(host: str, asset: dict) -> bool:
@@ -385,6 +406,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     peer = writer.get_extra_info("peername")
+    share_held: str | None = None   # the engagement whose share this request counts against
+    destination_held: str | None = None
     try:
         try:
             request_line, headers = await _read_request_line_and_headers(reader)
@@ -409,23 +432,76 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             parsed = urlsplit(target if "://" in target else f"http://{headers.get('host', '')}{target}")
             req_host = parsed.hostname or headers.get("host", "").split(":")[0]
 
-        # Engagement-Aufloesung (REQ-EGRESS-001), Reihenfolge:
-        #   1. ASM_ENGAGEMENT_ID (per-Engagement-Proxy)  2. X-ASM-Engagement-Id-Header
-        #   3. Host-basiert: die eine aktive Engagement, deren allow-Scope den Host matcht.
-        engagement_id = DEFAULT_ENGAGEMENT_ID or headers.get("x-asm-engagement-id")
-        if engagement_id:
+        # Engagement-Aufloesung, Reihenfolge:
+        #   1. ASM_ENGAGEMENT_ID (per-Engagement-Proxy)
+        #   2. REQ-EGRESS-006/007: ein signiertes Run-Token in Proxy-Authorization. Ein vorhandenes, aber ungueltiges
+        #      Credential wird abgelehnt und faellt NIE auf 3./4. zurueck.
+        #   3. X-ASM-Engagement-Id-Header (REQ-EGRESS-001) - nur im Migrationsmodus
+        #   4. Host-basiert (REQ-EGRESS-001): die eine aktive Engagement, deren allow-Scope den Host matcht - nur im
+        #      Migrationsmodus
+        run_id: str | None = None
+        auth_header = headers.get("proxy-authorization")
+        if DEFAULT_ENGAGEMENT_ID:
+            engagement_id = DEFAULT_ENGAGEMENT_ID
+        elif auth_header is not None:
             try:
-                uuid.UUID(engagement_id)
-            except ValueError:
-                await _deny(writer, 400, "invalid_engagement_id")
+                identity = run_token.verify_proxy_authorization(auth_header)
+            except run_token.TokenInvalid as exc:
+                # No engagement is trusted here, so nothing can be audited under one; the log is the record.
+                logger.info("DENY %s %s from %s: invalid_run_token (%s)", method, req_host, peer, exc.reason)
+                await _deny(writer, 407, "invalid_run_token")
                 return
+            engagement_id, run_id = identity.engagement_id, identity.scan_run_id
+            try:
+                live = await asyncio.to_thread(scan_run_live, run_id, engagement_id)
+            except Exception as exc:  # noqa: BLE001 - fail closed
+                logger.error("run check failed for run %s: %s", run_id, exc)
+                await _deny(writer, 503, "run_check_unavailable")
+                return
+            if not live:
+                if await _submit_audit_or_deny(
+                    writer, engagement_id, "DENY", "run_not_active",
+                    {"method": method, "host": req_host, "scan_run_id": run_id},
+                ):
+                    logger.info("DENY %s %s from %s: run_not_active", method, req_host, peer)
+                    await _deny(writer, 403, "run_not_active")
+                return
+        elif REQUIRE_TOKEN:
+            logger.info("TOKENLESS %s %s from %s: refused, a run token is required", method, req_host, peer)
+            await _deny(writer, 407, "run_token_required")
+            return
         else:
-            engagement_id, why = await resolve_engagement_for_host(req_host)
-            if engagement_id is None:
-                # Kein Audit-Eintrag (kein gueltiges engagement_id fuer den FK); nur Log.
-                logger.info("DENY %s %s from %s: %s", method, req_host, peer, why)
-                await _deny(writer, 407 if why == "no_engagement_for_host" else 409, why)
+            logger.info("TOKENLESS %s %s from %s", method, req_host, peer)
+            engagement_id = headers.get("x-asm-engagement-id")
+            if engagement_id:
+                try:
+                    uuid.UUID(engagement_id)
+                except ValueError:
+                    await _deny(writer, 400, "invalid_engagement_id")
+                    return
+            else:
+                engagement_id, why = await resolve_engagement_for_host(req_host)
+                if engagement_id is None:
+                    # Kein Audit-Eintrag (kein gueltiges engagement_id fuer den FK); nur Log.
+                    logger.info("DENY %s %s from %s: %s", method, req_host, peer, why)
+                    await _deny(writer, 407 if why == "no_engagement_for_host" else 409, why)
+                    return
+        run_payload = {"scan_run_id": run_id} if run_id else {}
+
+        # REQ-EGRESS-012: the engagement is known; it may use its share of the slots, not more. A refusal frees the
+        # socket at once, so another engagement can have it.
+        if not _FAIR_SHARE.try_acquire(engagement_id):
+            logger.info("DENY %s %s from %s: engagement_share_exhausted", method, req_host, peer)
+            await _deny(writer, 503, "engagement_share_exhausted")
+            return
+        share_held = engagement_id
+        # REQ-EGRESS-013: a busy destination slows requests down for a bounded time instead of failing them.
+        if _DESTINATIONS.enabled:
+            if not await _DESTINATIONS.acquire(req_host):
+                logger.info("DENY %s %s from %s: destination_busy", method, req_host, peer)
+                await _deny(writer, 503, "destination_busy")
                 return
+            destination_held = req_host
 
         if method == "CONNECT":
             host, _, port_str = target.partition(":")
@@ -461,7 +537,7 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             try:
                 if not await _submit_audit_or_deny(
                     writer, engagement_id, "ALLOW" if allowed else "DENY", reason,
-                    {"method": method, "host": host, "port": port},
+                    {"method": method, "host": host, "port": port, **run_payload},
                 ):
                     return
                 if not allowed:
@@ -479,8 +555,12 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             finally:
                 _release_concurrency_slot(engagement_id)
         else:
-            await _forward_plain_http(reader, writer, method, target, headers, engagement_id)
+            await _forward_plain_http(reader, writer, method, target, headers, engagement_id, run_id)
     finally:
+        if destination_held is not None:
+            _DESTINATIONS.release(destination_held)
+        if share_held is not None:
+            _FAIR_SHARE.release(share_held)
         writer.close()
 
 
@@ -491,6 +571,7 @@ async def _forward_plain_http(
     target: str,
     headers: dict[str, str],
     engagement_id: str,
+    scan_run_id: str | None = None,
 ) -> None:
     """Klartext-HTTP-Weiterleitung mit Ident-Header-Injektion (Deployment Kap. 6.1/6.2).
 
@@ -530,7 +611,8 @@ async def _forward_plain_http(
     try:
         if not await _submit_audit_or_deny(
             writer, engagement_id, "ALLOW" if allowed else "DENY", reason,
-            {"method": method, "host": host, "path": path, "port": port},
+            {"method": method, "host": host, "path": path, "port": port,
+             **({"scan_run_id": scan_run_id} if scan_run_id else {})},
         ):
             return
         if not allowed:
@@ -538,7 +620,9 @@ async def _forward_plain_http(
             await _deny(writer, 403, reason)
             return
 
-        out_headers = {k: v for k, v in headers.items() if k not in ("x-asm-engagement-id", "proxy-connection")}
+        # REQ-EGRESS-007: the credentials are for this proxy; a target never sees them (this path used to forward
+        # Proxy-Authorization).
+        out_headers = {k: v for k, v in headers.items() if k not in _NEVER_FORWARDED}
         out_headers["host"] = host
         out_headers["connection"] = "close"
         # GitHub issue #32: `prog` is a truthy dict whenever a bounty_program

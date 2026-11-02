@@ -8,7 +8,7 @@ import { api } from "../api/client";
  *
  * The interval is the whole schedule: no time of day, no windows. The next run is N days
  * after the last run started (yours included) or after the engagement last became active, so
- * the first run of a new monitor is the one you start yourself with Run now. When a due run
+ * the first run of a new monitor starts when its owner confirms the targets (REQ-BASE-003). When a due run
  * cannot start, the reason is shown here, not only in a log.
  */
 export default function ScheduleControl({ engagementId, canManage }: { engagementId: string; canManage: boolean }) {
@@ -65,8 +65,8 @@ export default function ScheduleControl({ engagementId, canManage }: { engagemen
         </div>
       )}
       <p className="muted-line">
-        The count starts when the engagement becomes active and again with every run, yours included. Start the
-        first run yourself with Run now. A scheduled run uses the same checks, scope and limits as one you start,
+        The count starts when the engagement becomes active and again with every run, yours included. The first run
+        of a new monitor starts when you confirm its targets; nothing is scheduled before that. A scheduled run uses the same checks, scope and limits as one you start,
         and it never waits for a person.
       </p>
       {canManage ? (

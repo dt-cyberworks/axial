@@ -3,7 +3,7 @@
 **Who this is for:** operators who own engagements, especially monitoring engagements, and administrators.
 **After this page you can:** read every kind of item in the inbox, say what it means, and clear it the right way.
 
-<!-- ui-labels: Inbox | Needs you | Release | Acknowledge | Open | Release all -->
+<!-- ui-labels: Inbox | Needs you | Release | Acknowledge | Open | Release all | Held back for you | Not done yet | Never send this -->
 
 ## Inbox (`/inbox`)
 
@@ -17,7 +17,7 @@ Everything that needs a person, in one list. A monitoring run never waits for an
 | Review needed | The run is paused for the review of the discovered hosts | **Open** the run |
 | A run is waiting for you | A semi-attended run parked because its agent needs a decision. It holds no worker slot and resumes by itself when you decide | **Open** the run and decide. It clears when the run resumes |
 | Held host | A new host was found and is not tested until you release it | **Release** it, or **Release all** when there are several. It is tested from the next run |
-| Suggested manual test | A run could not make a call because it would have needed a person's decision. It is kept here as a lead | Test it yourself, or **Acknowledge** it |
+| Held back for you | A monitor could not make a request because it would have needed a person's decision (for example a POST), so it kept the whole request: method, path, body and the agent's reason, as "Held back: POST /login on www.example.com". It cannot be dismissed here | **Open** it: on **Not done yet** you send it, one request at a time, or choose **Never send this**. See [Retest and run only what is open](../guides/retest-and-open-items.md) |
 | Reduced coverage | A run finished but a load-bearing tool failed or a check stopped at its time limit, so nothing was concluded as fixed from it | Read the run, and run again |
 | Run did not finish | A run failed or was stopped | Read the reason on the run, see [Troubleshooting](../troubleshooting.md#why-a-run-stopped) |
 | Monitor went quiet | No healthy run finished for twice the expected time | Find out why; a healthy run clears it |

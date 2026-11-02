@@ -47,6 +47,25 @@ def patch_source(source: str) -> str:
         "        return jsonify({'error': 'runner_auth_required'}), 401",
         "runner auth before_request gate",
     )
+    # REQ-TESTACCT-012: upstream logs every command and every output line. Declared secrets (the worker's X-ASM-Log-Mask header) and
+    # credential-bearing headers are masked in every log record of this process; see runner_logmask.py.
+    source = _replace_once(
+        source,
+        "from runner_auth import is_authorized as _asm_is_authorized, RUNNER_TOKEN_HEADER as _ASM_RUNNER_TOKEN_HEADER\n",
+        "from runner_auth import is_authorized as _asm_is_authorized, RUNNER_TOKEN_HEADER as _ASM_RUNNER_TOKEN_HEADER\n"
+        "from runner_logmask import LOG_MASK_HEADER as _ASM_LOG_MASK_HEADER, register as _asm_register_log_mask, install as _asm_install_log_mask\n"
+        "\n"
+        "_asm_install_log_mask()\n",
+        "log mask import and install",
+    )
+    source = _replace_once(
+        source,
+        "        return jsonify({'error': 'runner_auth_required'}), 401",
+        "        return jsonify({'error': 'runner_auth_required'}), 401\n"
+        "    # REQ-TESTACCT-012: only an authenticated caller can declare what to mask.\n"
+        "    _asm_register_log_mask(request.headers.get(_ASM_LOG_MASK_HEADER))",
+        "log mask registration after the auth gate",
+    )
     source = _replace_once(
         source,
         '''                "process": process_obj,

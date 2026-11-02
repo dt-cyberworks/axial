@@ -8,6 +8,14 @@ from app.models.engagement import Engagement
 from app.models.finding import Finding
 
 
+# REQ-LENS-005: "complete" now means all four sections, so a stop with fewer is flagged (the backstop for providers that do
+# not say why they stopped). The text that used to stand here, "complete answer", has no sections.
+COMPLETE = (
+    "## What it is\nA missing header.\n\n## Where it was found\napp.example.com:443.\n\n"
+    "## Why it matters\nBrowsers apply fewer protections.\n\n## What to do\n- Set the header."
+)
+
+
 def _seed_finding(db):
     now = dt.datetime.now(dt.timezone.utc)
     eng = Engagement(
@@ -118,10 +126,14 @@ def test_lens_agent_flags_a_truncated_response_and_caches_the_flag(db, monkeypat
     db.refresh(finding)
     assert finding.evidence["lens_agent"]["truncated"] is True
 
-    # The cached read (no LLM call) must still carry the flag forward.
-    monkeypatch.setattr(findings_api, "_call_lens_agent", lambda *_: (_ for _ in ()).throw(AssertionError("should use cache")))
+    # GitHub #88 / REQ-LENS-005 replaces what used to follow here. A cut-off analysis was served from the cache for good
+    # ("should use cache"), so the operator could never get a complete one. It is kept for display, flagged, and is
+    # NOT final: the next request asks the provider again (tests/integration/test_lens_analysis_completeness.py).
+    asked_again = []
+    monkeypatch.setattr(findings_api, "_call_lens_agent", lambda *_: asked_again.append(1) or fake_truncated(*_))
     second = findings_api.explain_finding_with_lens(eng.id, finding.id, db)
-    assert second.source == "cached"
+    assert asked_again == [1], "a cut-off analysis must not be served from the cache"
+    assert second.source == "llm"
     assert second.truncated is True
 
 
@@ -154,10 +166,10 @@ def test_lens_agent_call_extracts_finish_reason_from_the_provider_response(db, m
 
     monkeypatch.setattr(httpx, "Client", FakeClient)
 
-    explanation, model, truncated = findings_api._call_lens_agent(db, {"title": "x"})
+    result = findings_api._call_lens_agent(db, {"title": "x"})
 
-    assert explanation == "partial answer, cut off"
-    assert truncated is True
+    assert result.explanation == "partial answer, cut off"
+    assert result.truncated is True
 
 
 def test_lens_agent_call_finish_reason_stop_is_not_truncated(db, monkeypatch):
@@ -176,7 +188,7 @@ def test_lens_agent_call_finish_reason_stop_is_not_truncated(db, monkeypatch):
         def raise_for_status(self):
             pass
         def json(self):
-            return {"choices": [{"message": {"content": "complete answer"}, "finish_reason": "stop"}]}
+            return {"choices": [{"message": {"content": COMPLETE}, "finish_reason": "stop"}]}
 
     class FakeClient:
         def __init__(self, *a, **k): pass
@@ -186,7 +198,7 @@ def test_lens_agent_call_finish_reason_stop_is_not_truncated(db, monkeypatch):
 
     monkeypatch.setattr(httpx, "Client", FakeClient)
 
-    explanation, model, truncated = findings_api._call_lens_agent(db, {"title": "x"})
+    result = findings_api._call_lens_agent(db, {"title": "x"})
 
-    assert explanation == "complete answer"
-    assert truncated is False
+    assert result.explanation == COMPLETE
+    assert result.truncated is False

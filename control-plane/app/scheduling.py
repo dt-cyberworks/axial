@@ -20,13 +20,12 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import os
 import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app import monitoring, operating_modes
+from app import monitoring, monitoring_settings, operating_modes
 from app.gateway.audit import append_audit_log
 from app.models.engagement import Engagement
 from app.models.scan_run import ScanRun
@@ -37,10 +36,10 @@ MIN_DAYS = 1
 MAX_DAYS = 90
 ACTIVE_RUN_STATES = ("running", "waiting_approval")
 BLOCKED_ITEM_KEY = "schedule_blocked"
-MAX_CONCURRENT_ENV = "MONITORING_MAX_CONCURRENT_RUNS"
 
 # What a person reads next to the schedule. The code is what is stored and audited.
 REASON_TEXT = {
+    "targets_not_confirmed": "The targets of this monitor are not confirmed yet; choose them first.",
     "a_run_is_active": "A run of this engagement is still going; the next one starts after it.",
     "waiting_for_capacity": "Other scheduled runs are using the installation's capacity; this one waits for its turn.",
     "outside_authorized_window": "The authorized window of this engagement is not open.",
@@ -62,12 +61,10 @@ def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
-def max_concurrent_runs() -> int:
-    """How many scheduled runs may execute at once on this installation (REQ-MON-003)."""
-    try:
-        return max(1, int(os.environ.get(MAX_CONCURRENT_ENV, "1")))
-    except ValueError:
-        return 1
+def max_concurrent_runs(db: Session) -> int:
+    """How many scheduled runs may execute at once on this installation (REQ-MON-003): the
+    administrator's `max_concurrent_monitoring_runs` setting (Monitoring defaults), default 1."""
+    return monitoring_settings.get_max_concurrent_monitoring_runs(db)
 
 
 def next_run_at(eng: Engagement) -> dt.datetime | None:
@@ -176,13 +173,15 @@ def _blocking_reason(db: Session, eng: Engagement, now: dt.datetime) -> str | No
     """The first rule that forbids a start, cheapest first; None means "go and try"."""
     if eng.status != "active":
         return f"engagement_{eng.status}"
+    if eng.target_review_state in ("discovering", "awaiting_selection", "discovery_failed"):
+        return "targets_not_confirmed"  # REQ-BASE-001
     if not (eng.authorized_from and eng.authorized_until and eng.authorized_from <= now <= eng.authorized_until):
         return "outside_authorized_window"
     if eng.review_at is not None and now > eng.review_at:
         return "authorization_review_due"
     if _active_run_exists(db, eng.id):
         return "a_run_is_active"
-    if _scheduled_runs_active(db) >= max_concurrent_runs():
+    if _scheduled_runs_active(db) >= max_concurrent_runs(db):
         return "waiting_for_capacity"
     return None
 

@@ -48,7 +48,7 @@ test("REQ-PIPE-010 the run detail has a Plan tab that refreshes while the run ex
   assert.match(client, /scanRunPlan: \(id: string, runId: string\) => request<ScanPlan>\(`\/engagements\/\$\{id\}\/scan-runs\/\$\{runId\}\/plan`\)/);
   assert.match(runDetail, /type Tab = "progress" \| "plan" \| "diff" \| "agent" \| "activity"/);
   assert.match(runDetail, /refetchInterval: isRunning \? 3000 : false/, "polls while the run is active");
-  assert.match(runDetail, /\{tab === "plan" && <ScanPlanView plan=\{plan\} \/>\}/);
+  assert.match(runDetail, /\{tab === "plan" && <ScanPlanView plan=\{plan\} engagementId=\{id\} runId=\{runId\} canManage=\{!!engagement\?\.can_manage\} \/>\}/);
 });
 
 test("REQ-PIPE-010 the plan shows every surface with its class, technologies, and per check the reason, state, time and findings", () => {

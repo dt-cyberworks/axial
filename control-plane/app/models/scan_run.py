@@ -1,7 +1,7 @@
 import datetime
 import uuid
 
-from sqlalchemy import ForeignKey, String, func
+from sqlalchemy import ForeignKey, String, and_, func, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -13,6 +13,37 @@ ScanPhase = pg_enum(
     "scan_phase", "discovery", "fingerprint", "correlate", "agent", "validate", "score", "report"
 )
 ScanState = pg_enum("scan_state", "running", "waiting_approval", "done", "failed", "aborted")
+
+# REQ-APPROVAL-008 (GitHub #83): `waiting_approval` means three different things. A worker that waits for the decision
+# on ONE action while the run's other actions go on marks it with this reason; a parked semi-attended run (REQ-MODE-016)
+# and an asset-review pause (REQ-ASSETREVIEW-002) are `waiting_approval` too, but nothing is running in those two.
+LIVE_WAIT_REASON = "approval_wait"
+
+
+def executes_calls(run: "ScanRun") -> bool:
+    """Whether the gateway, the raw-egress lease, the budget and the observation recorder treat this run as one that
+    is doing work: running, or waiting live for a decision on one action. Fails closed: only that exact marker counts,
+    and a parked run never does, whatever else it carries."""
+    if run.state == "running":
+        return True
+    return (
+        run.state == "waiting_approval"
+        and run.state_reason == LIVE_WAIT_REASON
+        and (run.checkpoint or {}).get("parked") is None  # any non-null record is parked, as in the SQL form below
+    )
+
+
+def executing_run_clause():
+    """`executes_calls` as a SQL condition, for the queries that look a run up (one definition, two forms; a test keeps
+    them equal)."""
+    return or_(
+        ScanRun.state == "running",
+        and_(
+            ScanRun.state == "waiting_approval",
+            ScanRun.state_reason == LIVE_WAIT_REASON,
+            ScanRun.checkpoint["parked"].astext.is_(None),
+        ),
+    )
 
 
 class ScanRun(Base):
@@ -61,6 +92,8 @@ class ScanRun(Base):
     # REQ-MODE-017: a run limited to some in-scope hosts / one finding's retest.
     scope_hosts: Mapped[list | None] = mapped_column(JSONB)
     retest_finding_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    # REQ-RETEST-002: NULL is a full run; a list of {host, port?, check|family|tool} items is a restricted run.
+    retest_items: Mapped[list | None] = mapped_column(JSONB)
 
 
 class AgentStep(Base):

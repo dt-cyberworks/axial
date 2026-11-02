@@ -12,7 +12,7 @@ EngagementStatus = pg_enum(
     "engagement_status",
     "draft", "awaiting_signature", "active", "paused", "completed", "revoked",
 )
-EngagementSource = pg_enum("engagement_source", "lab", "own_domain", "bug_bounty", "customer", "benchmark")
+EngagementSource = pg_enum("engagement_source", "lab", "own_domain", "bug_bounty", "customer")
 
 
 class Customer(Base):
@@ -98,7 +98,16 @@ class Engagement(Base):
     # REQ-MON-003: why a due run did not start (visible with the schedule).
     schedule_skip_reason: Mapped[str | None] = mapped_column(String)
     schedule_skip_since: Mapped[datetime.datetime | None]
+    # REQ-BASE-001..004: a monitor is activated into a discovery, and nothing scans until the owner
+    # has confirmed which discovered hosts are monitored. NULL = never asked (assessments).
+    target_review_state: Mapped[str | None] = mapped_column(String)
+    target_review_run_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    targets_confirmed_at: Mapped[datetime.datetime | None]
+    targets_confirmed_by: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
+    # REQ-HANDOVER-001/007: the monitor this assessment was started from ("Test deeper"). Context and navigation only:
+    # nothing is inherited through it. NULL = not started from a monitor, or the monitor was deleted.
+    handover_from_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("engagement.id", ondelete="SET NULL"))
     # REQ-IAM-007/021: wer dieses Engagement angelegt hat/besitzt. Immer gesetzt
     # (NOT NULL, Migration 0038): lesen darf jeder angemeldete Nutzer, aendern nur
     # der Owner oder ein Admin (REQ-IAM-022/023).

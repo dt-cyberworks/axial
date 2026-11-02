@@ -254,8 +254,64 @@ def check_labels(root: Path) -> list[str]:
 
 # ----------------------------------------------------------------------------------------------------- codes
 
+# REQ-EXPLAIN-001: the console's own reason map, and the Plan tab's. A code the system can show must have a
+# text there and an entry in the manual; neither list is kept by hand any more.
+CONSOLE_REASON_MAP = "frontend/src/lib/runActivity.ts"
+PLAN_REASON_VIEW = "frontend/src/components/ScanPlanView.tsx"
+# Explained by code (a run-level warning with a detail list, or a family with a detail after a colon) rather
+# than by an entry of the map.
+CONSOLE_FAMILIES = (
+    "coverage_degraded", "coverage_partial", "pipeline_error", "agent_incomplete",
+    "web_alias_of", "duplicate_vhost_of", "gateway_denied",
+)
+
+
+def console_reason_codes(root: Path) -> set[str]:
+    """The keys of the console's reason map (activity view and run header)."""
+    path = root / CONSOLE_REASON_MAP
+    if not path.is_file():
+        return set()
+    block = re.search(r"const REASON_COPY: Record<string, string> = \{(.*?)\n\};", _read(path), re.S)
+    return set(re.findall(r'^\s{2}"?([a-z_]+)"?:', block.group(1), re.M)) if block else set()
+
+
+def plan_reason_codes(root: Path) -> set[str]:
+    """The reasons the Plan tab has a plain-words text for."""
+    path = root / PLAN_REASON_VIEW
+    if not path.is_file():
+        return set()
+    block = re.search(r"const known: Record<string, string> = \{(.*?)\n  \};", _read(path), re.S)
+    return set(re.findall(r'"?([a-z_]+(?::[a-z_]+)?)"?: "', block.group(1))) if block else set()
+
+
+def _worker_codes(root: Path) -> set[str]:
+    """The failure and skip codes the worker records."""
+    codes: set[str] = set()
+    base = root / "worker/app"
+    if base.is_dir():
+        for path in base.rglob("*.py"):
+            text = _read(path)
+            codes |= set(re.findall(r'(?:failed_result|_failed|skipped_result)\(\s*"([a-z_]+)"', text))
+            codes |= set(re.findall(r'error_reason"?\s*[=:]\s*"([a-z_]+)"', text))
+    return codes
+
+
+def _gateway_codes(root: Path) -> set[str]:
+    gateway = root / "control-plane/app/gateway/authorize.py"
+    return set(re.findall(r'DENY\("([a-z_]+)"', _read(gateway))) if gateway.is_file() else set()
+
+
+def _warning_codes(root: Path) -> set[str]:
+    readiness = root / "control-plane/app/scan_readiness.py"
+    if not readiness.is_file():
+        return set()
+    text = _read(readiness)
+    return set(re.findall(r'Warning_\(\s*"([a-z_]+)"', text)) | set(re.findall(r'\(\s*"[a-z_]+_enabled",\s*"([a-z_]+)"', text))
+
+
 def _source_codes(root: Path) -> list[str]:
     codes: set[str] = set(RUN_REASONS) | set(CHECK_REASONS)
+    codes |= console_reason_codes(root) | _worker_codes(root) | _warning_codes(root)
     blockers = root / "control-plane/app/scan_readiness.py"
     if blockers.is_file():
         codes |= set(re.findall(r'Blocker\(\s*"([a-z_]+)"', _read(blockers)))
@@ -282,6 +338,26 @@ def check_codes(root: Path) -> list[str]:
     text = _read(page)
     return [f"{TROUBLESHOOTING}: the code `{code}` is not explained"
             for code in _source_codes(root) if not re.search(rf"`{re.escape(code)}[`:=<]", text)]
+
+
+def check_console_texts(root: Path) -> list[str]:
+    """Every code the worker, the gateway or a run can produce has a text in the console (REQ-EXPLAIN-001)."""
+    if not (root / CONSOLE_REASON_MAP).is_file():
+        return []
+    known = console_reason_codes(root) | plan_reason_codes(root) | set(CONSOLE_FAMILIES)
+    emitted = set(_worker_codes(root)) | _gateway_codes(root) | set(RUN_REASONS) | set(CHECK_REASONS)
+    skips = root / "worker/app/tool_execution.py"
+    if skips.is_file():
+        block = re.search(r"SKIP_REASONS = frozenset\(\{(.*?)\}\)", _read(skips), re.S)
+        if block:
+            emitted |= set(re.findall(r'"([a-z_]+)"', block.group(1)))
+    for directory in ("control-plane/app", "worker/app"):
+        base = root / directory
+        if base.is_dir():
+            for path in base.rglob("*.py"):
+                emitted |= set(re.findall(r'state_reason\s*=\s*"([a-z_]+)"', _read(path)))
+    return [f"{CONSOLE_REASON_MAP}: the code `{code}` can be shown but has no text in the console"
+            for code in sorted(emitted - known)]
 
 
 # ---------------------------------------------------------------------------------------------------- tools
@@ -387,7 +463,7 @@ def check_privacy(root: Path) -> list[str]:
 
 CHECKS = (
     ("structure", check_structure), ("links", check_links), ("routes", check_routes),
-    ("labels", check_labels), ("codes", check_codes), ("tools", check_tools), ("images", check_images), ("privacy", check_privacy),
+    ("labels", check_labels), ("codes", check_codes), ("console-texts", check_console_texts), ("tools", check_tools), ("images", check_images), ("privacy", check_privacy),
 )
 
 

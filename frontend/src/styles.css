@@ -678,6 +678,7 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .finding-facts { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px 14px; margin: 0; }
 .finding-facts dt, .finding-evidence dt { color: var(--muted); font-size: 0.72rem; font-weight: 800; text-transform: uppercase; }
 .finding-facts dd, .finding-evidence dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.finding-evidence dd { white-space: pre-line; }
 .finding-evidence { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 10px; margin: 0; }
 .finding-evidence div { padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); }
 
@@ -768,6 +769,8 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .scope-row { display: grid; grid-template-columns: 110px 150px minmax(180px, 1fr) 90px 90px auto auto; gap: 8px; align-items: center; }
 .scope-row label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--ink-soft); font-weight: 700; }
 .scope-row .port-input { width: 100%; min-width: 0; }
+/* The monitoring wizard's row has no port inputs: rule, type, value, authorization label (#61). */
+.scope-row.no-ports { grid-template-columns: 110px 150px minmax(180px, 1fr) auto; }
 .mode-guide {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -854,7 +857,7 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
   .lens-heading { display: grid; }
   .event-facts, .finding-facts, .finding-evidence { grid-template-columns: 1fr; }
   .event-actions { justify-content: flex-start; }
-  .scope-row { grid-template-columns: 1fr; }
+  .scope-row, .scope-row.no-ports { grid-template-columns: 1fr; }
   .definition-grid { grid-template-columns: 1fr; }
   .definition-grid dt { border-bottom: 0; padding-bottom: 2px; }
   .definition-grid dd { padding-top: 0; }
@@ -906,6 +909,12 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .modal-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; max-width: min(620px, 95vw); width: 100%; max-height: 90vh; overflow: auto; box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
 .modal-card .panel-heading { border-bottom: 1px solid var(--line); }
 .modal-body { padding: 14px 16px; }
+/* REQ-HANDOVER-001: "Test deeper" is a long form, so it is wider, shows the two lists side by side, and keeps its buttons in view. */
+.handover-card { max-width: min(900px, 96vw); }
+.handover-lists { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+@media (max-width: 760px) { .handover-lists { grid-template-columns: 1fr; } }
+.handover-card .form-actions { position: sticky; bottom: 0; background: var(--surface); border-top: 1px solid var(--line); padding: 10px 16px; }
+.handover-hosts td:last-child { white-space: normal; min-width: 200px; }
 .modal-body h4 { margin: 14px 0 6px; }
 .modal-body h4:first-child { margin-top: 0; }
 .modal-body p { margin: 0; }
@@ -1081,6 +1090,22 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .findings-status-tabs { padding: 0 16px; }
 .tab-count { display: inline-block; min-width: 1.6em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 0.78rem; text-align: center; }
 .tab.active .tab-count { color: var(--text); }
+/* REQ-RETEST-005: "Review before you run". Two groups; the one that sends data to the target is marked and each of its
+   items is a boxed choice, so it cannot be read as part of the harmless list above it. */
+.run-review .review-group { margin-top: 16px; }
+.run-review .review-group h3 { margin: 0 0 8px; }
+.run-review .review-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.run-review .review-list > li > p { margin: 4px 0 0; overflow-wrap: anywhere; }
+.run-review .review-confirm h3 { color: var(--yellow); }
+.run-review .review-confirm-item { border: 1px solid var(--tint-warn-border); background: var(--tint-warn-bg); border-radius: 8px; padding: 10px 12px; }
+.run-review .review-confirm-item fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.run-review .review-confirm-item legend { padding: 0; margin-bottom: 6px; overflow-wrap: anywhere; }
+.run-review .review-confirm-item p { margin: 6px 0; overflow-wrap: anywhere; }
+.run-review .review-confirm-item .agent-response { margin: 6px 0; }
+.run-review .choice-row { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-top: 8px; }
+.plan-rerun { margin-left: 8px; padding: 2px 8px; font-size: 0.75rem; }
+.modal-card .run-review { border: 0; box-shadow: none; margin: 0; }
+
 .triage-panel { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--surface-2); }
 .triage-panel h3 { margin: 0 0 6px; }
 .triage-panel p { margin: 0 0 8px; }
@@ -1203,6 +1228,10 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .check-row strong { color: var(--ink); }
 .lifecycle-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; }
 .lifecycle-confirm { flex-basis: 100%; }
+.bulk-bar { display: grid; gap: 8px; padding: 10px 12px; margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.bulk-bar-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.select-cell { width: 2.2em; text-align: center; }
+.same-title-hint { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; }
 .schedule-panel h2 { margin: 0 0 6px; font-size: 1.05rem; }
 .schedule-panel p { margin: 4px 0; }
 .schedule-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -1215,3 +1244,16 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: auto; }
 .mode-card .mode-tag { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .mode-pill { margin-left: 8px; }
 @media (max-width: 760px) { .mode-cards { grid-template-columns: 1fr; } }
+
+/* REQ-TESTACCT-010 (#89): test accounts */
+.test-accounts .account-list { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 12px; }
+.test-accounts .account-card { border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: var(--surface); }
+.test-accounts .account-card header { margin-bottom: 8px; }
+.test-accounts .where-works p { margin: 4px 0; }
+.test-accounts .account-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.test-accounts .host-picker { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+.test-accounts .host-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 0; }
+.test-accounts .host-login-path { min-width: 18rem; }
+.test-accounts .checkbox-label { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; }
+.test-accounts .link-button { background: none; border: 0; color: var(--teal); cursor: pointer; padding: 4px 0; text-align: left; }
+.login-consent { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 8px; }

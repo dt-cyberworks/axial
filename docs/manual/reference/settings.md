@@ -3,7 +3,7 @@
 **Who this is for:** administrators who configure the installation.
 **After this page you can:** say what each global setting does, what its default is, and which of them an individual engagement can override.
 
-<!-- ui-labels: Admin | Operational settings | Users | Account audit | Operational guardrails | Provider source | API key | Max RPS | Auto slow down | Scan rate policy | Maximum allowed tool calls per second | Automatically slow down and retry rate-limited tool calls | Provider | Base URL | Model | NVD API key (optional) | Tool policy (global defaults) | Needs approval | Vector Agent iteration budget (global default) | Max iterations | Vector Agent max tokens (global default) | Max tokens | Manual approval timeout (global default) | Timeout (seconds) | Vector Agent instructions (global default) | Subdomain source keys (optional) | Monitoring defaults | E-mail (SMTP relay) | Send e-mail | Relay host | Send a test message to me | Tool-call budget per run (global) | Tool calls per run | Save tool-call budget -->
+<!-- ui-labels: Admin | Operational settings | Users | Account audit | Operational guardrails | Provider source | API key | Max RPS | Lens Agent max tokens (global default) | Save Lens max tokens | Auto slow down | Scan rate policy | Maximum allowed tool calls per second | Automatically slow down and retry rate-limited tool calls | Provider | Base URL | Model | NVD API key (optional) | Tool policy (global defaults) | Needs approval | Vector Agent iteration budget (global default) | Max iterations | Vector Agent max tokens (global default) | Max tokens | Manual approval timeout (global default) | Timeout (seconds) | Vector Agent instructions (global default) | Subdomain source keys (optional) | Monitoring defaults | E-mail (SMTP relay) | Send e-mail | Relay host | Send a test message to me | Tool-call budget per run (global) | Tool calls per run | Save tool-call budget -->
 
 ## The Admin hub (`/admin`)
 
@@ -48,6 +48,10 @@ Per tool: **Enabled**, and whether it **Needs approval** (one-time, per call). A
 
 **Max tokens**: the cap on the model's output in one turn, its reasoning plus the tool-call JSON itself, *not* the context window. Default 8,192, between 1,024 and 32,768. Set too low, a turn is cut off in the middle of the JSON, the tool call fails to parse and the agent stalls without an obvious reason. A campaign can override it.
 
+### Lens Agent max tokens (global default)
+
+**Max tokens**: the cap on the output of one Lens Agent explanation. Default 4,096, between 1,024 and 16,384. Some models count their hidden reasoning against the same cap, so a cap that is too low can cut the visible text off in the middle of a sentence. When that happens the platform asks once more with a larger budget (double, never above 16,384), so one explanation makes at most two calls to the provider. Admin only; it applies to every engagement.
+
 ### Manual approval timeout (global default)
 
 **Timeout (seconds)**: how long a state-changing request waits for an operator's decision before it is rejected automatically, so a scan cannot hang if nobody is at the desk. Default 900 seconds (15 minutes), between 60 seconds and 24 hours. A campaign can override it.
@@ -72,7 +76,7 @@ Messages are queued and sent by the worker, because the control plane has no rou
 
 ### Monitoring defaults
 
-What a **new** monitoring engagement starts with: which capabilities are on, the scan depth, whether new hosts of a customer's systems and of your own systems are held until released, whether a monitor whose target starts failing pauses itself, and how many monitoring runs may be active at the same time. The values are *copied* when an engagement is created: changing them here does not alter an engagement that exists, because someone may already have signed for what it does. See [Monitor an attack surface](../guides/monitor-an-attack-surface.md#capabilities).
+What a **new** monitoring engagement starts with: which capabilities are on, the scan depth, whether a host found after the baseline is held until released (one default for every engagement, whoever's systems they are), whether a monitor whose target starts failing pauses itself, and how many *scheduled* monitoring runs may be active at the same time across the installation (1 to 4, default 1; a due run beyond that waits for the next check, and a run you start with **Run now** is not limited by it). The last value applies from the next check; it is not copied into engagements. The values are *copied* when an engagement is created: changing them here does not alter an engagement that exists, because someone may already have signed for what it does. See [Monitor an attack surface](../guides/monitor-an-attack-surface.md#capabilities).
 
 ### Subdomain source keys (optional)
 

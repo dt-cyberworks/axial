@@ -247,14 +247,37 @@ Requirements: REQ-PIPE-001..021.
   (`auto` | `hold`), `fragility_breaker`, `review_at`; `state_changing_requests` exists for the withheld
   standing consent and is never read. `scan_profile` also accepts `passive` and `light`.
 - `scan_run.trigger` (`manual` | `scheduled`), `initiated_by`, `supervision` (`attended` | `semi_attended` |
-  `unattended`), `health` (`ok` | `degraded` | `failed`), `schedule_id`, `scope_hosts`, `retest_finding_id`.
+  `unattended`), `health` (`ok` | `degraded` | `failed`), `schedule_id`, `scope_hosts`, `retest_finding_id`,
+  `retest_items` (NULL = a full run; a JSON array of `{host, port?, check|tool}` = a run restricted to those checks,
+  `[]` when it only sends confirmed requests; migration 0043, REQ-RETEST-002). A run with `scope_hosts` or `retest_items`
+  is never the previous run of a comparison.
+- `open_request` (migration 0043, REQ-RETEST-004): a request an unattended run could not get a decision for, kept whole:
+  `tool`, `target`, `method`, `path`, the exact `call` (JSONB), `rationale`, `risk`, `state_changing`, `reason`,
+  `dedupe_key` (one `open` row per distinct request), `state` (`open` | `sent` | `rejected` | `expired` | `superseded`),
+  `sent_run_id` and `sent_approval_id` once a person chose to send it. The call is never executed from this row: sending
+  creates a new `approved` approval for a new run.
   A parked run keeps `state = waiting_approval` and has `checkpoint.parked` and `checkpoint.agent_resume`.
+- `scan_run.state = waiting_approval` has three uses. While one action of a run waits for a person's decision the run
+  carries `state_reason = approval_wait` and its other actions keep running (the worker writes it when the first wait
+  opens and `running` when the last one ends; the control plane clears the reason whenever the state changes). A parked
+  run (`checkpoint.parked`) and an asset-review pause (`state_reason = asset_review_pending`) are not working. The gateway,
+  the raw-egress lease, the budget context and the observation recorder treat a run as working only in the first case
+  or when it is `running`.
 - `discovered_asset.hold_state` (`held` | `released`), `held_at`, `released_at`, `released_by`.
-- `run_inventory_snapshot` (what one run saw: assets and services), `change_event` (the change feed),
+- `run_inventory_snapshot` (what one run saw: assets and services; stored for every run that did not fail, assessments included, REQ-DIFF-003), `change_event` (the change feed),
   `inbox_item` (what needs a person; one open item per `dedupe_key`), `notification_target` (webhooks,
   secret encrypted), `alert_event` (delivery state and attempts), `engagement_consent` (append-only; for the
   withheld consent), `engagement_schedule` (from 0039, unused: superseded by the interval below).
 - `engagement.schedule_every_days` (1..90, NULL = none; monitoring only), `schedule_set_at`, `schedule_anchor_at`
   (the count starts here: latest of set, became active, last run start; next run = anchor + interval),
   `schedule_skip_reason`, `schedule_skip_since` (migration 0041, REQ-MON-001/003).
+- `engagement.target_review_state` (`discovering` | `awaiting_selection` | `confirmed` | `discovery_failed`; NULL for an
+  assessment), `target_review_run_id` (the discovery run of the current review), `targets_confirmed_at`,
+  `targets_confirmed_by` (migration 0042, REQ-BASE-001..004); `scan_run.trigger` also takes `baseline`. The decision
+  itself is ordinary `deny` rows of `scope_asset` plus audit rows (`target_excluded` per host, `targets_confirmed`).
 
+- Test accounts (migration 0047, REQ-TESTACCT-001..008): `engagement_test_account` (label, role, kind, login_path, username,
+  `secret_enc` = Fernet ciphertext, NULL once erased, state `active|suspended|erased`, the attestation), `engagement_test_account_host`
+  (the hosts an account is assigned to, with its own login path, `failed_runs`, per-host suspension and last outcome),
+  `engagement_login_consent` (appended, never edited; `pairs` = the (account, host, login path) it covers; `revoked_at`) and
+  `engagement_test_account_login_attempt` (one row per allowed login, for the attempt limits). All cascade with the engagement.

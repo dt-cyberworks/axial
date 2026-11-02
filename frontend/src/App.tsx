@@ -12,6 +12,8 @@ import EngagementEdit from "./pages/EngagementEdit";
 import EngagementDetail from "./pages/EngagementDetail";
 import RunDetail from "./pages/RunDetail";
 import Audit from "./pages/Audit";
+import OpenItems from "./pages/OpenItems";
+import TargetSelection from "./pages/TargetSelection";
 import Login from "./pages/Login";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
@@ -181,6 +183,8 @@ function AuthenticatedShell() {
           <Route path="/engagements/:id/runs/:runId" element={<RunDetail />} />
           <Route path="/engagements/:id/edit" element={<EngagementEdit />} />
           <Route path="/engagements/:id/audit" element={<Audit />} />
+          <Route path="/engagements/:id/targets" element={<TargetSelection />} />
+          <Route path="/engagements/:id/open-items" element={<OpenItems />} />
           {/* Old engagement-scoped views fold into the new engagement/run pages. */}
           <Route path="/engagements/:id/live" element={<RedirectToEngagement />} />
           <Route path="/engagements/:id/results" element={<RedirectToEngagement />} />

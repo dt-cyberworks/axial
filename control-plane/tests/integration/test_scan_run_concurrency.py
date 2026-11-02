@@ -143,3 +143,52 @@ def test_a_terminal_run_does_not_block_a_new_active_one(db):
 
     run = start_scan_run(db, eng.id)  # must not raise
     assert run.state == "running"
+
+
+def test_negative_another_constraint_is_not_reported_as_an_active_run(db):
+    """GitHub #73 / REQ-SCAN-015: a CHECK violation (a trigger value ck_scan_run_trigger does not
+    allow) must surface as itself, not as 'engagement already has an active scan_run'."""
+    from sqlalchemy.exc import IntegrityError
+
+    eng = _engagement(db)
+    with pytest.raises(IntegrityError, match="ck_scan_run_trigger"):
+        start_scan_run(db, eng.id, trigger="not-a-trigger")
+    db.rollback()
+
+    assert db.query(ScanRun).filter(ScanRun.engagement_id == eng.id).count() == 0
+    # the session is usable and the engagement can still start a run
+    assert start_scan_run(db, eng.id).state == "running"
+
+
+def test_the_translation_is_limited_to_the_one_active_run_index(db, monkeypatch):
+    """The constraint-name check itself, without relying on which constraint a real insert trips."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app import scan_lifecycle
+
+    class _Diag:
+        def __init__(self, name):
+            self.constraint_name = name
+
+    class _Orig(Exception):
+        def __init__(self, name):
+            super().__init__(name)
+            self.diag = _Diag(name)
+
+    def _failing_flush(name):
+        def flush(*args, **kwargs):
+            raise IntegrityError("INSERT", {}, _Orig(name))
+        return flush
+
+    eng = _engagement(db)
+    monkeypatch.setattr(db, "flush", _failing_flush("uq_scan_run_one_active_per_engagement"))
+    with pytest.raises(ScanRunAlreadyActive):
+        scan_lifecycle.start_scan_run(db, eng.id)
+
+    monkeypatch.setattr(db, "flush", _failing_flush("some_other_constraint"))
+    with pytest.raises(IntegrityError):
+        scan_lifecycle.start_scan_run(db, eng.id)
+
+    monkeypatch.setattr(db, "flush", _failing_flush(None))
+    with pytest.raises(ScanRunAlreadyActive):  # a driver that reports no name keeps the old behaviour
+        scan_lifecycle.start_scan_run(db, eng.id)

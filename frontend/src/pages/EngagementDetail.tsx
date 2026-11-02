@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { api, isNotFound, type ReportJob } from "../api/client";
 import NotFound from "./NotFound";
@@ -13,8 +13,10 @@ import ReadOnlyNotice from "../components/ReadOnlyNotice";
 import CapabilitiesEditor from "../components/CapabilitiesEditor";
 import ChangesSection from "../components/ChangesSection";
 import EngagementLifecycle from "../components/EngagementLifecycle";
+import HandoverList from "../components/HandoverList";
 import ScheduleControl from "../components/ScheduleControl";
 import NotificationTargets from "../components/NotificationTargets";
+import TestAccounts from "../components/TestAccounts";
 import ToolGrantsEditor from "../components/ToolGrantsEditor";
 import { fmtDuration, fmtTime, runStatePill } from "../lib/runs";
 
@@ -25,6 +27,7 @@ const SurfaceGraph = lazy(() => import("../components/SurfaceGraph"));
 const ENGAGEMENT_TABS = [
   { id: "findings", label: "Findings" },
   { id: "assets", label: "Assets" },
+  { id: "accounts", label: "Test accounts" },   // REQ-TESTACCT-010 (#89)
   { id: "runs", label: "Runs & reports" },
 ] as const;
 // REQ-MODE-018: a monitoring engagement also has the change feed and its setup.
@@ -32,6 +35,7 @@ const MONITORING_TABS = [
   { id: "findings", label: "Findings" },
   { id: "changes", label: "Changes" },
   { id: "assets", label: "Assets" },
+  { id: "accounts", label: "Test accounts" },   // REQ-TESTACCT-010 (#89)
   { id: "runs", label: "Runs & reports" },
   { id: "setup", label: "Capabilities & alerts" },
 ] as const;
@@ -72,6 +76,8 @@ export default function EngagementDetail() {
   const { data: scanRuns = [] } = useQuery({ queryKey: ["scan-runs", id], queryFn: () => api.listScanRuns(id!), enabled: engagementLoaded, refetchInterval: 5000 });
   const { data: summary } = useQuery({ queryKey: ["summary", id], queryFn: () => api.summary(id!), enabled: engagementLoaded, refetchInterval: 5000 });
   const { data: scopeAssets = [] } = useQuery({ queryKey: ["scope-assets", id], queryFn: () => api.listScopeAssets(id!), enabled: engagementLoaded });
+  // REQ-RETEST-003: what the latest runs left open.
+  const { data: openItems } = useQuery({ queryKey: ["open-items", id], queryFn: () => api.getOpenItems(id!), enabled: engagementLoaded, refetchInterval: 15000 });
 
   const authorizationBlockers = scopeAssets.filter(
     (asset) => asset.rule === "allow" && asset.active_allowed && !asset.authorization_verified,
@@ -113,6 +119,7 @@ export default function EngagementDetail() {
   // here; its tool grants use the shared ToolGrantsEditor (also on the Edit page, where
   // grants can be changed after activation).
   const isDraft = engagement?.status === "draft";
+  const location = useLocation();
 
   const activateEngagementMutation = useMutation({
     mutationFn: () => api.activateEngagement(id!),
@@ -121,6 +128,11 @@ export default function EngagementDetail() {
       queryClient.invalidateQueries({ queryKey: ["scan-readiness", id] });
     },
   });
+
+  // REQ-EGRESS-011: told once, right after activation, that this engagement shares hosts with another active one.
+  const overlapNotice: string | null =
+    activateEngagementMutation.data?.scope_overlap_notice ??
+    (location.state as { scopeOverlapNotice?: string | null } | null)?.scopeOverlapNotice ?? null;
 
   if (!id) return null;
   // REQ-CONSOLE-008: never render a working-looking page for an engagement
@@ -153,6 +165,10 @@ export default function EngagementDetail() {
           <span className="eyebrow">Engagement</span>
           <h1>{engagement?.title ?? "Engagement"}</h1>
           <p>Status {engagement?.status ?? "?"} · {isMonitoring ? "Monitoring (unattended)" : "Assessment"} · Vector Agent {engagement?.ai_testing_allowed ? "enabled" : "disabled"} · Discovery extras: {engagement ? discoveryFlagSummary(engagement) : "?"} · {id}</p>
+          {/* REQ-HANDOVER-007: an assessment started from a monitor links back to it. */}
+          {engagement?.handover_from && (
+            <p className="muted-line">Follows monitoring engagement <Link to={`/engagements/${engagement.handover_from.id}`}>{engagement.handover_from.title}</Link></p>
+          )}
         </div>
         <div className="header-actions">
           {canManage && <Link to={`/engagements/${id}/edit`} className="secondary-action">Edit</Link>}
@@ -163,9 +179,37 @@ export default function EngagementDetail() {
           >
             {downloadAuthorizationPdf.isPending ? "Preparing…" : "Authorization PDF"}
           </button>
+          {isMonitoring && engagement.target_review_state === "confirmed" && (
+            <Link to={`/engagements/${id}/targets`} className="secondary-action">Review targets</Link>
+          )}
+          {(openItems?.counts.total ?? 0) > 0 && (
+            <Link to={`/engagements/${id}/open-items`} className="secondary-action">Not done yet ({openItems!.counts.total})</Link>
+          )}
           <Link to={`/engagements/${id}/audit`} className="secondary-action">Audit</Link>
         </div>
       </header>
+
+      {/* REQ-BASE-006: a monitor that has not had its targets confirmed scans nothing; say so and offer the step. */}
+      {isMonitoring && engagement.target_review_state && engagement.target_review_state !== "confirmed" && (
+        <section className="form-panel settings-panel" aria-label="Target selection">
+          <h2>
+            {engagement.target_review_state === "discovering" ? "Discovering your attack surface"
+              : engagement.target_review_state === "awaiting_selection" ? "Choose the targets to monitor"
+              : "The discovery did not finish"}
+          </h2>
+          <div className="warning-block">
+            {engagement.target_review_state === "discovering" && "A passive discovery is running: public sources and DNS only, nothing is sent to your systems. Nothing else runs until you have chosen the targets."}
+            {engagement.target_review_state === "awaiting_selection" && "The discovery has finished. Nothing is scanned until you choose which hosts are monitored; the first scan then runs on exactly those."}
+            {engagement.target_review_state === "discovery_failed" && "Run the discovery again, then choose the targets. Nothing is scanned until then."}
+          </div>
+          <div className="form-actions">
+            <Link className="primary-action" to={`/engagements/${id}/targets`}>
+              {engagement.target_review_state === "awaiting_selection" ? "Choose targets"
+                : engagement.target_review_state === "discovery_failed" ? "Open the discovery" : "Open the discovery"}
+            </Link>
+          </div>
+        </section>
+      )}
 
       {!canManage && <ReadOnlyNotice engagement={engagement} />}
 
@@ -227,12 +271,19 @@ export default function EngagementDetail() {
         </section>
       )}
 
+      {overlapNotice && !isDraft && (
+        <div className="warning-block" role="note" aria-label="Shared hosts">{overlapNotice}</div>
+      )}
+
       {canManage && !isDraft && <EngagementLifecycle engagement={engagement} />}
 
       {/* REQ-MON-004: how often a monitor runs by itself, and why a due run waits. */}
       {isMonitoring && !isDraft && engagement.status !== "completed" && engagement.status !== "revoked" && (
         <ScheduleControl engagementId={engagement.id} canManage={canManage} />
       )}
+
+      {/* REQ-HANDOVER-007: the deeper tests that were started from this monitor. */}
+      {isMonitoring && !isDraft && <HandoverList engagementId={engagement.id} />}
 
       {/* REQ-MODE-013/018: a monitor tells you what changed before anything else. */}
       {isMonitoring && !isDraft && activeTab === "findings" && <ChangesSection engagementId={id} compact />}
@@ -252,6 +303,7 @@ export default function EngagementDetail() {
                 {readiness.blockers.map((b) => (
                   <li key={b.code} title={b.code}>
                     {b.message}
+                    {b.action === "select_targets" && <> <Link to={`/engagements/${id}/targets`}>Choose targets</Link></>}
                     {canManage && b.action === "tool_grants" && (
                       isDraft
                         ? <> <a href="#tool-grants">Go to tool grants</a></>
@@ -263,6 +315,24 @@ export default function EngagementDetail() {
             </div>
           ) : (
             <div className="success-block">All pre-flight checks pass. A new run will start the pipeline (discovery → report).</div>
+          )}
+          {/* REQ-GRANT-002: a switch that is on while its grant is missing does not stop a run, but the tool will be skipped. */}
+          {readiness && (readiness.warnings ?? []).length > 0 && (
+            <div className="warning-block" role="status">
+              Will not work as switched on:
+              <ul>
+                {(readiness.warnings ?? []).map((w) => (
+                  <li key={w.code} title={w.code}>
+                    {w.message}
+                    {canManage && w.action === "tool_grants" && (
+                      isDraft
+                        ? <> <a href="#tool-grants">Go to tool grants</a></>
+                        : <> <Link to={`/engagements/${id}/edit#tool-grants`}>Open tool grants</Link></>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
         <div className="start-run-actions">
@@ -313,6 +383,10 @@ export default function EngagementDetail() {
             <CapabilitiesEditor engagementId={id} active={engagement.status === "active"} canManage={canManage} />
             <NotificationTargets engagementId={id} canManage={canManage} />
           </>
+        )}
+
+        {activeTab === "accounts" && engagement && (
+          <TestAccounts engagementId={id} canManage={canManage} operatingMode={isMonitoring ? "monitoring" : "assessment"} source={engagement.source} />
         )}
 
         {activeTab === "assets" && (

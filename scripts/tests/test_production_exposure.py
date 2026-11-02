@@ -38,6 +38,7 @@ PROD_ENV = {
     "INTERNAL_API_TOKEN": "t-internal",
     "SCOPE_SIGNING_SECRET": "t-scope",
     "RAW_EGRESS_SIGNING_SECRET": "t-rawegress",
+    "EGRESS_RUN_TOKEN_SECRET": "t-egress-run",
     "RUNNER_API_TOKEN": "t-runner",
     "RAW_EGRESS_API_TOKEN": "t-raw-egress-api",
     "OOB_TOKEN": "t-oob-token",

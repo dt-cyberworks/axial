@@ -4,6 +4,16 @@ from app import control_plane_client
 
 
 @pytest.fixture(autouse=True)
+def _forget_test_accounts_and_sessions():
+    """The registry of test accounts and session values is process-global (REQ-TESTACCT-005/014); no test may leave one behind for the next."""
+    from app import test_accounts
+
+    test_accounts.reset()
+    yield
+    test_accounts.reset()
+
+
+@pytest.fixture(autouse=True)
 def _claimable_scan_run(monkeypatch):
     """run_scan claims its scan_run first (GitHub issue #42); tests that drive
     the pipeline get a fresh first claim instead of a control-plane call."""

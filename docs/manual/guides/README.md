@@ -16,6 +16,9 @@ Each guide is one job from start to finish. For the meaning of a screen or a fie
 | Answer a request that is waiting for your decision | [Approve or deny a tool call](approve-or-deny-a-tool-call.md) |
 | Decide what to do with each finding | [Triage findings](triage-findings.md) |
 | See what changed since the last scan | [Compare runs](compare-runs.md) |
+| Confirm a fix, or run only what a run left open | [Retest and run only what is open](retest-and-open-items.md) |
+| Have a person test a monitored target more deeply | [Test a monitored target in depth](test-a-monitored-target-in-depth.md) |
+| Let the agent test behind a login with a dedicated account | [Test behind a login](test-behind-a-login.md) |
 | Produce the document for the customer | [Reports](reports.md) |
 | Add people, set up their sign-in, recover access | [Users and two-factor authentication](users-and-mfa.md) |
 | Let the AI agent and the finding explanations work | [Configure the AI provider](configure-the-llm.md) |

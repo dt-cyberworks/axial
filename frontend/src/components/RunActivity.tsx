@@ -8,6 +8,7 @@ import {
   phaseForEntry,
   scopeEntriesToRun,
   summarizeRun,
+  consolidateActivities,
   translateActivity,
 } from "../lib/runActivity";
 import {
@@ -61,7 +62,7 @@ export default function RunActivity({ engagementId, run, entries }: RunActivityP
     [entries, run],
   );
   const activities = useMemo(
-    () => scopedEntries.map((entry) => translateActivity(entry, fallbackPhase)),
+    () => consolidateActivities(scopedEntries.map((entry) => translateActivity(entry, fallbackPhase))),
     [fallbackPhase, scopedEntries],
   );
   const summary = useMemo(() => summarizeRun(run, activities), [activities, run]);

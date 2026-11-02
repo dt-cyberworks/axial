@@ -2,7 +2,12 @@ import datetime
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.report_redaction import redact_prose
+
+# REQ-APPROVAL-002: how much of the agent's reason (or risk statement) is kept.
+MAX_REASON_CHARS = 2000
 
 
 class ToolCallIn(BaseModel):
@@ -22,6 +27,21 @@ class ToolCallIn(BaseModel):
     # and cancellation to one exact run instead of whichever run is newest.
     scan_run_id: uuid.UUID | None = None
 
+    @field_validator("rationale")
+    @classmethod
+    def _bound_and_redact_rationale(cls, value: str | None) -> str | None:
+        """REQ-APPROVAL-002: the reason shown to the person who approves, and written to the audit row, is text the
+        agent composed from what it saw. It is cut to a fixed length and a credential shape in it (a bearer token, a
+        cookie, a JWT) is masked before it is stored, so the approval record cannot become a copy of a secret."""
+        return None if value is None else redact_prose(value)[:MAX_REASON_CHARS]
+
+    @field_validator("risk")
+    @classmethod
+    def _bound_and_redact_risk(cls, value: dict | None) -> dict | None:
+        if not isinstance(value, dict) or not isinstance(value.get("description"), str):
+            return value
+        return {**value, "description": redact_prose(value["description"])[:MAX_REASON_CHARS]}
+
 
 class DecisionOut(BaseModel):
     allowed: bool
@@ -30,6 +50,7 @@ class DecisionOut(BaseModel):
     approval_request_id: uuid.UUID | None = None
     is_throttled: bool = False
     retry_after_seconds: float | None = None
+    detail: str | None = None
 
 
 class ApprovalClaimOut(BaseModel):
@@ -207,6 +228,13 @@ class ScanRunClaimOut(BaseModel):
     scope_hosts: list[str] | None = None
     retest_finding_id: str | None = None
     operating_mode: str = "assessment"
+    # REQ-RETEST-002/006: a restricted run's items, and the approvals its person confirmed.
+    retest_items: list[dict] | None = None
+    send_approval_ids: list[str] = []
+    # REQ-AGENT-028: may the Vector Agent run for this engagement at all? Defaults to False so that a reply that lacks
+    # the field can never start an agent (fail closed). `agent_skip_reason` is the gateway reason code behind a False.
+    agent_allowed: bool = False
+    agent_skip_reason: str | None = None
 
 
 class AgentStepIn(BaseModel):
@@ -360,16 +388,6 @@ class OpenwireCallbackStatusOut(BaseModel):
     triggered: bool
     triggered_at: datetime.datetime | None = None
 
-
-class BenchmarkEngagementCreate(BaseModel):
-    """REQ-BENCH-007: the benchmark harness's own engagement-creation path.
-    source is NOT a client-supplied field here - the endpoint forces
-    source='benchmark' server-side, unlike the operator-facing EngagementCreate."""
-    title: str
-    target_host: str
-    tcp_port_from: int
-    tcp_port_to: int
-    tool_categories: list[str] = ["recon", "fingerprint", "vuln"]
 
 
 # --- Scan plan (REQ-PIPE-001/003/006/008) ------------------------------------

@@ -12,6 +12,8 @@ export type OperatingMode = "monitoring" | "assessment";
 // REQ-MODE-002: how a run is supervised.
 export type Supervision = "attended" | "semi_attended" | "unattended";
 
+export type TargetReviewState = "discovering" | "awaiting_selection" | "confirmed" | "discovery_failed";
+
 export interface Engagement {
   id: string;
   title: string;
@@ -36,6 +38,9 @@ export interface Engagement {
   operating_mode: OperatingMode;
   new_asset_policy: "auto" | "hold";
   fragility_breaker: boolean;
+  // REQ-BASE-001: a monitor is activated into a discovery and scans nothing until its owner has
+  // chosen the targets. null for an assessment and for a monitor that was never asked.
+  target_review_state: TargetReviewState | null;
   review_at: string | null;
   authorized_from: string;
   authorized_until: string;
@@ -49,6 +54,70 @@ export interface Engagement {
   owner_name: string | null;
   owner_email: string | null;
   can_manage: boolean;
+  /** REQ-EGRESS-011: only on the activation answer - this engagement shares hosts with another active one. */
+  scope_overlap_notice?: string | null;
+  /** REQ-HANDOVER-007: the monitor this assessment was started from ("Test deeper"), while it still exists. */
+  handover_from?: HandoverFrom | null;
+}
+
+export interface HandoverFrom { id: string; title: string; status: Engagement["status"]; }
+export interface HandoverHost {
+  host: string;
+  asset_type: "domain" | "ip";
+  held: boolean;
+  services: number;
+  open_findings: number;
+  /** The deny rule that matches this host, or null. A denied host is never selectable. */
+  denied_by: string | null;
+}
+export interface HandoverPreview {
+  monitor: { id: string; title: string; status: string };
+  hosts: HandoverHost[];
+  deny_rows: { asset_type: string; value: string; path_pattern: string | null }[];
+  allow_rows: { asset_type: string; value: string }[];
+  latest_run_at: string | null;
+  carried: string[];
+  not_carried: string[];
+  overlap: "both_may_run" | "monitor_must_pause";
+  defaults: { scan_profile: string; ai_testing_allowed: boolean };
+  suggested_title: string;
+  emergency_contact: string | null;
+}
+export interface HandoverRequest {
+  title?: string;
+  authorized_from: string;
+  authorized_until: string;
+  emergency_contact?: string;
+  scope_mode: "hosts" | "same_scope";
+  hosts: string[];
+}
+// REQ-TESTACCT-001..010 (GitHub #89): dedicated test accounts of an engagement. No type here has a field for the secret: the read
+// model never carries it, and the only place a secret is sent is the body of create / replace.
+export type TestAccountKind = "login_form" | "login_json" | "basic" | "header_token";
+export interface TestAccountHostView {
+  host: string; login_path: string | null; last_outcome: string | null; last_outcome_at: string | null;
+  suspended: boolean; suspended_reason: string | null;
+}
+export interface TestAccountView {
+  id: string; label: string; role: string; kind: TestAccountKind; login_path: string | null; header_name: string | null;
+  username: string | null; state: "active" | "suspended" | "erased"; suspended_reason: string | null;
+  secret_set: boolean; secret_set_at: string | null; attested_at: string | null;
+  hosts: TestAccountHostView[]; can_use_on: string[]; cannot_use_on: { host: string; reason: string; reason_text: string | null }[];
+}
+export interface LoginConsentPair { label: string; host: string; login_path: string | null; }
+export interface LoginConsentView {
+  applicable: boolean; current: boolean; given_at: string | null; wording_version: string; pairs: LoginConsentPair[]; uncovered: LoginConsentPair[];
+}
+export interface TestAccountsOverview { accounts: TestAccountView[]; can_manage: boolean; consent: LoginConsentView; cipher_available: boolean; }
+export interface TestAccountHostChoice { host: string; held: boolean; denied_by: string | null; takeover_suspected: boolean; covered: boolean; }
+export interface TestAccountCreate {
+  label: string; role: string; kind: TestAccountKind; username?: string | null; secret: string; login_path?: string | null;
+  header_name?: string | null; hosts: { host: string; login_path?: string | null }[]; attested: boolean;
+}
+export interface HandoverCreated { id: string; title: string; status: string; scope_mode: string; overlap: string; notices: string[]; }
+export interface HandoverListItem {
+  id: string; title: string; status: string; owner_name: string;
+  authorized_from: string; authorized_until: string; created_at: string | null;
 }
 
 export interface EngagementUpdate {
@@ -142,6 +211,20 @@ export interface ScopeAsset {
 }
 
 export type FindingStatus = "open" | "accepted_risk" | "false_positive" | "resolved";
+
+export interface BulkTriageResult {
+  bulk_id: string;
+  status: FindingStatus;
+  changed: number;
+  unchanged: number;
+  finding_ids: string[];
+}
+export interface BulkUndoResult {
+  bulk_id: string;
+  undo_of: string;
+  restored: number;
+  skipped: number;
+}
 
 /** An API call that got an HTTP error response; `status` lets callers tell
  * "does not exist / not yours" (404, or 422 for a malformed id) from a
@@ -376,10 +459,48 @@ export interface AlertRecord {
 export interface MonitoringDefaults {
   capabilities: Record<string, boolean>;
   scan_profile: RunDepth;
-  new_asset_policy_customer: "auto" | "hold";
-  new_asset_policy_other: "auto" | "hold";
+  // REQ-BASE-005: one policy for hosts found after the baseline, whoever's systems they are.
+  new_asset_policy: "auto" | "hold";
   fragility_breaker: boolean;
   max_concurrent_monitoring_runs: number;
+}
+
+// REQ-BASE-002: what a passive discovery found, for the owner to choose the monitored targets from.
+export type TargetFlag = "same_address" | "other_address" | "unresolved";
+export interface TargetCandidate {
+  asset_id: string;
+  value: string;
+  addresses: string[];
+  provider: string | null;
+  dns_status: string;
+  discovered_via: string;
+  first_seen: string | null;
+  denied: boolean;
+  is_root: boolean;
+  flag: TargetFlag;
+  suggested: boolean;
+  /** REQ-BASE-007: the hold policy keeps this host out of the tests until it is released; choosing it releases it. */
+  held?: boolean;
+}
+export interface TargetsView {
+  operating_mode: OperatingMode;
+  state: TargetReviewState | null;
+  new_asset_policy: "auto" | "hold";
+  confirmed_at: string | null;
+  confirmed_by: string | null;
+  baseline_run: { id: string; state: string; started_at: string | null; finished_at: string | null; state_reason: string | null } | null;
+  candidates: TargetCandidate[];
+  counts: Record<string, number>;
+}
+export interface TargetsConfirmResult {
+  state: TargetReviewState;
+  monitored: number;
+  excluded: number;
+  included: number;
+  released?: number;
+  new_asset_policy: "auto" | "hold";
+  first_run_id: string | null;
+  first_run_error: unknown;
 }
 
 // REQ-MAIL-002 (GitHub issue #45): the administrator's mail relay. The password is write-only.
@@ -411,6 +532,63 @@ export interface ScanStartOptions {
   hosts?: string[];
   retest_finding_id?: string;
   scan_profile?: RunDepth;
+  // REQ-RETEST-002/006: run only these checks, and send these held-back requests (each one confirmed by a person).
+  items?: RetestItemIn[];
+  send_requests?: string[];
+}
+
+/** One thing a restricted run does: a check (or every check of a tool) on a host, optionally on one port. */
+export interface RetestItemIn {
+  host: string;
+  port?: number | null;
+  check?: string;
+  tool?: string;
+}
+
+// REQ-RETEST-003: what is still open - a check that is not settled, or a request a monitor held back.
+export type OpenItemState = "failed" | "partial" | "skipped" | "did_not_run" | "held_back" | "retest";
+
+export interface OpenRequestView {
+  target: string;
+  method: string | null;
+  path: string | null;
+  body: string | null;
+  /** The body exists but is shown only to the owner and administrators. */
+  body_hidden?: boolean;
+  headers: Record<string, string>;
+  rationale: string;
+  risk: { level?: string; description?: string } | null;
+}
+
+export interface OpenItem {
+  id: string;
+  kind: "check" | "request";
+  host: string;
+  port: number | null;
+  check: string | null;
+  tool: string | null;
+  title: string;
+  state: OpenItemState;
+  reason: string;
+  needs_confirmation: boolean;
+  state_changing: boolean;
+  age_days: number | null;
+  run_id: string | null;
+  expired: boolean;
+  request?: OpenRequestView;
+}
+
+export interface OpenItems {
+  items: OpenItem[];
+  counts: { total: number; checks: number; requests: number; needs_confirmation: number };
+}
+
+export interface RetestPlan {
+  finding_id: string;
+  host: string | null;
+  items: OpenItem[];
+  fallback: "host" | null;
+  explanation: string;
 }
 
 // REQ-PIPE-003/010: what a run planned, and what became of each check.
@@ -432,6 +610,8 @@ export interface ScanPlanCheck {
   duration_s: number | null;
   findings: number;
   outcome_summary: Record<string, unknown>;
+  /** GitHub #76: what an interaction-server pass tests, in words; null for every other check. */
+  template_class?: string | null;
 }
 
 export interface ScanPlanSurface {
@@ -454,12 +634,18 @@ export interface ScanPlan {
   state: string;
   summary: { checks: number; surfaces: number; by_state: Partial<Record<CheckState, number>> };
   surfaces: ScanPlanSurface[];
+  /** REQ-BASE-008: in-scope hosts this run did not test at all, with the reason. */
+  untested_hosts?: { host: string; reason: "held" | "no_address" | "no_open_port"; text: string }[];
+  /** REQ-OOB-001: template classes skipped for lack of an interaction server, by name, with the services affected. */
+  not_run_classes?: { label: string; services: number }[];
 }
 
 export interface ScanReadiness {
   ready: boolean;
   // GitHub issue #48: `action` names the GUI section where it is fixed ("tool_grants"), or null.
   blockers: { code: string; message: string; action?: string | null }[];
+  // REQ-GRANT-002: a switch that is on while the grant it needs is missing; does not stop a run.
+  warnings?: { code: string; message: string; action?: string | null }[];
 }
 
 export interface AgentStep {
@@ -482,6 +668,21 @@ export interface ScanDiffItem {
   first_seen?: string | null;
 }
 
+// REQ-DIFF-001: what hosts and ports did this run find that the previous full run did not, and the reverse.
+export interface InventoryDiff {
+  available: boolean;
+  // no_baseline: the first run; no_snapshot: assets and ports were not recorded for this run or the baseline.
+  reason: "no_baseline" | "no_snapshot" | null;
+  previous_run_id: string | null;
+  // A run with reduced coverage, or limited to some hosts, never says something is gone (REQ-DIFF-002).
+  run_coverage_reduced: boolean;
+  assets_new: { key: string; held: boolean }[];
+  assets_gone: { key: string }[];
+  ports_opened: { key: string; product?: string | null; version?: string | null }[];
+  ports_closed: { key: string; product?: string | null; version?: string | null }[];
+  services_changed: { key: string; from: { product?: string | null; version?: string | null }; to: { product?: string | null; version?: string | null } }[];
+}
+
 export interface ScanDiff {
   run_id: string;
   previous_run_id: string | null;
@@ -490,6 +691,8 @@ export interface ScanDiff {
   new: ScanDiffItem[];
   resolved: ScanDiffItem[];
   persisting_count: number;
+  run_coverage_reduced?: boolean;
+  inventory?: InventoryDiff;
 }
 
 
@@ -643,6 +846,10 @@ export interface AgentPrompt {
 }
 
 export interface AgentMaxTokens {
+  value: number;
+}
+
+export interface LensMaxTokens {
   value: number;
 }
 
@@ -893,10 +1100,34 @@ export const api = {
   deleteEngagement: (id: string) => request<void>(`/engagements/${id}`, { method: "DELETE" }),
   activateEngagement: (id: string) => request<Engagement>(`/engagements/${id}/activate`, { method: "POST" }),
   startScan: (id: string, options?: ScanStartOptions) =>
-    request<{ task_id: string; scan_run_id?: string; supervision?: Supervision }>(`/engagements/${id}/scan`, {
+    request<{ task_id: string; scan_run_id?: string; supervision?: Supervision; restricted?: boolean; requests_confirmed?: number }>(`/engagements/${id}/scan`, {
       method: "POST",
       ...(options && Object.keys(options).length > 0 ? { body: JSON.stringify(options) } : {}),
     }),
+  // REQ-RETEST-001/003/004
+  getOpenItems: (id: string) => request<OpenItems>(`/engagements/${id}/open-items`),
+  getRetestPlan: (id: string, findingId: string) => request<RetestPlan>(`/engagements/${id}/findings/${findingId}/retest-plan`),
+  rejectOpenRequest: (id: string, requestId: string) =>
+    request<{ id: string; state: string }>(`/engagements/${id}/open-requests/${requestId}/reject`, { method: "POST" }),
+  // REQ-HANDOVER-001/006/007: a draft assessment from a monitor, what it would carry, and the ones already started.
+  listTestAccounts: (id: string) => request<TestAccountsOverview>(`/engagements/${id}/test-accounts`),
+  testAccountHostChoices: (id: string) => request<TestAccountHostChoice[]>(`/engagements/${id}/test-accounts/host-choices`),
+  createTestAccount: (id: string, body: TestAccountCreate) =>
+    request<TestAccountView>(`/engagements/${id}/test-accounts`, { method: "POST", body: JSON.stringify(body) }),
+  setTestAccountHosts: (id: string, accountId: string, hosts: { host: string; login_path?: string | null }[], attested: boolean, consent: boolean) =>
+    request<TestAccountView>(`/engagements/${id}/test-accounts/${accountId}/hosts`, { method: "PUT", body: JSON.stringify({ hosts, attested, consent }) }),
+  replaceTestAccountSecret: (id: string, accountId: string, secret: string) =>
+    request<TestAccountView>(`/engagements/${id}/test-accounts/${accountId}/secret`, { method: "PUT", body: JSON.stringify({ secret }) }),
+  resumeTestAccount: (id: string, accountId: string) =>
+    request<TestAccountView>(`/engagements/${id}/test-accounts/${accountId}/resume`, { method: "POST" }),
+  deleteTestAccount: (id: string, accountId: string) =>
+    request<void>(`/engagements/${id}/test-accounts/${accountId}`, { method: "DELETE" }),
+  giveLoginConsent: (id: string) => request<LoginConsentView>(`/engagements/${id}/login-consent`, { method: "POST" }),
+  revokeLoginConsent: (id: string) => request<LoginConsentView>(`/engagements/${id}/login-consent`, { method: "DELETE" }),
+  handoverPreview: (id: string) => request<HandoverPreview>(`/engagements/${id}/handover-preview`),
+  startHandover: (id: string, body: HandoverRequest) =>
+    request<HandoverCreated>(`/engagements/${id}/handover`, { method: "POST", body: JSON.stringify(body) }),
+  listHandovers: (id: string) => request<HandoverListItem[]>(`/engagements/${id}/handovers`),
   // REQ-MODE-003: pause stops the active run; resume needs an open window; close and revoke end it.
   pauseEngagement: (id: string) => request<Engagement>(`/engagements/${id}/pause`, { method: "POST" }),
   resumeEngagement: (id: string) => request<Engagement>(`/engagements/${id}/resume`, { method: "POST" }),
@@ -942,6 +1173,12 @@ export const api = {
   updateMailConfig: (body: MailConfigUpdate) =>
     request<MailConfig>("/settings/mail", { method: "PUT", body: JSON.stringify(body) }),
   sendTestMail: () => request<MailConfig>("/settings/mail/test", { method: "POST" }),
+  // REQ-BASE-001..004: discovery, selection and confirmation of a monitor's targets.
+  getTargets: (id: string) => request<TargetsView>(`/engagements/${id}/targets`),
+  discoverTargets: (id: string) =>
+    request<{ scan_run_id: string; state: TargetReviewState | null }>(`/engagements/${id}/targets/discover`, { method: "POST" }),
+  confirmTargets: (id: string, body: { selected_asset_ids: string[]; new_asset_policy?: "auto" | "hold"; confirm_widening?: boolean }) =>
+    request<TargetsConfirmResult>(`/engagements/${id}/targets/confirm`, { method: "POST", body: JSON.stringify(body) }),
   getMonitoringDefaults: () => request<MonitoringDefaults>("/settings/monitoring-defaults"),
   updateMonitoringDefaults: (body: Partial<MonitoringDefaults>) =>
     request<MonitoringDefaults>("/settings/monitoring-defaults", { method: "PUT", body: JSON.stringify(body) }),
@@ -1013,6 +1250,11 @@ export const api = {
   // REQ-TRIAGE-001: a note is required for accepted_risk and false_positive.
   triageFinding: (id: string, findingId: string, body: { status: FindingStatus; note?: string }) =>
     request<Finding>(`/engagements/${id}/findings/${findingId}`, { method: "PATCH", body: JSON.stringify(body) }),
+  // REQ-TRIAGE-005/006: many existing findings in one action, each triaged as itself; undo as a unit.
+  bulkTriageFindings: (id: string, body: { finding_ids: string[]; status: FindingStatus; note?: string }) =>
+    request<BulkTriageResult>(`/engagements/${id}/findings/triage`, { method: "POST", body: JSON.stringify(body) }),
+  undoBulkTriage: (id: string, bulkId: string) =>
+    request<BulkUndoResult>(`/engagements/${id}/findings/triage/${bulkId}/undo`, { method: "POST" }),
   explainFindingWithLens: (id: string, findingId: string) =>
     request<FindingExplanation>(`/engagements/${id}/findings/${findingId}/lens-explanation`, { method: "POST" }),
   // REQ-REPORT-001: generation is synchronous, so the returned job is already
@@ -1025,8 +1267,12 @@ export const api = {
   // bare-URL helper was deliberately removed rather than left alongside this -
   // a plain navigable URL is exactly the broken pattern (no bearer header),
   // and leaving it exported invites its reuse.
-  downloadAuthorizationPdf: (id: string) =>
-    downloadBlob(`/engagements/${id}/authorization-pdf`, `axial-authorization-${id}.pdf`),
+  // REQ-AUTH-007: the letter shows its dates as the operator entered them, in the browser's own time zone.
+  downloadAuthorizationPdf: (id: string) => {
+    let zone = "";
+    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { /* the letter then says UTC */ }
+    return downloadBlob(`/engagements/${id}/authorization-pdf${zone ? `?tz=${encodeURIComponent(zone)}` : ""}`, `axial-authorization-${id}.pdf`);
+  },
 
   listApprovals: (state = "requested") => request<ApprovalRequest[]>(`/approvals?state=${state}`),
   approveApproval: (id: string) =>
@@ -1084,6 +1330,9 @@ export const api = {
   getAgentMaxTokens: () => request<AgentMaxTokens>("/settings/agent-max-tokens"),
   updateAgentMaxTokens: (value: number) =>
     request<AgentMaxTokens>("/settings/agent-max-tokens", { method: "PUT", body: JSON.stringify({ value }) }),
+  getLensMaxTokens: () => request<LensMaxTokens>("/settings/lens-max-tokens"),
+  updateLensMaxTokens: (value: number) =>
+    request<LensMaxTokens>("/settings/lens-max-tokens", { method: "PUT", body: JSON.stringify({ value }) }),
   updateAgentMaxIterations: (value: number) =>
     request<AgentMaxIterations>("/settings/agent-max-iterations", { method: "PUT", body: JSON.stringify({ value }) }),
   getApprovalTimeoutSeconds: () => request<ApprovalTimeoutSeconds>("/settings/approval-timeout-seconds"),

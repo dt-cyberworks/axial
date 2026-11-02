@@ -20,16 +20,19 @@ from app.db.base import get_db
 from app.settings_store import (
     MAX_AGENT_MAX_ITERATIONS,
     MAX_AGENT_MAX_TOKENS,
+    MAX_LENS_MAX_TOKENS,
     MAX_APPROVAL_TIMEOUT_SECONDS,
     MAX_TOOL_CALL_BUDGET,
     MIN_AGENT_MAX_ITERATIONS,
     MIN_AGENT_MAX_TOKENS,
+    MIN_LENS_MAX_TOKENS,
     MIN_APPROVAL_TIMEOUT_SECONDS,
     MIN_TOOL_CALL_BUDGET,
     SUBFINDER_PROVIDERS,
     SettingsCipherUnavailable,
     get_global_agent_max_iterations,
     get_global_agent_max_tokens,
+    get_global_lens_max_tokens,
     get_global_agent_prompt,
     get_global_approval_timeout_seconds,
     get_global_tool_call_budget,
@@ -38,6 +41,7 @@ from app.settings_store import (
     get_scan_policy,
     set_global_agent_max_iterations,
     set_global_agent_max_tokens,
+    set_global_lens_max_tokens,
     set_global_agent_prompt,
     set_global_approval_timeout_seconds,
     set_global_tool_call_budget,
@@ -295,6 +299,30 @@ def update_agent_max_tokens(body: AgentMaxTokensIn, db: Session = Depends(get_db
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return AgentMaxTokensOut(value=value)
+
+
+# --- Globales Token-Limit des Lens Agent (REQ-LENS-007) ---
+
+class LensMaxTokensOut(BaseModel):
+    value: int
+
+
+class LensMaxTokensIn(BaseModel):
+    value: int = Field(ge=MIN_LENS_MAX_TOKENS, le=MAX_LENS_MAX_TOKENS)
+
+
+@router.get("/lens-max-tokens", response_model=LensMaxTokensOut)
+def read_lens_max_tokens(db: Session = Depends(get_db)):
+    return LensMaxTokensOut(value=get_global_lens_max_tokens(db))
+
+
+@router.put("/lens-max-tokens", response_model=LensMaxTokensOut)
+def update_lens_max_tokens(body: LensMaxTokensIn, db: Session = Depends(get_db)):
+    try:
+        value = set_global_lens_max_tokens(db, body.value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return LensMaxTokensOut(value=value)
 
 
 # --- Manuelle-Freigabe-Timeout (REQ-APPROVAL-005) ---

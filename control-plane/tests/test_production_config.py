@@ -17,6 +17,7 @@ _SECURE_KWARGS = dict(
     raw_egress_api_token="t-raw-egress-api",
     scope_signing_secret="t-scope",
     raw_egress_signing_secret="t-rawegress",
+    egress_run_token_secret="t-egress-run",
     mfa_encryption_key="not-the-dev-default-key=",
     settings_encryption_key="KUX7ADnLj8eEdXJGw-F9-rjiLPnNWw9l82jFw4RluRc=",
     raw_egress_lease_ttl_seconds=900,
@@ -63,6 +64,8 @@ def test_a_real_https_public_base_url_is_accepted():
     ("raw_egress_api_token", "raw-egress-api-change-me-in-dev"),
     ("scope_signing_secret", "change-me-in-dev"),
     ("raw_egress_signing_secret", "raw-egress-change-me-in-dev"),
+    ("egress_run_token_secret", "egress-run-token-change-me-in-dev"),
+    ("egress_run_token_secret", ""),
     ("mfa_encryption_key", ""),
     # REQ-INSTALL-002: the object-store default that v0.3.0 shipped, the
     # current public development default, and an empty credential are all
@@ -143,3 +146,15 @@ def test_the_app_uses_the_configured_cors_origins():
 
     cors = next(m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware")
     assert cors.kwargs["allow_origins"] == ["http://localhost:5173"]
+
+
+@pytest.mark.parametrize("ttl", [0, 59, 3601, -1])
+def test_negative_a_run_token_lifetime_outside_its_bounds_fails_closed(ttl):
+    """REQ-EGRESS-006: a lifetime of seconds breaks every long tool call; one of days makes a stolen token useful."""
+    with pytest.raises(ValueError, match="egress_run_token_ttl_seconds"):
+        Settings(**{**_SECURE_KWARGS, "egress_run_token_ttl_seconds": ttl})
+
+
+@pytest.mark.parametrize("ttl", [60, 600, 3600])
+def test_a_run_token_lifetime_inside_its_bounds_is_accepted(ttl):
+    Settings(**{**_SECURE_KWARGS, "egress_run_token_ttl_seconds": ttl})

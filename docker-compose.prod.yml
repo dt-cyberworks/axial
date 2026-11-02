@@ -37,6 +37,8 @@ services:
       CONTROL_PLANE_PUBLISH_HOST: ${CONTROL_PLANE_PUBLISH_HOST:?set CONTROL_PLANE_PUBLISH_HOST=127.0.0.1 or the API publishes on every interface}
       # GitHub issue #22: same reasoning as RUNNER_API_TOKEN just above.
       RAW_EGRESS_API_TOKEN: ${RAW_EGRESS_API_TOKEN:?set RAW_EGRESS_API_TOKEN to a real secret - the dev default is public in this repo}
+      # GitHub #81: signs the run identity the egress proxy verifies; same reasoning.
+      EGRESS_RUN_TOKEN_SECRET: ${EGRESS_RUN_TOKEN_SECRET:?set EGRESS_RUN_TOKEN_SECRET to a real secret - the dev default is public in this repo}
 
   worker:
     environment:

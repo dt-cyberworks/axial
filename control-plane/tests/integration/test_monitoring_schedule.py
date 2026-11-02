@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from app import auth_service, celery_client, monitoring, scheduling
+from app import auth_service, celery_client, monitoring, monitoring_settings, scheduling
 from app.db.base import get_db
 from app.main import app
 from app.models.audit import AuditLog
@@ -57,7 +57,6 @@ def _no_broker(monkeypatch):
         return "task-1"
 
     monkeypatch.setattr(celery_client, "enqueue_scan", fake)
-    monkeypatch.delenv(scheduling.MAX_CONCURRENT_ENV, raising=False)
     return sent
 
 
@@ -401,8 +400,8 @@ def test_the_capacity_cap_holds_back_the_second_due_engagement(db, monkeypatch):
     assert db.get(Engagement, second.id).schedule_skip_reason == "waiting_for_capacity"
     assert _runs(db, second) == []
 
-    # the cap is a setting: with room for two, the next tick starts the waiting one
-    monkeypatch.setenv(scheduling.MAX_CONCURRENT_ENV, "2")
+    # the cap is the administrator's setting: with room for two, the next tick starts the waiting one
+    monitoring_settings.set_max_concurrent_monitoring_runs(db, 2)
     result, calls = _tick(db)
     assert result["started"] == 1 and calls[0]["engagement_id"] == str(second.id)
 

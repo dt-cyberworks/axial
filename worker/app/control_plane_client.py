@@ -13,11 +13,25 @@ import uuid
 
 import httpx
 
+from app import test_accounts
+
 CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "http://control-plane:8000")
 INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "change-me-in-dev")
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development").lower()
 if ENVIRONMENT == "production" and INTERNAL_API_TOKEN in {"", "change-me-in-dev"}:
     raise RuntimeError("insecure production configuration: internal_api_token")
+
+
+class _PlaceholderClient(httpx.Client):
+    """REQ-TESTACCT-005: the one choke point for everything this process sends to the control plane. A test account's value, in any
+    recognized encoding, is replaced by its placeholder in every JSON body BEFORE it leaves the process - the gateway, the audit trail,
+    an approval, a finding, the transcript all receive the placeholder. The control plane scrubs again at its own write paths; this is
+    the first of the two layers, and a no-op unless an agent phase with test accounts is running."""
+
+    def request(self, method, url, **kwargs):
+        if kwargs.get("json") is not None:
+            kwargs["json"] = test_accounts.to_placeholders(kwargs["json"])
+        return super().request(method, url, **kwargs)
 
 
 class ScanRunSuperseded(Exception):
@@ -42,7 +56,7 @@ def _raise_if_superseded(response: httpx.Response) -> None:
 class ControlPlaneClient:
     def __init__(self, base_url: str = CONTROL_PLANE_URL, timeout: float = 30.0):
         headers = {"X-ASM-Internal-Token": INTERNAL_API_TOKEN} if INTERNAL_API_TOKEN else {}
-        self._client = httpx.Client(base_url=base_url, timeout=timeout, headers=headers)
+        self._client = _PlaceholderClient(base_url=base_url, timeout=timeout, headers=headers)
         # scan_run_id -> the claim attempt this process holds. Every write for
         # that run carries it, so a replaced attempt is refused (REQ-RESUME-002).
         self._attempts: dict[str, int] = {}
@@ -67,6 +81,11 @@ class ControlPlaneClient:
             "trigger": claim.get("trigger") or "manual", "scope_hosts": claim.get("scope_hosts"),
             "retest_finding_id": claim.get("retest_finding_id"),
             "operating_mode": claim.get("operating_mode") or "assessment",
+            "retest_items": claim.get("retest_items"), "send_approval_ids": claim.get("send_approval_ids") or [],
+            # REQ-AGENT-028: a reply without the field is read as "not allowed" (fail closed), never as "allowed".
+            "agent_allowed": claim.get("agent_allowed") is True,
+            "agent_skip_reason": claim.get("agent_skip_reason") or (
+                None if claim.get("agent_allowed") is True else "agent_permission_unreadable"),
             "approval_timeout_seconds": int(
                 ((claim.get("checkpoint") or {}).get("params") or {}).get("approval_timeout_seconds") or 900
             ),
@@ -163,6 +182,13 @@ class ControlPlaneClient:
         r.raise_for_status()
         return r.json()
 
+    def egress_token(self, scan_run_id: uuid.UUID | str) -> dict:
+        """REQ-EGRESS-006 (GitHub #81): the signed identity of this run, which the tools present to the egress proxy as
+        proxy credentials. Raises when the control plane refuses (run ended, cancelled, engagement not active)."""
+        r = self._client.post(f"/internal/scan-runs/{scan_run_id}/egress-token", timeout=5.0)
+        r.raise_for_status()
+        return r.json()
+
     def is_cancel_requested(self, scan_run_id: uuid.UUID) -> bool:
         """Return the authoritative cancellation flag.
 
@@ -209,8 +235,12 @@ class ControlPlaneClient:
         r.raise_for_status()
         return sorted({int(port) for port in r.json().get("ports", [])})
 
-    def list_discovered_assets(self, engagement_id: uuid.UUID, in_scope: bool | None = None) -> list[dict]:
+    def list_discovered_assets(
+        self, engagement_id: uuid.UUID, in_scope: bool | None = None, exclude_held: bool = False,
+    ) -> list[dict]:
         params = {} if in_scope is None else {"in_scope": str(in_scope).lower()}
+        if exclude_held:
+            params["exclude_held"] = "true"
         r = self._client.get(f"/internal/engagements/{engagement_id}/discovered-assets", params=params)
         r.raise_for_status()
         return r.json()
@@ -268,6 +298,9 @@ class ControlPlaneClient:
         return dict(info) if info else {
             "supervision": None, "scan_profile": None, "trigger": "manual", "scope_hosts": None,
             "retest_finding_id": None, "operating_mode": "assessment", "approval_timeout_seconds": 900,
+            "retest_items": None, "send_approval_ids": [],
+            # An unclaimed run (a legacy call, a test) behaves as it did before REQ-AGENT-028. A real run always claims.
+            "agent_allowed": True, "agent_skip_reason": None,
         }
 
     def get_scan_settings(self, engagement_id: uuid.UUID, scan_run_id: uuid.UUID | str | None = None) -> dict:
@@ -428,6 +461,12 @@ class ControlPlaneClient:
         r.raise_for_status()
         return r.json()
 
+    def record_test_account_outcomes(self, scan_run_id, outcomes: list[dict]) -> dict:
+        """REQ-TESTACCT-007/008: what the run's logins came to, per (account, host)."""
+        r = self._client.post(f"/internal/scan-runs/{scan_run_id}/test-account-outcomes", json={"outcomes": outcomes})
+        r.raise_for_status()
+        return r.json()
+
     def get_llm_config(self) -> dict:
         """OpenAI-kompatible Vector-Agent-Provider-Konfig (inkl. api_key). Nur
         ueber das cluster-interne Netz erreichbar; der Schluessel verlaesst das
@@ -546,16 +585,6 @@ class ControlPlaneClient:
         )
         r.raise_for_status()
         return r.json()
-
-    def add_suggestion(self, engagement_id: uuid.UUID, *, tool: str, target: str, rationale: str = "") -> None:
-        """A proposal an unattended run could not get a decision for. Best effort."""
-        try:
-            self._client.post(
-                f"/internal/engagements/{engagement_id}/suggestions",
-                json={"tool": tool, "target": target, "rationale": rationale},
-            )
-        except Exception:  # noqa: BLE001
-            pass
 
     def withdraw_approval(self, approval_id: str, reason: str = "unattended_run") -> None:
         """Close an approval the worker will not wait for. Best effort: a failure

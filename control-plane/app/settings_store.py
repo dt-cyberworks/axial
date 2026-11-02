@@ -39,6 +39,10 @@ MAX_AGENT_MAX_ITERATIONS = 500
 # call outright, so the default is deliberately generous; the 1024-32768 clamp
 # matches the range the worker env var already enforced.
 AGENT_MAX_TOKENS_KEY = "agent_max_tokens"  # global: {value: int}
+LENS_MAX_TOKENS_KEY = "lens_max_tokens"  # global: {value: int}, REQ-LENS-007
+DEFAULT_LENS_MAX_TOKENS = 4096
+MIN_LENS_MAX_TOKENS = 1024
+MAX_LENS_MAX_TOKENS = 16384
 DEFAULT_AGENT_MAX_TOKENS = 8192
 MIN_AGENT_MAX_TOKENS = 1024
 MAX_AGENT_MAX_TOKENS = 32768
@@ -262,6 +266,26 @@ def get_global_agent_max_tokens(db: Session) -> int:
         if MIN_AGENT_MAX_TOKENS <= value <= MAX_AGENT_MAX_TOKENS:
             return value
     return DEFAULT_AGENT_MAX_TOKENS
+
+
+def get_global_lens_max_tokens(db: Session) -> int:
+    """The completion-token cap of one Lens Agent explanation (REQ-LENS-007). Unset or invalid -> the built-in default."""
+    row = db.get(AppSetting, LENS_MAX_TOKENS_KEY)
+    if row and isinstance(row.value, dict):
+        try:
+            value = int(row.value.get("value"))
+        except (TypeError, ValueError):
+            return DEFAULT_LENS_MAX_TOKENS
+        if MIN_LENS_MAX_TOKENS <= value <= MAX_LENS_MAX_TOKENS:
+            return value
+    return DEFAULT_LENS_MAX_TOKENS
+
+
+def set_global_lens_max_tokens(db: Session, value: int) -> int:
+    if not MIN_LENS_MAX_TOKENS <= value <= MAX_LENS_MAX_TOKENS:
+        raise ValueError(f"lens_max_tokens must be between {MIN_LENS_MAX_TOKENS} and {MAX_LENS_MAX_TOKENS}")
+    _put_setting(db, LENS_MAX_TOKENS_KEY, {"value": int(value)})
+    return get_global_lens_max_tokens(db)
 
 
 def set_global_agent_max_tokens(db: Session, value: int) -> int:

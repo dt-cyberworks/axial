@@ -34,6 +34,7 @@ from app.models.discovery_artifacts import DiscoveredEndpoint  # noqa: E402
 from app.models.dns_record import DnsRecord  # noqa: E402
 from app.models.engagement import Engagement, ScopeAsset, ToolApprovalPolicy, ToolGrant  # noqa: E402
 from app.models.finding import Finding, FindingObservation  # noqa: E402
+from app.models.open_request import OpenRequest  # noqa: E402
 from app.models.report import Report  # noqa: E402
 from app.models.scan_plan import ScanCheck, ScanSurface  # noqa: E402
 from app.models.scan_run import AgentStep, ScanRun  # noqa: E402
@@ -438,8 +439,16 @@ def seed(db, *, password: str, now: dt.datetime | None = None) -> dict:
     db.commit()
     materialize_graph(main.id, db)
     _monitoring_demo(db, watch, operator, now)
+    # REQ-HANDOVER-004/009: a deeper test started from the monitor, for the wizard banner of the manual. Demo data only.
+    from app import handover
+    from app.schemas.handover import HandoverIn
+
+    handed_over = handover.create(db, watch, operator, HandoverIn(
+        title="Test: Example Corp: monitored scope", authorized_from=_ts(now, days=-2), authorized_until=_ts(now, days=-9),
+        hosts=[f"portal.{DOMAIN}"]))
     return {"accounts": accounts,
-            "engagements": {"main": str(main.id), "draft": str(draft.id), "retail": str(retail.id), "monitor": str(watch.id)},
+            "engagements": {"main": str(main.id), "draft": str(draft.id), "retail": str(retail.id), "monitor": str(watch.id),
+                            "handover_draft": str(handed_over.id)},
             "runs": {"main_latest": str(run2.id), "main_first": str(run1.id), "retail_running": str(run3.id)}}
 
 
@@ -491,13 +500,32 @@ def _monitoring_demo(db, watch: Engagement, operator: User, now: dt.datetime) ->
     ):
         db.add(ChangeEvent(engagement_id=watch.id, scan_run_id=run_item.id, kind=kind, subject=subject, severity=severity,
                            detail=detail, created_at=_ts(now, days=days) + dt.timedelta(minutes=12)))
+    # REQ-RETEST-004: a request the monitor could not make because it needed a person, kept whole.
+    from app.gateway.authorize import ToolCall  # noqa: E402 - the seed runs inside the control plane's image
+
+    held_call = ToolCall(
+        engagement_id=watch.id, tool="http_request", category="vuln", mode="active", target=host, phase="agent",
+        args={"method": "POST", "path": "/login", "body": "username=demo&password=demo",
+              "headers": {"Content-Type": "application/x-www-form-urlencoded"}},
+        rationale="The login page shows a demo account; signing in is the only way to see what is behind it.",
+        risk={"level": "low", "description": "Establishes a session with the demo account shown on the page."},
+        scan_run_id=third.id,
+    ).as_jsonable()
+    held = OpenRequest(
+        engagement_id=watch.id, source_run_id=third.id, tool="http_request", target=host, method="POST", path="/login",
+        call=held_call, rationale=held_call["rationale"], risk=held_call["risk"], state_changing=True,
+        reason="approval_unavailable_unattended", dedupe_key=f"demo-{host}-login", created_at=_ts(now, days=3),
+    )
+    db.add(held)
+    db.flush()
     db.add_all([
         InboxItem(engagement_id=watch.id, kind="held_asset", dedupe_key=f"held_asset:{held_host}",
                   summary=f"New host {held_host} was found and is held: it is not tested until you release it.",
                   detail={"value": held_host}, created_at=_ts(now, days=1)),
-        InboxItem(engagement_id=watch.id, kind="suggestion", dedupe_key=f"suggestion:http_request:{host}",
-                  summary=f"Suggested manual test: http_request on {host}",
-                  detail={"tool": "http_request", "target": host, "rationale": "A write request needed a person's decision"},
+        InboxItem(engagement_id=watch.id, kind="suggestion", dedupe_key=f"request:{held.id}",
+                  summary=f"Held back: POST /login on {host}",
+                  detail={"tool": "http_request", "target": host, "method": "POST", "path": "/login",
+                          "rationale": held.rationale, "open_request_id": str(held.id)},
                   created_at=_ts(now, days=3)),
         InboxItem(engagement_id=watch.id, kind="run_degraded", dedupe_key=f"run_degraded:{third.id}",
                   summary="The latest run had reduced coverage: nothing was concluded as fixed from it.",

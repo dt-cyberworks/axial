@@ -59,6 +59,8 @@ A run also records how **supervised** it was. A monitoring run is always *unatte
 
 The mode never widens what the Scope Gateway allows. It selects defaults and decides how a decision that needs a person is handled.
 
+To test a monitored target more deeply with a person present, start a draft assessment from the monitor with **Test deeper**: see [Test a monitored target in depth](guides/test-a-monitored-target-in-depth.md).
+
 ## Scan run
 
 One execution of the pipeline. An engagement can have many runs over time, and a new run never replaces the old ones.
@@ -84,7 +86,7 @@ An AI model that **proposes** the next check. It never executes anything itself:
 
 ## Lens Agent
 
-An AI model that **explains** an existing finding in plain language: what it is, what it could mean for you and how to fix it. It only reads the evidence that was recorded; it sends nothing to your systems.
+An AI model that **explains** an existing finding in plain language: what it is, what it could mean for you and how to fix it. It only reads the evidence that was recorded; it sends nothing to your systems. An explanation always has four short sections (what it is, where it was found, why it matters, what to do). If the provider cuts one off, the page says so and offers **Regenerate**; a cut-off explanation is never kept as the final one.
 
 ## Tool grants and approvals
 
@@ -117,6 +119,10 @@ Axial calculates its own score from 0 to 100. It is not a single named industry 
 
 The severity is a threshold on that score: **critical** from 85, **high** from 70, **medium** from 40, **low** from 15, and **info** below. A severity that a tool or the agent asserted explicitly, for example for a confirmed exposure of personal data, is kept when the finding is scored again and keeps the number consistent with that severity, even when there is no CVE or EPSS data to score from.
 
+### A tool's label is not the rating
+
+A scanning tool puts its own label on what it saw, and that label is only evidence. testssl, for example, calls any certificate-trust failure *high*. A configuration or hygiene note with no demonstrated exploit, such as a certificate whose names do not include the name that was tested, is rated **info** (score 5), a hardening gap such as a missing HSTS header is at most **low** (score 25), and a weakness that needs preconditions, such as SSLv3 or a NULL cipher class, is at most **medium** (score 55). The finding's detail says *Why info* (or low, medium) in one line and still shows what the tool called it. These ceilings never lower a finding that carries its own proof: anything with a CVE, a known-exploited vulnerability, a confirmed probe result, a template hit, or an agent finding with direct technical proof keeps its label. An expired certificate and TLS 1.0/1.1 count as hardening gaps (low) by default. The certificate check on a mail port (imaps, smtps, pop3s) names the name it tested; a mismatch there is a note, not a defect.
+
 ## Confidence: validated or inferred
 
 Every finding records what its conclusion rests on:
@@ -128,7 +134,7 @@ Only a validated finding may carry its reporter's own severity. An inferred one 
 
 ## Authenticated scanning
 
-Most real applications keep their interesting functions behind a login, so a scan that never logs in under-reports risk while looking clean. Where credentials are supplied, or the target allows open self-registration, the Vector Agent can log in, and the session is then carried automatically across its later requests to that same host for the rest of the run. A session is never replayed to a different host, never stored and never outlives the run, and the login request itself still goes through the normal approval flow. If the agent cannot log in, it is told to report everything behind the login as *untested* rather than clean.
+Most real applications keep their interesting functions behind a login, so a scan that never logs in under-reports risk while looking clean. Where you have entered a **test account** (a dedicated account, assigned to specific hosts and bound to those hosts only), or the target allows open self-registration, the Vector Agent can log in, and the session is then carried automatically across its later requests to that same host for the rest of the run. A session is never replayed to a different host, never stored and never outlives the run, and the login request itself still goes through the normal approval flow. If the agent cannot log in, it is told to report everything behind the login as *untested* rather than clean, and the run reads as reduced coverage. The agent reads a test account's password to log in, so it goes to the language-model provider; everything Axial stores holds a placeholder instead, and the secret is stored encrypted and erased when the engagement ends. See [Test behind a login](guides/test-behind-a-login.md).
 
 ## Audit log
 

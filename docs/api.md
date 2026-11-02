@@ -39,6 +39,7 @@ caller may change it; the server enforces the rule either way).
 | `GET` | `/engagements/{id}/config` | the effective per-tool configuration; per tool `granted` (is its category granted here) and `unavailable_reason` (`not_installed`, `category_not_granted`, `off_for_campaign`, `off_in_settings`, `off_by_default`) |
 | `POST` | `/engagements/{id}/bounty-program` | wizard step 5 (conditional) |
 | `POST` | `/engagements/{id}/activate` | wizard step 6 (authorization checklist) |
+| `GET` | `/engagements/{id}/scan-runs/{run_id}/diff` | findings new / no longer observed / persisting against the previous full run, plus `inventory` (REQ-DIFF-001..004): hosts and ports new, gone, opened, closed or changed against the same run, from the stored snapshots; `available: false` with `reason` `no_baseline` or `no_snapshot` when there is nothing to compare; a run with reduced coverage or limited to some hosts lists no gone or closed items |
 | `GET` | `/engagements/{id}/stream` (SSE) | live log + phase progress |
 | `POST` | `/engagements/{id}/scan` | enqueues the scan pipeline on the worker (discovery → report) |
 | `GET` | `/engagements/{id}/scan-runs` | `scan_run` history/status (`state`: running/done/failed/aborted) |
@@ -48,6 +49,8 @@ caller may change it; the server enforces the rule either way).
 | `GET` | `/engagements/{id}/findings` | results list (filters: `severity`, `status`) |
 | `PATCH` | `/engagements/{id}/findings/{finding_id}` | triage: `{status, note}` with status `open`, `accepted_risk`, `false_positive`, or `resolved`; a note (≥3 characters) is required for `accepted_risk` and `false_positive`; records who/when/why and writes an audit entry; a later scan keeps the decision (REQ-TRIAGE-001/002) |
 | `GET` | `/findings` | findings across every engagement (REQ-IAM-022). Filters `status` (default `open`), `severity`, `engagement_id`, `mine` (`true` keeps only the caller's own engagements), `q` (title or target, literal text); paging `limit` (1–200, default 50) and `offset`. Returns `{items, total, limit, offset, counts_by_status, counts_by_severity}`; each item is a finding plus `engagement_title` and `engagement_owner`. The `mine` filter is part of the query, so totals and counts always agree with the page (REQ-PORTFOLIO-001) |
+| `POST` | `/engagements/{id}/findings/triage` | bulk triage: `{finding_ids: [1..500], status, note}`, the same note rule; atomic (one id that is not this engagement's fails everything, `404`); one `finding_triage` audit row per finding with a shared `bulk_id` plus one `finding_triage_bulk`; names findings only, never a rule (REQ-TRIAGE-005) |
+| `POST` | `/engagements/{id}/findings/triage/{bulk_id}/undo` | puts back what that bulk action changed; a finding changed again since is skipped; once only (`409` after) (REQ-TRIAGE-006) |
 | `POST` | `/engagements/{id}/findings/{finding_id}/lens-explanation` | the Lens Agent explains a finding, its impact, and remediation; cached in `finding.evidence.lens_agent` |
 | `GET` | `/engagements/{id}/summary` | risk light, open-finding counts by severity, `counts_by_status` for all four statuses, top actions |
 | `POST` | `/engagements/{id}/report` | PDF export (async, returns `job_id`) |
@@ -66,9 +69,15 @@ caller may change it; the server enforces the rule either way).
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/engagements` | body may carry `operating_mode` (`monitoring` \| `assessment`, default `assessment`); a monitoring engagement starts from the monitoring defaults and cannot have `asset_review_enabled` |
-| `POST` | `/engagements/{id}/scan` | optional body `{supervision, hosts, retest_finding_id, scan_profile}`; the run records `trigger`, `initiated_by`, `supervision`; `hosts` must be in scope (422 otherwise) |
+| `POST` | `/engagements/{id}/scan` | optional body `{supervision, hosts, retest_finding_id, scan_profile, items, send_requests}`; `items` (`{host, port?, check|tool}`, at least one) restricts the run to those checks (REQ-RETEST-002) and `send_requests` names the held-back requests the person confirmed, each becoming one approved approval for the new run (REQ-RETEST-006); `attended` is honoured for a monitor only for such a restricted run; an unattended start with `send_requests` is `422`, an unknown or other engagement's request `404`, one that is not open or has expired `409`; the run records `trigger`, `initiated_by`, `supervision`; `hosts` must be in scope (422 otherwise) |
 | `POST` | `/engagements/{id}/pause` · `resume` · `close` · `revoke` | lifecycle; owner or admin; pause and revoke stop the active run |
 | `GET`/`PUT` | `/engagements/{id}/schedule` | monitoring-only: the interval in days (`{"every_days": 1..90 \| null}`), the next run and why a due run waits; `PUT` is owner/admin, audited, 422 outside 1..90, 409 for an assessment (REQ-MON-001) |
+| `GET` | `/engagements/{id}/open-items` | what is still open (REQ-RETEST-003): `{items, counts}`; an item is a `check` (failed, partial, resolvably skipped or not reached) or a held-back `request` (method, path, body, rationale, risk; cookies and authorization headers redacted). Everyone who can see the engagement may read it |
+| `GET` | `/engagements/{id}/findings/{finding_id}/retest-plan` | what a retest of the finding would run (REQ-RETEST-001): the check that produced it, or `fallback: "host"` |
+| `POST` | `/engagements/{id}/open-requests/{request_id}/reject` | the person says a held-back request is never to be sent; owner or administrator; audited |
+| `GET` | `/engagements/{id}/targets` | a monitor's target baseline (REQ-BASE-002): the review state, the policy for new hosts, the discovery run, and the discovered hosts with addresses, provider, source, a flag (`same_address` / `other_address` / `unresolved`) and the suggestion. Everyone who can see the engagement may read it |
+| `POST` | `/engagements/{id}/targets/discover` | starts a passive discovery (`202`; monitoring only, no active run); owner or administrator |
+| `POST` | `/engagements/{id}/targets/confirm` | `{selected_asset_ids, new_asset_policy?, confirm_widening?}`: every unselected candidate gets a `deny` row, audited per host and in total, then the first scan starts on the selection (REQ-BASE-003/004). Atomic: an id that is not a candidate is `404`, a root left out `422`, a discovery that is running or failed `409`, a denied host included again without `confirm_widening` or during an active run `409` |
 | `GET`/`PUT` | `/engagements/{id}/capabilities` | the capability view (over grants, tool overrides and switches) and its application; `PUT` is monitoring-only, one audit row, widening after activation needs `confirm_widening` and no active run |
 | `GET` | `/engagements/{id}/changes` · `/health` | the change feed (`run_id`, `kind`, `limit`, `offset`) and the monitor's health |
 | `GET`/`POST`/`DELETE` | `/engagements/{id}/notification-targets` | signed webhook targets; the secret is write-only (`has_secret`); a non-public https URL is refused |
@@ -80,7 +89,7 @@ caller may change it; the server enforces the rule either way).
 
 Internal (worker → control plane), additionally to the table below: `POST /internal/scan-runs/{id}/hold`
 (which discovered hosts are tested), `/internal/scan-runs/{id}/park` and `/internal/scan-runs/resume-parked`
-(semi-attended runs), `POST /internal/engagements/{id}/suggestions`, `POST /internal/approvals/{id}/withdraw`,
+(semi-attended runs), `POST /internal/approvals/{id}/withdraw`,
 `GET /internal/alerts/due`, `POST /internal/alerts/{id}/result`, `POST /internal/monitoring/housekeeping`, `POST /internal/monitoring/run-due-schedules` (one scheduler tick, REQ-MON-003).
 
 Every `/settings/*` endpoint — the two above and the scan policy, tool policy, agent prompt, agent budgets, and approval timeout — requires the `admin` role for reading and writing (REQ-IAM-013), because it affects every user's engagements. Per-engagement configuration (`/engagements/{id}/config`) stays with the engagement's owner.

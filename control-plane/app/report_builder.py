@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import scan_diff
+from app import scan_diff, scan_plan
 from app.models.asset import DiscoveredAsset, Service
 from app.models.dns_record import DnsRecord
 from app.models.engagement import Engagement, ScopeAsset
@@ -115,11 +115,20 @@ COVERAGE_NOTE = (
     "services does NOT mean they are clean. See \"Coverage of this run\" in section 5."
 )
 
+# REQ-OOB-001 (GitHub #76): the engagement asked for out-of-band testing and this installation has no interaction
+# server, so these template classes did not run. Every other template (the ones that do not call back) is unaffected.
+OOB_NOTE = (
+    "Out-of-band testing was switched on, but this installation has no interaction server, so these template "
+    "classes were not run: {classes}. Templates that do not need a callback are not affected. A short list of "
+    "findings does NOT mean the targets are free of blind vulnerabilities."
+)
+
 # GitHub issue #60 (REQ-PORTSCAN-003): the run's port scan ran to the end but has holes. The run
 # records it as `coverage_partial:nmap=<n>`; the report must not read as a clean port scan.
 PORT_SCAN_NOTE = (
-    "The port scan of this run had gaps: probes were lost, or ports that earlier runs found open were "
-    "not found again. A port or service missing from this report does NOT mean it is closed."
+    "The port scan of this run had gaps: probes were lost, an address of a host could not be scanned, or "
+    "ports that earlier runs found open were not found again. A port or service missing from this report "
+    "does NOT mean it is closed."
 )
 
 
@@ -183,7 +192,7 @@ _SKIP_TEXT = {
     "no_endpoints": "the crawl found no URL with parameters",
     "no_matching_templates": "no template matches",
     "oob_unavailable": "interaction server not deployed",
-    "materialized_ip_missing": "the name did not resolve",
+    "materialized_ip_missing": "the name has no DNS address, so nothing was sent to it",
     "cancelled_by_operator": "stopped by the operator",
     # GitHub issue #49: a safety stop, NOT an operator stop - the control plane could
     # not say whether the operator had cancelled, so the check was stopped.
@@ -291,6 +300,10 @@ class CoverageSection:
     scan_depth: str = "standard"
     partial_total: int = 0
     failed_total: int = 0
+    # REQ-BASE-008: in-scope hosts this run did not test at all, with the reason, in words.
+    untested: list[str] = field(default_factory=list)
+    # REQ-OOB-001 (GitHub #76): template classes not run for lack of an interaction server, by name.
+    not_run_classes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -302,6 +315,15 @@ class AcceptedRiskRow:
     location: str
     justification: str
     accepted_on: str
+
+
+@dataclass
+class AuthCoverageRow:
+    """REQ-TESTACCT-008: one test account on one host - what became of its login in the report run, or why it could not be used there."""
+    account: str
+    role: str
+    host: str
+    result: str
 
 
 @dataclass
@@ -318,6 +340,7 @@ class ReportModel:
     accepted_risks: list[AcceptedRiskRow] = field(default_factory=list)
     false_positive_count: int = 0
     coverage: CoverageSection | None = None
+    authenticated_testing: list[AuthCoverageRow] = field(default_factory=list)
 
 
 # --- helpers (format-agnostic; unchanged from the original text renderer) --
@@ -573,13 +596,20 @@ def _coverage_section(db: Session, report_run: ScanRun | None) -> CoverageSectio
     surfaces = list(db.scalars(
         select(ScanSurface).where(ScanSurface.scan_run_id == report_run.id).order_by(ScanSurface.host, ScanSurface.port)
     ))
-    if not surfaces:
+    untested = [
+        redact_prose(f"{item['host']}: {item['text']}") for item in scan_plan.untested_hosts(db, report_run)
+    ]
+    not_run = [
+        f"{item['label']} (on {item['services']} service{'s' if item['services'] != 1 else ''})"
+        for item in scan_plan.not_run_classes(db, report_run.id)
+    ]
+    if not surfaces and not untested:
         return None
     checks = list(db.scalars(select(ScanCheck).where(ScanCheck.scan_run_id == report_run.id).order_by(ScanCheck.seq)))
     by_surface: dict[uuid.UUID, list[ScanCheck]] = {}
     for check in checks:
         by_surface.setdefault(check.surface_id, []).append(check)
-    section = CoverageSection(scan_depth=report_run.scan_profile or "standard")
+    section = CoverageSection(scan_depth=report_run.scan_profile or "standard", untested=untested, not_run_classes=not_run)
     for surface in surfaces:
         own = by_surface.get(surface.id, [])
         row = CoverageRow(
@@ -594,13 +624,46 @@ def _coverage_section(db: Session, report_run: ScanRun | None) -> CoverageSectio
                 word = "stopped at its time budget" if check.state == "partial" else "failed"
                 row.not_covered.append(f"{check.check_id}: {word}" + (f" ({detail})" if detail and check.state == "failed" else ""))
             elif check.state == "skipped" and check.reason not in ("switch_off",):
-                row.not_covered.append(f"{check.check_id}: skipped, {_skip_text(check.reason)}")
+                template_class = scan_plan.oob_class_of(check.check_id) if check.reason == "oob_unavailable" else None
+                what = f"{template_class} not run: " if template_class else ""
+                row.not_covered.append(f"{check.check_id}: skipped, {what}{_skip_text(check.reason)}")
             elif check.state == "planned":
                 row.not_covered.append(f"{check.check_id}: not run (the scan ended first)")
         section.rows.append(row)
         section.partial_total += row.partial
         section.failed_total += row.failed
     return section
+
+
+_AUTH_RESULT_WORDS = {
+    "session_established": "logged in: tested behind the login",
+    "rejected": "login rejected: NOT tested behind the login",
+    "not_attempted": "not attempted: NOT tested behind the login",
+}
+
+
+def _authenticated_testing(db: Session, eng: Engagement, report_run: ScanRun | None) -> list[AuthCoverageRow]:
+    """REQ-TESTACCT-008: which accounts were tested on which hosts, where the login was rejected or not attempted, and on which assigned
+    hosts an account could not be used and why - so a reader can tell tested-behind-login from untested. Never a secret."""
+    from app import testaccounts
+
+    accounts = [a for a in testaccounts.accounts_of(db, eng.id) if a.state != "erased"]
+    if not accounts:
+        return []
+    outcomes = {(o.get("label"), o.get("host")): o.get("outcome")
+                for o in ((report_run.checkpoint or {}).get("test_account_outcomes") or [])} if report_run is not None else {}
+    rows: list[AuthCoverageRow] = []
+    for account in accounts:
+        where = testaccounts.where_usable(db, eng, account)
+        assigned = {a.host for a in testaccounts.assignments_of(db, account)}
+        for host in sorted(assigned):
+            reason = next((c for c in where["cannot"] if c["host"] == host), None)
+            if reason is not None:
+                rows.append(AuthCoverageRow(account.label, account.role, host, f"could not be used: {reason.get('reason_text') or reason['reason']}"))
+            else:
+                rows.append(AuthCoverageRow(account.label, account.role, host,
+                                            _AUTH_RESULT_WORDS.get(outcomes.get((account.label, host)) or "not_attempted", "not attempted")))
+    return rows
 
 
 def build_report_model(db: Session, eng: Engagement, report_run: ScanRun | None) -> ReportModel:
@@ -625,6 +688,17 @@ def build_report_model(db: Session, eng: Engagement, report_run: ScanRun | None)
     summary = _executive_summary(findings, counts, diff)
     if coverage is not None and (coverage.partial_total or coverage.failed_total):
         summary.coverage_note = COVERAGE_NOTE.format(partial=coverage.partial_total, failed=coverage.failed_total)
+    if coverage is not None and coverage.untested:
+        # REQ-BASE-008: a host that is in scope but was not tested must not hide behind a short findings list.
+        untested_note = (
+            f"{len(coverage.untested)} host{'s' if len(coverage.untested) != 1 else ''} in scope "
+            f"{'were' if len(coverage.untested) != 1 else 'was'} not tested by this run (see Coverage of this run)."
+        )
+        summary.coverage_note = f"{summary.coverage_note} {untested_note}" if summary.coverage_note else untested_note
+    if coverage is not None and coverage.not_run_classes:
+        # REQ-OOB-001: a short findings list must not hide that a whole class of checks could not run.
+        oob_note = OOB_NOTE.format(classes="; ".join(coverage.not_run_classes))
+        summary.coverage_note = f"{summary.coverage_note} {oob_note}" if summary.coverage_note else oob_note
     port_note = _port_scan_note(report_run)
     if port_note:
         summary.coverage_note = f"{summary.coverage_note} {port_note}" if summary.coverage_note else port_note
@@ -646,6 +720,7 @@ def build_report_model(db: Session, eng: Engagement, report_run: ScanRun | None)
         accepted_risks=[_accepted_risk_row(db, finding) for finding in accepted],
         false_positive_count=false_positive_count,
         coverage=coverage,
+        authenticated_testing=_authenticated_testing(db, eng, report_run),
     )
 
 

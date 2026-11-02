@@ -96,6 +96,12 @@ class EngagementUpdate(BaseModel):
     review_at: datetime.datetime | None = None
 
 
+class HandoverFromOut(BaseModel):
+    id: uuid.UUID
+    title: str
+    status: str
+
+
 class EngagementOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -117,6 +123,9 @@ class EngagementOut(BaseModel):
     new_asset_policy: str = "auto"
     fragility_breaker: bool = True
     review_at: datetime.datetime | None = None
+    # REQ-BASE-001: where a monitor is in its target baseline (null for an assessment).
+    target_review_state: str | None = None
+    target_review_run_id: uuid.UUID | None = None
     authorized_from: datetime.datetime
     authorized_until: datetime.datetime
     emergency_contact: str | None = None
@@ -128,6 +137,10 @@ class EngagementOut(BaseModel):
     owner_name: str | None = None
     owner_email: str | None = None
     can_manage: bool = False
+    # REQ-EGRESS-011: set on the activation answer only, when this engagement shares hosts with another active one.
+    scope_overlap_notice: str | None = None
+    # REQ-HANDOVER-007: the monitor this assessment was started from, when it was and the monitor still exists.
+    handover_from: HandoverFromOut | None = None
 
 
 class EngagementOwnerIn(BaseModel):
@@ -297,6 +310,21 @@ class GatewayOverrideOut(BaseModel):
     message: str
 
 
+class RetestItemIn(BaseModel):
+    """One thing a restricted run does: a check (or all checks of a tool) on a host, optionally on one port."""
+
+    host: str = Field(min_length=1, max_length=253)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    check: str | None = Field(default=None, max_length=80)
+    tool: str | None = Field(default=None, max_length=40)
+
+    @model_validator(mode="after")
+    def _exactly_one_selector(self):
+        if bool(self.check) == bool(self.tool):
+            raise ValueError("an item names either a check or a tool")
+        return self
+
+
 class ScanStartIn(BaseModel):
     """Optional body of POST /engagements/{id}/scan (REQ-MODE-002/017). An empty or
     missing body starts a normal run, exactly as before."""
@@ -309,6 +337,10 @@ class ScanStartIn(BaseModel):
     # Retest one finding: a run limited to that finding's host.
     retest_finding_id: uuid.UUID | None = None
     scan_profile: Literal["passive", "light", "standard", "thorough"] | None = None
+    # REQ-RETEST-002: run only these checks (each: host, optional port, and a check id or a tool).
+    items: list[RetestItemIn] | None = None
+    # REQ-RETEST-006: the held-back requests the person confirmed, one by one, for this run.
+    send_requests: list[uuid.UUID] | None = None
 
 
 class CapabilityOut(BaseModel):

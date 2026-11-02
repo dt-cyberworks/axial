@@ -17,13 +17,15 @@ The attestation is a statement by you, kept with the row and in the audit log. I
 
 In the wizard's last step, **Authorization checklist**, choose **Download authorization PDF**. It is also available any time from the **Authorization PDF** link on the engagement page. The PDF states exactly what is configured:
 
-- the engagement and its emergency contact, and the authorised window;
+- the engagement and its emergency contact, and the authorised window (a standing monitor says *Authorized period*, a test says *Test window*). Dates read as you entered them, in your browser's time zone, which the document names; the exact stored times are given once in a note, because the checksum covers them;
 - the authorised scope and, separately, everything explicitly denied;
 - the tool permissions, and the concrete tools that need manual approval;
 - the state of each discovery switch (enabled or disabled);
-- a **configuration checksum** that identifies this exact configuration;
+- a **configuration checksum**, in its own row, that identifies this exact configuration. It is a hash of the configuration, not of the file: the same configuration always has the same checksum, however the document is laid out, and any change after signing changes it;
 - the guardrails (every active call is authorised by the Scope Gateway; active checks are limited to allowed scope and the window; the default posture is non-destructive with bounded budgets);
-- signature lines for the customer and for the operator.
+- signature lines for the customer and for the operator, always together on one page.
+
+Every page carries the product name, the document title and the engagement in its header, and the engagement, a confidentiality line and *Page x of y* in its footer. The scope, the tool permissions and the discovery switches are tables, and categories and modes are written in plain words (*Fingerprinting*, *Active*), not as internal identifiers.
 
 Have it signed by whoever is entitled to authorise the testing, and keep the signed copy. The PDF is generated from the **current** configuration each time, so download it again after you change the scope or the tools, and check that the checksum matches what was signed.
 
@@ -34,7 +36,7 @@ Choose **Activate engagement**. Activation refuses, and says which condition is 
 - there is no allow row at all, or an active allow row is not attested;
 - the test window is missing, or ends before it starts;
 - a bug-bounty engagement has no program policy yet;
-- the scope overlaps another **active** engagement's scope (any owner), so two engagements cannot be responsible for the same host; the refusal names that engagement and its owner, so you know whom to ask;
+- the scope overlaps another **active** engagement's scope (any owner) **and the administrator has switched the signed run identity off**, which is not the default. Normally two engagements may cover the same host and both be active: activation succeeds and shows a note naming the other engagement and its owner, because the target will see traffic from both. Where the identity is switched off, the refusal names that engagement and its owner, so you know whom to ask;
 
 If everything passes, the engagement becomes `active` and opens on its page. Activation does not start a scan; you do that with **Start run**, see [Start and watch a scan](run-a-scan.md). A scan also needs an active tool grant, and it can only run inside the test window.
 

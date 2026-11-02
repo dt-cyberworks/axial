@@ -1,6 +1,7 @@
 """Alle Modelle hier importieren, damit Base.metadata sie kennt (Alembic-Autogenerate etc.)."""
 
 from app.models.app_setting import AppSetting  # noqa: F401
+from app.models.test_account import LoginConsent, TestAccount, TestAccountHost, TestAccountLoginAttempt  # noqa: F401
 from app.models.approval import ApprovalRequest  # noqa: F401
 from app.models.asset_review import AssetReviewRequest  # noqa: F401
 from app.models.asset import DiscoveredAsset, Service  # noqa: F401
@@ -27,6 +28,7 @@ from app.models.monitoring import (  # noqa: F401
     NotificationTarget,
     RunInventorySnapshot,
 )
+from app.models.open_request import OpenRequest  # noqa: F401
 from app.models.openwire_callback import OpenwireCallbackToken  # noqa: F401
 from app.models.rate_reservation import RateReservation  # noqa: F401
 from app.models.report import Report  # noqa: F401

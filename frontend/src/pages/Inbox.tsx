@@ -8,7 +8,7 @@ const KIND_LABEL: Record<string, string> = {
   approval: "Approval needed",
   asset_review: "Review needed",
   held_asset: "Held host",
-  suggestion: "Suggested manual test",
+  suggestion: "Held back for you",
   run_degraded: "Reduced coverage",
   run_failed: "Run did not finish",
   missed_run: "Monitor went quiet",
@@ -17,6 +17,8 @@ const KIND_LABEL: Record<string, string> = {
   schedule_blocked: "Run could not start",
   target_degraded: "Target degraded",
   run_needs_you: "A run is waiting for you",
+  targets_to_select: "Choose targets",
+  discovery_failed: "Discovery did not finish",
 };
 
 /**

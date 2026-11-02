@@ -117,6 +117,7 @@ stage_local() {
     run make env
     grep -Eq '^MFA_ENCRYPTION_KEY=.{40,}$' .env || fail "make env did not generate MFA_ENCRYPTION_KEY"
     grep -Eq '^SETTINGS_ENCRYPTION_KEY=.{40,}$' .env || fail "make env did not generate SETTINGS_ENCRYPTION_KEY"
+    grep -Eq '^TESTACCOUNT_ENCRYPTION_KEY=.{40,}$' .env || fail "make env did not generate TESTACCOUNT_ENCRYPTION_KEY"
 
     say "INSTALL.md 3: start and verify the backend (make up)"
     run make up

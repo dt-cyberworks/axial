@@ -22,13 +22,16 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from app import testaccounts
+from app.agent_permission import agent_permission
 from app.config import get_settings
+from app.scoring.rating import rate_finding
 from app import auth_service, config_resolver, monitoring, report_service
 from app.db.base import get_db
 from app.gateway.audit import append_audit_log, append_audit_logs
 from app.gateway.authorize import ToolCall, _matching_rules, authorize
 from app.gateway.dns_materialization import materialize
-from app.gateway import rate_reservation
+from app.gateway import egress_identity, rate_reservation
 from app.gateway.raw_egress_lease import _effective_port_ranges_for_target, issue_raw_egress_lease
 from app.graph.builder import materialize_graph, read_graph
 from app.settings_store import get_llm_config, get_nvd_config, get_subfinder_keys
@@ -40,22 +43,24 @@ from app.models.dns_record import DnsRecord
 from app.models.approval import ApprovalRequest
 from app.models.finding import Finding, FindingObservation
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset, ToolGrant
+from app.models.open_request import OpenRequest
 from app.models.openwire_callback import OpenwireCallbackToken
 from app.models.scan_plan import ScanCheck, ScanSurface
-from app.models.scan_run import AgentStep, ScanRun
+from app.models.scan_run import LIVE_WAIT_REASON, AgentStep, ScanRun, executing_run_clause
+from app import handover as handover_module
 from app import scan_plan
 from app.scan_lifecycle import park_run, resume_decided_parked_runs
 from app.scan_lifecycle import (
     ScanRunAlreadyActive, ScanRunNotClaimable, claim_scan_run, reap_all_stale_runs, reap_stale_runs, start_scan_run,
 )
 from app.scoring.risk_score import compute_risk_score, compute_severity, risk_score_floor_for_severity
+from app.schemas.test_account import OutcomesIn
 from app.schemas.internal import (
     AgentEventIn,
     ApprovalClaimOut,
     ApprovalExecutionResult,
     AgentStepIn,
     AssetReviewCreateIn,
-    BenchmarkEngagementCreate,
     CveLookupCacheIn,
     CveLookupCacheOut,
     DecisionOut,
@@ -100,45 +105,6 @@ def require_internal_token(x_asm_internal_token: str | None = Header(default=Non
 router = APIRouter(prefix="/internal", tags=["internal"], dependencies=[Depends(require_internal_token)])
 
 _VALID_SEV = {"info", "low", "medium", "high", "critical"}
-
-
-@router.post("/benchmark/engagements", status_code=201)
-def internal_create_benchmark_engagement(body: BenchmarkEngagementCreate, db: Session = Depends(get_db)):
-    """REQ-BENCH-007: the benchmark harness's own engagement-creation path.
-    source='benchmark' is forced here, server-side - never client-supplied,
-    and unreachable via the operator-facing POST /engagements (which
-    explicitly 403s on source='benchmark', see api/engagements.py). Creates,
-    scopes, grants tools, and activates in one call so there is no
-    partially-seeded intermediate state for a caller to leave behind.
-
-    REQ-IAM-021: every engagement has an owner. The harness has no user, so the
-    oldest active administrator owns what it creates (409 when none exists)."""
-    owner = auth_service.oldest_active_admin(db)
-    if owner is None:
-        raise HTTPException(409, "no active administrator exists to own the benchmark engagement")
-    now = datetime.datetime.now(datetime.timezone.utc)
-    eng = Engagement(
-        title=body.title, source="benchmark", status="active", owner_user_id=owner.id,
-        authorized_from=now - datetime.timedelta(minutes=5),
-        authorized_until=now + datetime.timedelta(days=1),
-        tcp_port_from=body.tcp_port_from, tcp_port_to=body.tcp_port_to,
-        ai_testing_allowed=True,
-    )
-    db.add(eng)
-    db.flush()
-    db.add(ScopeAsset(
-        engagement_id=eng.id, rule="allow", asset_type="domain", value=body.target_host,
-        active_allowed=True, authorization_verified=True, authorization_method="benchmark",
-    ))
-    for category in body.tool_categories:
-        db.add(ToolGrant(engagement_id=eng.id, tool_category=category, mode="active", requires_manual_approval=False))
-    db.commit()
-    db.refresh(eng)
-    append_audit_log(
-        db, engagement_id=eng.id, actor="internal:benchmark-harness", action="engagement_created",
-        decision=None, reason=None, payload={"title": eng.title, "source": "benchmark", "target_host": body.target_host},
-    )
-    return {"id": str(eng.id), "source": eng.source, "target_host": body.target_host}
 
 
 _OPENWIRE_CALLBACK_TTL = datetime.timedelta(minutes=2)
@@ -373,6 +339,7 @@ def internal_authorize(engagement_id: uuid.UUID, body: ToolCallIn, db: Session =
         approval_request_id=decision.approval_request_id,
         is_throttled=decision.is_throttled,
         retry_after_seconds=decision.retry_after_seconds,
+        detail=decision.detail,
     )
 
 
@@ -684,6 +651,8 @@ def claim_scan_run_endpoint(scan_run_id: uuid.UUID, body: ScanRunClaimIn, db: Se
     except ScanRunNotClaimable as exc:
         raise HTTPException(409, f"not claimable: {exc.reason}") from None
     eng = db.get(Engagement, run.engagement_id)
+    # REQ-AGENT-028: asked on every claim, so a resumed run is judged by the setting as it is now.
+    agent_allowed, agent_skip_reason = agent_permission(db, eng) if eng is not None else (False, "engagement_missing")
     return ScanRunClaimOut(
         attempt=run.attempt, phase=run.phase, state=run.state,
         cancel_requested=bool(run.cancel_requested), checkpoint=run.checkpoint,
@@ -691,6 +660,13 @@ def claim_scan_run_endpoint(scan_run_id: uuid.UUID, body: ScanRunClaimIn, db: Se
         scope_hosts=list(run.scope_hosts) if run.scope_hosts else None,
         retest_finding_id=str(run.retest_finding_id) if run.retest_finding_id else None,
         operating_mode=eng.operating_mode if eng is not None else "assessment",
+        retest_items=list(run.retest_items) if run.retest_items is not None else None,
+        send_approval_ids=[
+            str(i) for i in db.scalars(
+                select(OpenRequest.sent_approval_id).where(OpenRequest.sent_run_id == run.id, OpenRequest.state == "sent")
+            ) if i is not None
+        ],
+        agent_allowed=agent_allowed, agent_skip_reason=agent_skip_reason,
     )
 
 
@@ -758,6 +734,25 @@ def scan_run_cancel_requested(
     return {"cancel_requested": bool(run.cancel_requested)}
 
 
+@router.post("/scan-runs/{scan_run_id}/egress-token")
+def internal_egress_token(scan_run_id: uuid.UUID, db: Session = Depends(get_db)):
+    """REQ-EGRESS-006 (GitHub #81): the worker asks for the signed identity its tools present to the egress proxy, so
+    that the proxy no longer guesses the engagement from the destination. A run that is not active, a cancelled run and
+    an engagement that is not active get nothing: the token is the proof that this run may still send traffic."""
+    run = db.get(ScanRun, scan_run_id)
+    if run is None:
+        raise HTTPException(404, "scan_run not found")
+    if run.state not in {"running", "waiting_approval"} or run.cancel_requested:
+        raise HTTPException(409, "scan_run_not_active")
+    eng = db.get(Engagement, run.engagement_id)
+    if eng is None or eng.status != "active":
+        raise HTTPException(409, "engagement_not_active")
+    settings = get_settings()
+    ttl = settings.egress_run_token_ttl_seconds
+    token = egress_identity.mint(settings.egress_run_token_secret, eng.id, run.id, ttl)
+    return {"token": token, "expires_in": ttl, "scan_run_id": str(run.id), "engagement_id": str(eng.id)}
+
+
 @router.post("/engagements/{engagement_id}/agent-steps", status_code=201)
 def internal_record_agent_step(engagement_id: uuid.UUID, body: AgentStepIn, db: Session = Depends(get_db)):
     """Der Worker haelt pro Vector-Agent-Iteration Prompt + Antwort fest
@@ -769,10 +764,12 @@ def internal_record_agent_step(engagement_id: uuid.UUID, body: AgentStepIn, db: 
         or run.cancel_requested
     ):
         raise HTTPException(409, "scan_run is not active")
+    # REQ-TESTACCT-005: the model saw the real value; what the console shows as its transcript holds the placeholder.
     step = AgentStep(
         engagement_id=engagement_id, scan_run_id=body.scan_run_id, iteration=body.iteration,
-        request_messages=body.request_messages, response_text=body.response_text,
-        response_tool_calls=body.response_tool_calls, stop_reason=body.stop_reason,
+        request_messages=testaccounts.scrub_json(db, engagement_id, body.request_messages),
+        response_text=testaccounts.scrub_text(db, engagement_id, body.response_text) if body.response_text else body.response_text,
+        response_tool_calls=testaccounts.scrub_json(db, engagement_id, body.response_tool_calls), stop_reason=body.stop_reason,
     )
     db.add(step)
     db.commit()
@@ -805,6 +802,10 @@ def update_scan_run(scan_run_id: uuid.UUID, body: ScanRunUpdate, db: Session = D
         run.state = body.state
     if body.state_reason is not None:
         run.state_reason = body.state_reason
+    # REQ-APPROVAL-008: the live-wait marker belongs to the wait. Whatever ends it (the last wait closing, the run
+    # finishing, a budget abort) takes it away, so it can never stay on a run that is not waiting.
+    if run.state != "waiting_approval" and run.state_reason == LIVE_WAIT_REASON:
+        run.state_reason = None
     if body.checkpoint:
         run.checkpoint = {**(run.checkpoint or {}), **body.checkpoint}
     if body.state in ("done", "failed", "aborted"):
@@ -908,14 +909,20 @@ def record_http_probe(
 
 
 @router.get("/engagements/{engagement_id}/discovered-assets")
-def list_discovered_assets(engagement_id: uuid.UUID, in_scope: bool | None = None, db: Session = Depends(get_db)):
+def list_discovered_assets(
+    engagement_id: uuid.UUID, in_scope: bool | None = None, exclude_held: bool = False, db: Session = Depends(get_db),
+):
     """Bereits bekannte Assets (fuer eine gegen Discovery-Ausfaelle resiliente
     fingerprint-Phase: sie soll den vollen in-scope-Bestand scannen, nicht nur
     die in DIESEM Lauf frisch entdeckten)."""
     stmt = select(DiscoveredAsset).where(DiscoveredAsset.engagement_id == engagement_id)
     if in_scope is not None:
         stmt = stmt.where(DiscoveredAsset.in_scope.is_(in_scope))
-    return [{"id": a.id, "value": a.value, "in_scope": a.in_scope} for a in db.scalars(stmt)]
+    if exclude_held:
+        # REQ-MODE-008 (GitHub #79): a host the hold policy is holding receives no request from anything, so a
+        # caller that is about to act on hosts (the Vector Agent) asks for the list without them.
+        stmt = stmt.where(DiscoveredAsset.hold_state.is_distinct_from("held"))
+    return [{"id": a.id, "value": a.value, "in_scope": a.in_scope, "hold_state": a.hold_state} for a in db.scalars(stmt)]
 
 
 # GitHub issue #60 (REQ-PORTSCAN-004): how many earlier runs count as "ports known to be open".
@@ -1312,7 +1319,10 @@ def agent_context(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     """
     assets = db.scalars(
         select(DiscoveredAsset).where(
-            DiscoveredAsset.engagement_id == engagement_id, DiscoveredAsset.in_scope.is_(True)
+            DiscoveredAsset.engagement_id == engagement_id, DiscoveredAsset.in_scope.is_(True),
+            # REQ-MODE-008 (GitHub #79): a held host is not on the agent's list, evidence or prompt, so it spends no
+            # turns on a host it may not touch.
+            DiscoveredAsset.hold_state.is_distinct_from("held"),
         )
     ).all()
     # REQ-PIPE-018: what this run's pipeline already did, so the agent builds on
@@ -1360,7 +1370,44 @@ def agent_context(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
         })
     # REQ-GRAPH-003: the relationship-native view alongside the flat per-host
     # evidence. Rendered read-only for the agent - no LLM-authored query.
-    return {"hosts": hosts, "graph": read_graph(engagement_id, db)}
+    context = {"hosts": hosts, "graph": read_graph(engagement_id, db)}
+    # REQ-HANDOVER-005: an assessment started from a monitor also learns what the monitor found (read-only, no evidence,
+    # only hosts of its own scope).
+    known = handover_module.known_from_monitor(db, engagement_id)
+    if known is not None:
+        context["known_from_monitor"] = known
+    # REQ-TESTACCT-003: the engagement's active test accounts, with the real value (D1) and the hosts each can and cannot be used on.
+    eng = db.get(Engagement, engagement_id)
+    accounts = testaccounts.agent_accounts(db, eng) if eng is not None else []
+    if accounts:
+        context["test_accounts"] = accounts
+    return context
+
+
+@router.post("/scan-runs/{scan_run_id}/test-account-outcomes")
+def record_test_account_outcomes(scan_run_id: uuid.UUID, body: OutcomesIn, db: Session = Depends(get_db)):
+    """REQ-TESTACCT-007/008: what the run's logins came to, per (account, host). A rejection counts toward a suspension on that
+    host; a run whose login was rejected, or that never got a session for an account it was given, reads as degraded."""
+    run = db.get(ScanRun, scan_run_id)
+    if run is None:
+        raise HTTPException(404, "scan run not found")
+    eng = db.get(Engagement, run.engagement_id)
+    outcomes = [o.model_dump() for o in body.outcomes]
+    folded = testaccounts.fold_outcomes(db, eng, outcomes)
+    run.checkpoint = {**(run.checkpoint or {}), "test_account_outcomes": outcomes}
+    labels_with_session = {o["label"] for o in outcomes if o["outcome"] == "session_established"}
+    labels_given = {o["label"] for o in outcomes}
+    never_logged_in = sorted(labels_given - labels_with_session)
+    coverage_lost = bool(folded["lost"]) or bool(never_logged_in)
+    if eng.operating_mode == "monitoring":
+        from app import monitoring as monitoring_module
+
+        for item in folded["lost"]:
+            monitoring_module.record_auth_event(db, run, "auth_coverage_lost", item)
+        for item in folded["regained"]:
+            monitoring_module.record_auth_event(db, run, "auth_coverage_regained", item)
+    db.commit()
+    return {**folded, "never_logged_in": never_logged_in, "coverage_lost": coverage_lost}
 
 
 @router.post("/engagements/{engagement_id}/materialize-graph")
@@ -1447,7 +1494,7 @@ def _active_run_id(db: Session, engagement_id: uuid.UUID) -> uuid.UUID | None:
     manuelle Injektion) wird keine Beobachtung aufgezeichnet."""
     return db.scalar(
         select(ScanRun.id)
-        .where(ScanRun.engagement_id == engagement_id, ScanRun.state == "running")
+        .where(ScanRun.engagement_id == engagement_id, executing_run_clause())
         .order_by(ScanRun.started_at.desc())
         .limit(1)
     )
@@ -1472,9 +1519,21 @@ def rescore_open_findings(engagement_id: uuid.UUID, db: Session = Depends(get_db
     """Score-Phase (Architektur Kap. 4.1/5.2): EPSS/KEV aendern sich ueber
     Zeit, auch ohne neuen Scan. Rechnet risk_score/severity aller offenen
     Findings mit den aktuell gespeicherten epss/cvss-Werten neu."""
-    findings = db.query(Finding).filter(Finding.engagement_id == engagement_id, Finding.status == "open").all()
+    findings = db.query(Finding).filter(Finding.engagement_id == engagement_id).all()
     updated = 0
     for f in findings:
+        # REQ-SCORE-004: the rating by class (a tool's label about a configuration is evidence, not the rating) is applied to
+        # EVERY finding, a triaged one included; its triage status is not touched. Idempotent.
+        rating = rate_finding(label=f.severity_override, evidence=f.evidence, cve_ids=f.cve_ids, is_kev=f.is_kev,
+                              epss=float(f.epss) if f.epss is not None else None)
+        if rating is not None and rating.risk_score is not None:
+            f.risk_score = rating.risk_score
+            f.severity = rating.severity
+            f.evidence = {**(f.evidence or {}), "rating": rating.as_evidence()}
+            updated += 1
+            continue
+        if f.status != "open":
+            continue
         risk_score = compute_risk_score(
             epss=float(f.epss) if f.epss is not None else None,
             cvss_base=float(f.cvss_base) if f.cvss_base is not None else None,
@@ -1499,6 +1558,15 @@ def rescore_open_findings(engagement_id: uuid.UUID, db: Session = Depends(get_db
     return {"rescored": updated}
 
 
+@router.post("/rescore-all")
+def rescore_all_engagements(db: Session = Depends(get_db)):
+    """REQ-SCORE-004: re-rate the findings of every engagement once (after a change of the rating rule), without a new scan."""
+    total = 0
+    for engagement_id in db.scalars(select(Engagement.id)).all():
+        total += rescore_open_findings(engagement_id, db)["rescored"]
+    return {"rescored": total}
+
+
 def _finding_to_update(db: Session, engagement_id: uuid.UUID, fingerprint: str) -> Finding | None:
     """REQ-TRIAGE-002: which existing finding a new observation belongs to.
     An open one first; otherwise a triaged one (false positive / accepted
@@ -1520,6 +1588,13 @@ def _finding_to_update(db: Session, engagement_id: uuid.UUID, fingerprint: str) 
 def add_finding(engagement_id: uuid.UUID, body: FindingIn, db: Session = Depends(get_db)):
     """Berechnet Fingerprint (Dedup, Kap. 4.4) und Risk-Score/Severity (Kap. 5.2/5.3)
     serverseitig - der Worker liefert nur Rohbefunde."""
+    # REQ-TESTACCT-005: a finding is read by everyone and ends up in reports, alerts and explanations; it never carries a test
+    # account's secret, whatever the model or a target echoed into its text or evidence.
+    body = body.model_copy(update={
+        "title": testaccounts.scrub_text(db, engagement_id, body.title),
+        "evidence": testaccounts.scrub_json(db, engagement_id, body.evidence),
+        "raw_ref": testaccounts.scrub_text(db, engagement_id, body.raw_ref) if body.raw_ref else body.raw_ref,
+    })
     asset = db.get(DiscoveredAsset, body.asset_id) if body.asset_id else None
     port = None
     if body.service_id is not None:
@@ -1534,9 +1609,17 @@ def add_finding(engagement_id: uuid.UUID, body: FindingIn, db: Session = Depends
         epss=body.epss, cvss_base=body.cvss_base, exposure_factor=body.exposure_factor,
         business_factor=body.business_factor, confidence=body.confidence,
     )
-    # Tool-gelieferte Severity hat Vorrang (nuclei/testssl bewerten selbst);
+    # REQ-SCORE-001/002: a tool's label about a CONFIGURATION is evidence, not the rating. The class of the finding decides the
+    # highest severity it can have; a finding with its own proof (agent, probe, nuclei, a CVE) is not touched by this.
+    rating = rate_finding(label=body.severity_override, evidence=body.evidence, cve_ids=body.cve_ids, is_kev=body.is_kev,
+                          epss=body.epss)
+    class_rated = rating is not None and rating.risk_score is not None
+    evidence_out = {**(body.evidence or {}), "rating": rating.as_evidence()} if class_rated else body.evidence
+    if class_rated:
+        severity, risk_score = rating.severity, rating.risk_score
+    # Tool-gelieferte Severity hat Vorrang (nuclei bewertet selbst);
     # sonst aus dem Risk-Score (Kap. 5.3).
-    if body.severity_override in _VALID_SEV:
+    elif body.severity_override in _VALID_SEV:
         severity = body.severity_override
         # REQ-AGENT-010: der Score selbst muss zur Severity passen - sonst zeigt
         # ein als "critical" eingestuftes, nicht-CVE-basiertes Finding (kein
@@ -1556,16 +1639,21 @@ def add_finding(engagement_id: uuid.UUID, body: FindingIn, db: Session = Depends
         # stillschweigend zuruecksetzen (REQ-FIDELITY-004).
         if body.severity_override in _VALID_SEV:
             existing.severity_override = body.severity_override
-        # REQ-AGENT-010: der Floor muss auf Basis der EFFEKTIVEN (ggf. aus einer
-        # frueheren Beobachtung erhaltenen) Override gelten - sonst faellt der
-        # Score bei einer spaeteren, override-losen Beobachtung stillschweigend
-        # auf den generischen Wert zurueck, waehrend die Severity erhalten bleibt.
-        if existing.severity_override in _VALID_SEV:
-            risk_score = max(risk_score, risk_score_floor_for_severity(existing.severity_override))
-        existing.risk_score = risk_score
-        existing.severity = existing.severity_override or severity
+        if class_rated:
+            # REQ-SCORE-002: the class decides; the stored label stays as evidence.
+            existing.risk_score = risk_score
+            existing.severity = severity
+        else:
+            # REQ-AGENT-010: der Floor muss auf Basis der EFFEKTIVEN (ggf. aus einer
+            # frueheren Beobachtung erhaltenen) Override gelten - sonst faellt der
+            # Score bei einer spaeteren, override-losen Beobachtung stillschweigend
+            # auf den generischen Wert zurueck, waehrend die Severity erhalten bleibt.
+            if existing.severity_override in _VALID_SEV:
+                risk_score = max(risk_score, risk_score_floor_for_severity(existing.severity_override))
+            existing.risk_score = risk_score
+            existing.severity = existing.severity_override or severity
         existing.confidence = body.confidence
-        existing.evidence = body.evidence
+        existing.evidence = evidence_out
         existing.is_kev = body.is_kev
         # REQ-TRIAGE-002: a false positive or accepted risk keeps its status
         # when seen again; a "resolved" finding seen again is a regression and
@@ -1598,7 +1686,7 @@ def add_finding(engagement_id: uuid.UUID, body: FindingIn, db: Session = Depends
         epss=body.epss,
         confidence=body.confidence,
         status="open",
-        evidence=body.evidence,
+        evidence=evidence_out,
         raw_ref=body.raw_ref,
         is_kev=body.is_kev,
         severity_override=body.severity_override if body.severity_override in _VALID_SEV else None,

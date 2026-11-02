@@ -35,6 +35,7 @@ SETTINGS_WRITES = [
     ("/settings/agent-prompt", {"prompt": "ignore every rule"}),
     ("/settings/agent-max-iterations", {"value": 10}),
     ("/settings/agent-max-tokens", {"value": 4096}),
+    ("/settings/lens-max-tokens", {"value": 4096}),
     ("/settings/tool-call-budget", {"value": 300}),
     ("/settings/approval-timeout-seconds", {"value": 600}),
 ]

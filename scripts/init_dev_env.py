@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 
 # Keys that must hold a Fernet key and have no usable default.
-FERNET_KEYS = ("MFA_ENCRYPTION_KEY", "SETTINGS_ENCRYPTION_KEY")
+FERNET_KEYS = ("MFA_ENCRYPTION_KEY", "SETTINGS_ENCRYPTION_KEY", "TESTACCOUNT_ENCRYPTION_KEY")
 
 _LINE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
 

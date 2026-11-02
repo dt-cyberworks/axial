@@ -217,6 +217,20 @@ relevant frontend/API/backend sources. Once Playwright or a DOM test stack
 enters the repo, these requirement IDs should be reused as E2E/component
 tests, not replaced by ad hoc scenarios.
 
+## Browser checks of the console (stand-in API)
+
+Behavior that only exists in a rendered page - a row closing after a reload, text vanishing - cannot be seen by the
+source-level tests above. `frontend/browser_tests/` holds Playwright checks that start the console's Vite dev
+server (own config and dependency cache, so another dev server on the checkout is not disturbed), drive it in
+system Chrome, and answer its API calls with a small stand-in that behaves like the control plane. They need no
+login, database, LLM or scan. What the stand-in assumes about the server is proven against the real server by a
+paired backend test, so each check names that test. Run them with `make browser-test` (needs `make uat-venv`, Chrome
+and `frontend/node_modules`); like the UAT they are on demand and not part of `make verify`.
+
+| Requirement | Browser check | Paired backend test |
+|---|---|---|
+| `REQ-LENS-004` | [`frontend/browser_tests/finding_lens_stays_open.py`](../frontend/browser_tests/finding_lens_stays_open.py) | [`control-plane/tests/integration/test_lens_explanation_survives_reload.py`](../control-plane/tests/integration/test_lens_explanation_survives_reload.py) |
+
 ## Automated user-acceptance testing (UAT)
 
 Playwright is now in the repo (`uat/requirements.txt`) - exactly the step

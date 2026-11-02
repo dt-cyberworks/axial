@@ -51,7 +51,7 @@ def _load(path: Path, name: str):
 # the generator - the first test below fails until both agree.
 GATE_FIELDS = (
     "operator_api_token", "internal_api_token", "runner_api_token", "raw_egress_api_token",
-    "scope_signing_secret", "raw_egress_signing_secret", "mfa_encryption_key",
+    "scope_signing_secret", "raw_egress_signing_secret", "egress_run_token_secret", "mfa_encryption_key",
     "settings_encryption_key", "database_url", "s3_access_key", "s3_secret_key", "public_base_url",
 )
 

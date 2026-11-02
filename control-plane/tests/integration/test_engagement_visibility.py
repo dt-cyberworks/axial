@@ -24,7 +24,6 @@ from starlette.requests import Request
 
 from app import auth_service
 from app.api.engagements import activate_engagement, add_scope_asset, create_engagement
-from app.api.internal import internal_create_benchmark_engagement
 from app.db.base import get_db
 from app.main import app
 from app.models.approval import ApprovalRequest
@@ -32,7 +31,6 @@ from app.models.engagement import Engagement, ScopeAsset
 from app.models.user import User
 from app.passwords import hash_secret
 from app.schemas.engagement import EngagementCreate, ScopeAssetCreate
-from app.schemas.internal import BenchmarkEngagementCreate
 from app.security import NOT_OWNER_DETAIL, enforce_engagement_access
 
 MIGRATION = pathlib.Path(__file__).resolve().parents[2] / "migrations" / "0038_engagement_owner_required.sql"
@@ -384,25 +382,6 @@ def test_negative_the_migration_stops_and_changes_nothing_when_no_administrator_
             )).scalar() == "YES"
     finally:
         _restore_schema(engine)
-
-
-def test_the_benchmark_harness_creates_its_engagement_under_the_oldest_active_admin(db):
-    _user(db, role="admin", name="Newer", created_at=dt.datetime(2026, 3, 1, tzinfo=dt.timezone.utc))
-    oldest = _user(db, role="admin", name="Oldest", created_at=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc))
-    _user(db, role="admin", name="Gone", status="disabled", created_at=dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc))
-    _user(db, role="operator", name="Operator", created_at=dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc))
-    created = internal_create_benchmark_engagement(
-        BenchmarkEngagementCreate(title="bench", target_host="bench.example.test", tcp_port_from=1, tcp_port_to=1024), db)
-    assert db.get(Engagement, uuid.UUID(created["id"])).owner_user_id == oldest.id
-
-
-def test_negative_the_benchmark_harness_without_any_active_admin_creates_nothing(db):
-    _user(db, role="operator")
-    with pytest.raises(HTTPException) as refused:
-        internal_create_benchmark_engagement(
-            BenchmarkEngagementCreate(title="bench", target_host="bench.example.test", tcp_port_from=1, tcp_port_to=1024), db)
-    assert refused.value.status_code == 409
-    assert db.query(Engagement).count() == 0
 
 
 # ----------------------------------------------------------------- the overlap error names it (REQ-IAM-024)

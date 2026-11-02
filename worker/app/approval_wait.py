@@ -15,7 +15,9 @@ nothing. Now:
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import threading
 import time
 import uuid
 
@@ -26,6 +28,49 @@ logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 3
 _DECIDED = ("approved", "rejected", "expired", "consumed", "cancelled")
+
+# REQ-APPROVAL-008 (GitHub #83). While the worker waits for the decision on ONE action, the run is `waiting_approval`
+# (REQ-APPROVAL-003) but its other actions go on, so the run says why it waits. The control plane accepts calls of a run
+# in that state ONLY with this exact reason (a parked run and an asset-review pause are `waiting_approval` too).
+# It must equal control-plane/app/models/scan_run.py LIVE_WAIT_REASON (scripts/tests/test_live_wait_marker_parity.py).
+LIVE_WAIT_REASON = "approval_wait"
+
+# How many actions of a run wait right now. The pipeline runs checks in several threads and a wait ends in whichever
+# thread gets its answer, so the run goes back to `running` only when the LAST wait ends. The lock is held across the
+# state change on purpose: a leaver's "running" must not overtake a newcomer's "waiting_approval".
+_open_waits: dict[str, int] = {}
+_open_waits_lock = threading.Lock()
+
+
+def _set_run_state(run_id: str, **fields) -> None:
+    try:
+        client.update_scan_run(uuid.UUID(run_id), **fields)
+    except Exception as exc:  # noqa: BLE001 - the state is a display; it must never stop a scan or a wait
+        logger.warning("could not set the run state %s: %s", fields.get("state"), exc)
+
+
+@contextlib.contextmanager
+def live_wait(scan_run_id: str | None):
+    """Around the wait for one action's decision: the run shows `waiting_approval` (with the live-wait reason) from the
+    first open wait until the last one ends. Never raises; a state that cannot be written is logged and the wait goes on."""
+    if not scan_run_id:
+        yield
+        return
+    with _open_waits_lock:
+        _open_waits[scan_run_id] = _open_waits.get(scan_run_id, 0) + 1
+        if _open_waits[scan_run_id] == 1:
+            _set_run_state(scan_run_id, state="waiting_approval", state_reason=LIVE_WAIT_REASON)
+    try:
+        yield
+    finally:
+        with _open_waits_lock:
+            left = _open_waits.get(scan_run_id, 1) - 1
+            if left > 0:
+                _open_waits[scan_run_id] = left
+            else:
+                _open_waits.pop(scan_run_id, None)
+                # The control plane takes the live-wait reason away with this transition.
+                _set_run_state(scan_run_id, state="running")
 
 
 def is_unattended(scan_run_id: str | None) -> bool:
@@ -50,7 +95,7 @@ def wait_for_decision(approval_id: str, scan_run_id: str | None, timeout_seconds
 
 
 def resolve_pending(
-    engagement_id: str, decision: dict, *, tool: str, target: str, scan_run_id: str | None, rationale: str = "",
+    engagement_id: str, decision: dict, *, tool: str, target: str, scan_run_id: str | None,
 ) -> tuple[dict | None, str]:
     """Returns (decision, reason). `decision` is an allowed gateway decision when the
     call may run now, None when it must not; `reason` says why not."""
@@ -59,28 +104,13 @@ def resolve_pending(
         return None, "pending_no_id"
 
     if is_unattended(scan_run_id):
+        # The control plane keeps the exact call of a withdrawn approval as a held-back request (REQ-RETEST-004).
         client.withdraw_approval(str(approval_id), "unattended_run")
-        client.add_suggestion(
-            uuid.UUID(engagement_id), tool=tool, target=target,
-            rationale=rationale or f"{tool} on {target} needs a person's decision",
-        )
         return None, "approval_unavailable_unattended"
 
     info = client.run_info(scan_run_id)
-    run_uuid = uuid.UUID(scan_run_id) if scan_run_id else None
-    if run_uuid is not None:
-        try:
-            client.update_scan_run(run_uuid, state="waiting_approval")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("could not set the waiting_approval state: %s", exc)
-    try:
+    with live_wait(scan_run_id):
         state = wait_for_decision(str(approval_id), scan_run_id, int(info.get("approval_timeout_seconds") or 900))
-    finally:
-        if run_uuid is not None:
-            try:
-                client.update_scan_run(run_uuid, state="running")
-            except Exception:  # noqa: BLE001
-                pass
 
     if state != "approved":
         return None, f"approval_{state}"

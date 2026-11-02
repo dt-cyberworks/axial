@@ -119,6 +119,7 @@ def build_env(
         "INTERNAL_API_TOKEN": _token(32),
         "SCOPE_SIGNING_SECRET": _token(32),
         "RAW_EGRESS_SIGNING_SECRET": _token(32),
+        "EGRESS_RUN_TOKEN_SECRET": _token(32),  # GitHub #81: the egress proxy's run identity (prod overlay requires it)
         "RUNNER_API_TOKEN": _token(32),
         "RAW_EGRESS_API_TOKEN": _token(32),  # docker-compose.prod.yml requires it (issue #22)
         "OOB_TOKEN": _token(32),  # REQ-COVER-004: interaction-server token (prod overlay requires it)
@@ -127,6 +128,7 @@ def build_env(
         # DIFFERENT key from the MFA one - a leak of one must not expose the
         # other - and required by the production gate.
         "SETTINGS_ENCRYPTION_KEY": _fernet_key(),
+        "TESTACCOUNT_ENCRYPTION_KEY": _fernet_key(),  # GitHub #89: a third, distinct key (test-account secrets)
         # --- bounded operational values (must stay within the gate's ranges) ---
         "RAW_EGRESS_LEASE_TTL_SECONDS": "900",
         "NMAP_MAX_RATE": "1000",

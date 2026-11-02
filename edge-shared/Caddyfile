@@ -43,60 +43,23 @@
 	header @app_shell Cache-Control "no-cache"
 }
 
-{$ASM_DOMAIN_PROD} {
-	# Caddy's GLOBAL directive order runs file_server/try_files before
-	# reverse_proxy regardless of the order written below - confirmed by a
-	# local reproduction (a matcher-scoped reverse_proxy with no route block
-	# silently lost to the SPA fallback, serving index.html for every API path
-	# instead of 502/proxying). An explicit route{} block forces the written
-	# top-to-bottom order instead of the global one - required here.
-	route {
-		import security_headers
-		# GitHub issue #13: gzip on every response (including authenticated
-		# JSON API responses) is what testssl's BREACH check flags - a
-		# compression-oracle side channel that needs a response reflecting
-		# attacker-controlled input next to a secret in the same compressed
-		# body. Scoped to skip the API paths below (encode wraps the response
-		# writer only for requests THIS matcher accepts, so a request that
-		# matches @api never gets a compressed response at all) - the static
-		# SPA shell keeps the bandwidth benefit, since it has no per-request
-		# secrets to leak this way.
-		@not_api {
-			not path /auth* /engagements* /approvals* /findings* /inbox* /settings* /tools* /admin* /callback*
-		}
-		encode @not_api gzip
-
-		@internal path /internal*
-		respond @internal 404
-
-		# /engagements*, /findings*, /settings*, and /admin* also match real frontend SPA
-		# routes at the exact same path shape (/engagements/:id and its
-		# sub-routes, /findings, bare /settings, /admin/users, /admin/audit) - a hard
-		# navigation/refresh there must still get the SPA shell, not the
-		# backend's JSON. Only the app's own fetch()/XHR calls (which never
-		# send an HTML-preferring Accept header, unlike a real browser
-		# navigation) should reach the backend. Confirmed live: /admin* was
-		# missing here entirely, silently serving index.html for every admin
-		# API call in production; /settings and /engagements/:id were
-		# over-matched, serving the backend's 404 instead of the SPA on a
-		# hard refresh.
-		@api {
-			path /auth* /engagements* /approvals* /findings* /inbox* /settings* /tools* /admin*
-			not header Accept *text/html*
-		}
-		reverse_proxy @api 127.0.0.1:{$PROD_API_PORT}
-
-		# GitHub issue #21: see edge/Caddyfile's matching comment - /callback*
-		# is fetched by a probed target (REQ-AGENT-027), never a browser, so
-		# it deliberately carries no `not header Accept *text/html*` carve-out.
-		@callback path /callback*
-		reverse_proxy @callback 127.0.0.1:{$PROD_API_PORT}
-
-		root * /srv/frontend-prod
-		try_files {path} /index.html
-		file_server
-	}
-}
+# {$ASM_DOMAIN_PROD} was removed from the public edge on 2026-10-15: prod has
+# been stopped on purpose since 2026-08-09 to give int's development the whole
+# host, and the platform's
+# own scan of its own infrastructure found this site block was still
+# disclosing the ASM API's route names (502 via `reverse_proxy` to a
+# backend that is not running) while also serving no usable content at all
+# (`/srv/frontend-prod` has been empty since 2026-09-28). Same remedy as
+# a retired environment's 2026-08-07 exposure below: pull the site off
+# the shared edge entirely rather than let Caddy keep answering for it while
+# genuinely down. `ASM_DOMAIN_PROD` stays a REQUIRED env var in
+# `docker-compose.edge.yml` even though nothing here references it anymore -
+# same gotcha as `ASM_DOMAIN_INT` noted below.
+#
+# To restore once prod is brought back up and `frontend-prod` is rebuilt:
+# `git show <this commit>^:edge-shared/Caddyfile` has the working block, or
+# `git log -p -- edge-shared/Caddyfile` to find it - then force-recreate the
+# edge container (see the bind-mount note below) so it re-mounts.
 
 # {$ASM_DOMAIN_INT} was removed on 2026-08-07 (int's backend was stopped but
 # this edge kept serving its static SPA shell publicly with a dead API behind
@@ -150,5 +113,15 @@
 		root * /srv/frontend-int
 		try_files {path} /index.html
 		file_server
+	}
+
+	# GitHub issue #68 / REQ-WEBSEC-001: an error response (file_server's 404, reverse_proxy's 502
+	# when the backend is down) is written by Caddy's error handler, which does not carry the
+	# deferred headers set inside the route above. Without this block every such response left with
+	# no HSTS, no CSP and the `Server: Caddy` banner. A real Caddy test pins it
+	# (scripts/tests/test_edge_caddy_routing.py): a text check of this file cannot see it.
+	handle_errors {
+		import security_headers
+		respond "{err.status_code} {err.status_text}" {err.status_code}
 	}
 }

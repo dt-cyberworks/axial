@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
+import TestAccountsAuthorize from "../components/TestAccountsAuthorize";
+import { testAccountRefusal } from "../lib/testAccounts";
 import { api, type ScopeAsset } from "../api/client";
 import CapabilitiesEditor from "../components/CapabilitiesEditor";
 import NotificationTargets from "../components/NotificationTargets";
@@ -44,7 +46,6 @@ export default function MonitorWizard() {
     { rule: "allow", asset_type: "domain", value: "", active_allowed: true, authorization_verified: false },
   ]);
   const [savedScopeIds, setSavedScopeIds] = useState<string[]>([]);
-  const [customer, setCustomer] = useState(false);
 
   // Resume a draft of this flow after a reload.
   useEffect(() => {
@@ -115,10 +116,6 @@ export default function MonitorWizard() {
         setSearchParams({ mode: "monitoring", draft: id }, { replace: true });
         // REQ-MON-004: a monitor runs by itself every 7 days unless you change it in step 2.
         await api.putSchedule(id, DEFAULT_EVERY_DAYS);
-        // A customer's systems start with new hosts held until you release them.
-        if (customer) {
-          await api.updateCapabilities(id, { new_asset_policy: "hold" });
-        }
       }
       for (const old of savedScopeIds) await api.deleteScopeAsset(id, old);
       const created: string[] = [];
@@ -145,10 +142,10 @@ export default function MonitorWizard() {
     setBusy(true);
     setError(null);
     try {
-      await api.activateEngagement(engagementId);
-      navigate(`/engagements/${engagementId}`);
+      const activated = await api.activateEngagement(engagementId);
+      navigate(`/engagements/${engagementId}`, { state: { scopeOverlapNotice: activated.scope_overlap_notice ?? null } });
     } catch (e) {
-      setError((e as Error).message);
+      setError(testAccountRefusal((e as Error).message));   // REQ-TESTACCT-006: login_consent_required reads as a sentence
     } finally {
       setBusy(false);
     }
@@ -192,7 +189,7 @@ export default function MonitorWizard() {
             <h3>Scope</h3>
             <div className="scope-editor">
               {rows.map((row, index) => (
-                <div key={index} className="scope-row">
+                <div key={index} className="scope-row no-ports">
                   <select value={row.rule} onChange={(e) => setRows((r) => r.map((x, i) => i === index ? { ...x, rule: e.target.value as "allow" | "deny" } : x))}>
                     <option value="allow">allow</option><option value="deny">deny</option>
                   </select>
@@ -211,10 +208,6 @@ export default function MonitorWizard() {
                 </div>
               ))}
             </div>
-            <label className="toggle-row">
-              <input type="checkbox" checked={customer} onChange={(e) => setCustomer(e.target.checked)} />
-              <span>These are a customer's systems: hold new hosts until I release them</span>
-            </label>
             <div className="form-actions">
               <button onClick={() => setRows((r) => [...r, { rule: "allow", asset_type: "domain", value: "", active_allowed: true, authorization_verified: false }])}>Add row</button>
               <button className="primary-action" disabled={busy} onClick={saveScope}>
@@ -263,10 +256,15 @@ export default function MonitorWizard() {
               <li>Nothing outside the scope above is touched, and a deny row always wins.</li>
               <li>Credential and exploit testing are not part of monitoring.</li>
             </ul>
+            <TestAccountsAuthorize engagementId={engagementId} />
+            <h3>What activation does</h3>
+            <p>
+              Activating starts a <strong>passive discovery</strong>: public sources and DNS only. It sends nothing to your
+              systems. <strong>Nothing is scanned until you have chosen the targets</strong> from what the discovery found; the
+              first scan then runs on exactly those. The run interval counts from that first scan.
+            </p>
             <p className="muted-line">
-              The authorization document states exactly this. Download it for signature before you activate. After
-              activation, run the first scan: it becomes the baseline and reports no changes; the next one shows what
-              is different.
+              The authorization document states what can run. Download it for signature before you activate.
             </p>
             <div className="form-actions">
               <button onClick={() => setStep(3)}>Back</button>
@@ -274,7 +272,7 @@ export default function MonitorWizard() {
                 try { await api.downloadAuthorizationPdf(engagementId); } catch (e) { setError((e as Error).message); }
               }}>Download authorization PDF</button>
               <button className="primary-action" disabled={busy || allow.length === 0 || unattested.length > 0} onClick={activate}>
-                {busy ? "Activating…" : "Activate monitoring"}
+                {busy ? "Activating…" : "Activate and discover"}
               </button>
             </div>
           </section>

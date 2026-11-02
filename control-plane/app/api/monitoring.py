@@ -39,6 +39,13 @@ router = APIRouter(prefix="/engagements", tags=["monitoring"])
 inbox_router = APIRouter(prefix="/inbox", tags=["monitoring"])
 settings_router = APIRouter(prefix="/settings/monitoring-defaults", tags=["settings"])
 
+# REQ-BASE-006: inbox items that are cleared by doing the step they ask for.
+TARGET_STEP_KINDS = ("targets_to_select", "discovery_failed")
+
+
+def _is_held_back_request(item) -> bool:
+    return item.kind == "suggestion" and str(item.dedupe_key or "").startswith("request:")
+
 _DEPTH_ORDER = {"passive": 0, "light": 1, "standard": 2, "thorough": 3}
 _ACTIVE = ("running", "waiting_approval")
 
@@ -152,7 +159,7 @@ def get_health(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     """REQ-MODE-012: how healthy the monitor is, at a glance."""
     eng = _engagement(db, engagement_id)
     last_ok = db.scalar(
-        select(ScanRun).where(ScanRun.engagement_id == eng.id, ScanRun.health == "ok")
+        select(ScanRun).where(ScanRun.engagement_id == eng.id, ScanRun.health == "ok", ScanRun.trigger != "baseline")
         .order_by(ScanRun.finished_at.desc()).limit(1)
     )
     last = db.scalar(
@@ -325,10 +332,17 @@ def list_inbox(user: User = Depends(require_user), db: Session = Depends(get_db)
         .order_by(InboxItem.created_at.desc())
     ):
         eng = engagements[item.engagement_id]
+        # REQ-BASE-006: an open target step is cleared by taking it (confirming the targets, running the
+        # discovery again), never by dismissing it - dismissing would hide a monitor that scans nothing.
+        needs_targets = item.kind in TARGET_STEP_KINDS
+        # REQ-RETEST-003/004: a held-back request is cleared by sending or rejecting it on the open-items page.
+        held_back = _is_held_back_request(item)
+        link = f"/engagements/{eng.id}/targets" if needs_targets else (
+            f"/engagements/{eng.id}/open-items" if held_back else f"/engagements/{eng.id}")
         out.append(InboxEntry(
             id=str(item.id), source="inbox", kind=item.kind, engagement_id=str(eng.id), engagement_title=eng.title,
             summary=item.summary, created_at=item.created_at.isoformat(),
-            link=f"/engagements/{eng.id}", can_acknowledge=True,
+            link=link, can_acknowledge=not (needs_targets or held_back),
         ))
     for ap in db.scalars(
         select(ApprovalRequest).where(ApprovalRequest.engagement_id.in_(ids), ApprovalRequest.state == "requested")
@@ -372,6 +386,10 @@ def acknowledge(item_id: uuid.UUID, user: User = Depends(require_user), db: Sess
         raise HTTPException(403, NOT_OWNER_DETAIL)
     if item.state != "open":
         raise HTTPException(409, "inbox item is already resolved")
+    if item.kind in TARGET_STEP_KINDS:
+        raise HTTPException(409, "choose the targets (or run the discovery again) to clear this item")
+    if _is_held_back_request(item):
+        raise HTTPException(409, "send or reject the held-back request on the open-items page to clear this item")
     released = None
     if item.kind == "held_asset":
         asset_id = (item.detail or {}).get("asset_id")
@@ -423,8 +441,7 @@ def release_all_held(
 class MonitoringDefaultsOut(BaseModel):
     capabilities: dict[str, bool]
     scan_profile: str
-    new_asset_policy_customer: str
-    new_asset_policy_other: str
+    new_asset_policy: str
     fragility_breaker: bool
     max_concurrent_monitoring_runs: int
 
@@ -432,8 +449,7 @@ class MonitoringDefaultsOut(BaseModel):
 class MonitoringDefaultsIn(BaseModel):
     capabilities: dict[str, bool] | None = None
     scan_profile: str | None = None
-    new_asset_policy_customer: str | None = None
-    new_asset_policy_other: str | None = None
+    new_asset_policy: str | None = None
     fragility_breaker: bool | None = None
     max_concurrent_monitoring_runs: int | None = None
 

@@ -1,6 +1,10 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
-import type { CheckState, ScanPlan, ScanPlanCheck, ScanPlanSurface } from "../api/client";
+import { api, type CheckState, type OpenItem, type ScanPlan, type ScanPlanCheck, type ScanPlanSurface } from "../api/client";
+import { openItemId } from "../lib/runReview";
+import RunReview from "./RunReview";
 import { scanDepthLabel } from "./ScanDepth";
 
 // REQ-PIPE-010: what this run planned, per surface, and what became of each check.
@@ -24,11 +28,12 @@ export function reasonText(reason: string): string {
     switch_off: "Switched off for this engagement", tool_disabled: "Tool switched off in this engagement's tool list", switch_on: "Switched on for this engagement",
     "no_product_identified:common_products": "No product identified: templates of common web products",
     crawled_endpoints: "Test the crawled URLs that carry parameters", not_a_tls_service: "Plain HTTP, no TLS layer",
-    not_a_web_service: "Not a web service", tls_service: "Encrypted service", oob_unavailable: "Interaction server not deployed",
+    not_a_web_service: "Not a web service", tls_service: "Encrypted service", oob_unavailable: "Interaction server not deployed: the callback templates did not run",
     no_endpoints: "The crawl found no URL with parameters", no_matching_templates: "No template matches",
     dependency_never_finished: "A check it depends on never finished", cancelled_by_operator: "Stopped by the operator",
     cancellation_status_unavailable: "Stopped as a safety measure: the cancel status could not be read",
-    materialized_ip_missing: "The name did not resolve",
+    materialized_ip_missing: "The name has no DNS address, so nothing was sent to it",
+    not_in_this_run: "Left out: this run only ran the checks that were chosen. It says nothing about this check",
   };
   return known[reason] ?? reason.replace(/[_:]+/g, " ");
 }
@@ -39,12 +44,16 @@ function fmtSeconds(seconds: number | null): string {
   return `${Math.floor(seconds / 60)} min ${Math.round(seconds % 60)} s`;
 }
 
-function CheckRow({ check }: { check: ScanPlanCheck }) {
+function CheckRow({ check, rerun }: { check: ScanPlanCheck; rerun?: () => void }) {
   const templates = check.outcome_summary?.templates;
   const detail = typeof check.outcome_summary?.detail === "string" ? check.outcome_summary.detail : null;
   return (
     <tr className={`plan-check plan-${check.state}`}>
-      <td><code>{check.check_id}</code></td>
+      <td>
+        <code>{check.check_id}</code>
+        {check.template_class && <span className="muted-line"> {check.template_class}</span>}
+        {rerun && <button type="button" className="secondary-action plan-rerun" onClick={rerun}>Run this step again</button>}
+      </td>
       <td><span className={`pill ${STATE_PILL[check.state]}`}>{check.state}</span></td>
       <td>{reasonText(check.reason)}{detail && check.state !== "complete" && <span className="muted-line"> · {detail.replace(/[_:]+/g, " ")}</span>}</td>
       <td>{typeof templates === "number" ? templates.toLocaleString() : "—"}</td>
@@ -54,7 +63,9 @@ function CheckRow({ check }: { check: ScanPlanCheck }) {
   );
 }
 
-function SurfaceBlock({ surface }: { surface: ScanPlanSurface }) {
+function SurfaceBlock({ surface, openById, onRerun }: {
+  surface: ScanPlanSurface; openById: Map<string, OpenItem>; onRerun: (item: OpenItem) => void;
+}) {
   const [open, setOpen] = useState(surface.service_class === "web");
   const counts = surface.checks.reduce<Record<string, number>>((acc, c) => ({ ...acc, [c.state]: (acc[c.state] ?? 0) + 1 }), {});
   const tech = surface.profile.length ? surface.profile.join(", ") : "none identified";
@@ -76,7 +87,10 @@ function SurfaceBlock({ surface }: { surface: ScanPlanSurface }) {
         <div className="responsive-table">
           <table className="data-table">
             <thead><tr><th>Check</th><th>State</th><th>Why</th><th>Templates</th><th>Time</th><th>Findings</th></tr></thead>
-            <tbody>{surface.checks.map((c) => <CheckRow key={c.id} check={c} />)}</tbody>
+            <tbody>{surface.checks.map((c) => {
+              const item = openById.get(openItemId(surface.host, surface.port, c.check_id));
+              return <CheckRow key={c.id} check={c} rerun={item ? () => onRerun(item) : undefined} />;
+            })}</tbody>
           </table>
         </div>
       )}
@@ -84,7 +98,19 @@ function SurfaceBlock({ surface }: { surface: ScanPlanSurface }) {
   );
 }
 
-export default function ScanPlanView({ plan }: { plan: ScanPlan | undefined }) {
+export default function ScanPlanView({ plan, engagementId, runId, canManage = false }: {
+  plan: ScanPlan | undefined; engagementId?: string; runId?: string; canManage?: boolean;
+}) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [rerun, setRerun] = useState<OpenItem | null>(null);
+  // REQ-RETEST-003: a step of THIS run that is still open (its latest result is not complete) can be run again.
+  const openQuery = useQuery({
+    queryKey: ["open-items", engagementId], queryFn: () => api.getOpenItems(engagementId!), enabled: !!engagementId && canManage,
+  });
+  const openById = new Map(
+    (openQuery.data?.items ?? []).filter((i) => i.kind === "check" && (!runId || i.run_id === runId)).map((i) => [i.id, i] as const),
+  );
   if (!plan || plan.surfaces.length === 0) {
     return (
       <section className="table-panel">
@@ -96,6 +122,8 @@ export default function ScanPlanView({ plan }: { plan: ScanPlan | undefined }) {
   }
   const { by_state: by, checks } = plan.summary;
   const notClean = (by.partial ?? 0) + (by.failed ?? 0);
+  const untested = plan.untested_hosts ?? [];
+  const notRun = plan.not_run_classes ?? [];
   return (
     <section className="table-panel">
       <div className="panel-heading">
@@ -114,9 +142,39 @@ export default function ScanPlanView({ plan }: { plan: ScanPlan | undefined }) {
           does not mean the service is clean.
         </div>
       )}
+      {notRun.length > 0 && (
+        <div className="warning-block" role="note" aria-label="Template classes not run">
+          <strong>Out-of-band testing is on, but this installation has no interaction server, so these template classes did not run:</strong>
+          <ul>
+            {notRun.map((c) => <li key={c.label}>{c.label} (on {c.services} service{c.services === 1 ? "" : "s"})</li>)}
+          </ul>
+          Templates that do not need a callback are not affected. A short findings list does not mean the targets are free of blind vulnerabilities.
+        </div>
+      )}
+      {untested.length > 0 && (
+        <div className="warning-block" role="note" aria-label="Hosts not tested">
+          <strong>{untested.length} host{untested.length === 1 ? " is" : "s are"} in scope but {untested.length === 1 ? "was" : "were"} not tested by this run:</strong>
+          <ul>
+            {untested.map((h) => <li key={h.host}><code>{h.host}</code>: {h.text}</li>)}
+          </ul>
+        </div>
+      )}
       <div className="plan-surfaces">
-        {plan.surfaces.map((s) => <SurfaceBlock key={s.id} surface={s} />)}
+        {plan.surfaces.map((s) => <SurfaceBlock key={s.id} surface={s} openById={openById} onRerun={setRerun} />)}
       </div>
+      {rerun && engagementId && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Run this step again">
+          <div className="modal-card">
+            <RunReview
+              engagementId={engagementId} items={[rerun]} canManage={canManage} onCancel={() => setRerun(null)}
+              onStarted={(newRunId) => {
+                queryClient.invalidateQueries({ queryKey: ["scan-runs", engagementId] });
+                navigate(newRunId ? `/engagements/${engagementId}/runs/${newRunId}` : `/engagements/${engagementId}`);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </section>
   );
 }

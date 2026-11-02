@@ -95,4 +95,14 @@
 		try_files {path} /index.html
 		file_server
 	}
+
+	# GitHub issue #68 / REQ-WEBSEC-001: an error response (file_server's 404, reverse_proxy's 502
+	# when the backend is down) is written by Caddy's error handler, which does not carry the
+	# deferred headers set inside the route above. Without this block every such response left with
+	# no HSTS, no CSP and the `Server: Caddy` banner. A real Caddy test pins it
+	# (scripts/tests/test_edge_caddy_routing.py): a text check of this file cannot see it.
+	handle_errors {
+		import security_headers
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
 }

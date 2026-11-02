@@ -10,6 +10,7 @@ Schwaechen). OK/INFO/WARN werden ausgefiltert.
 from __future__ import annotations
 
 import json
+import re
 
 # testssl-Severity -> unsere Skala. testssl nutzt Grossbuchstaben.
 _SEVERITY_MAP = {
@@ -56,6 +57,9 @@ def parse_testssl_json(stdout: str) -> list[dict]:
             "id": check_id,
             "severity": sev,
             "title": f"TLS: {check_id} - {finding_text}"[:200],
+            # REQ-SCORE-002: the CVE testssl names for a vulnerability check. It decides whether the finding is rated as a
+            # vulnerability or as a configuration note; it is NOT written to the finding's cve_ids (that would change its fingerprint).
+            "cve": sorted(set(re.findall(r"CVE-\d{4}-\d{4,}", str(rec.get("cve", ""))))),
         })
     return findings
 

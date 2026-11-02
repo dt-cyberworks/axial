@@ -15,6 +15,8 @@ const KIND_LABEL: Record<string, string> = {
   finding_resolved: "Finding fixed",
   finding_regressed: "Regression",
   target_degraded: "Target degraded",
+  auth_coverage_lost: "Login lost",
+  auth_coverage_regained: "Login regained",
 };
 
 /** What an event is, in one sentence an operator can act on. */
@@ -35,7 +37,7 @@ function eventNote(event: ChangeEvent): string | null {
 function pillClass(event: ChangeEvent): string {
   if (event.kind === "finding_resolved" || event.kind === "asset_gone" || event.kind === "port_closed") return "good";
   if (event.severity === "critical" || event.severity === "high" || event.kind === "target_degraded") return "bad";
-  if (event.kind === "finding_new" || event.kind === "finding_regressed") return "warn";
+  if (event.kind === "finding_new" || event.kind === "finding_regressed" || event.kind === "auth_coverage_lost") return "warn";
   return "neutral";
 }
 

@@ -244,3 +244,69 @@ def test_epss_and_kev_are_fetched_at_most_once_per_run(monkeypatch):
     assert len(epss_calls) == 1  # one batched call, not per-service/per-CVE
     assert len(kev_calls) == 1
     assert len(result) == 4  # 2 services x 2 CVE candidates each (no version constraint on these candidates)
+
+
+# ---- GitHub #69 / REQ-CORR-009: the rows of one CVE are judged together --------------------------------
+
+
+def _run_with_candidates(monkeypatch, candidates, **service):
+    rec = RecordingClient()
+    monkeypatch.setattr(correlate, "client", rec)
+    monkeypatch.setattr(correlate, "fetch_nvd_candidates", lambda key, api_key=None: candidates)
+    monkeypatch.setattr(correlate, "fetch_epss_scores", lambda ids: {})
+    monkeypatch.setattr(correlate, "fetch_kev_catalog", lambda: ([], None))
+    correlate.run("eng-1", [_nmap_service(**service)])
+    return rec.findings
+
+
+def test_negative_a_lone_unbounded_row_cannot_override_its_bounded_siblings(monkeypatch):
+    """CVE-2007-2768 (OpenSSH PAM/OPIE) against OpenSSH 9.6p1: one NVD row has no version limit at all,
+    the bounded row says 4.6 and earlier. The unbounded row used to match every version for ever."""
+    candidates = [
+        {"cve_id": "CVE-2007-2768", "cvss_base": 4.3},  # no version limit
+        {"cve_id": "CVE-2007-2768", "cvss_base": 4.3, "version_end_including": "4.6"},
+    ]
+    assert _run_with_candidates(monkeypatch, candidates, version="9.6p1") == []
+
+
+def test_a_bounded_sibling_that_matches_reports_the_cve_once_at_full_weight(monkeypatch):
+    candidates = [
+        {"cve_id": "CVE-2007-2768", "cvss_base": 4.3},
+        {"cve_id": "CVE-2007-2768", "cvss_base": 4.3, "version_end_including": "4.6"},
+        {"cve_id": "CVE-2007-2768", "cvss_base": 4.3, "version_start_including": "3.0", "version_end_including": "4.9"},
+    ]
+    findings = _run_with_candidates(monkeypatch, candidates, version="4.5")
+    assert len(findings) == 1  # two matching rows, one CVE, one finding
+    f = findings[0]
+    assert f["exposure_factor"] == 1.0
+    assert f["evidence"]["affected_versions"] == "documented range" and "note" not in f["evidence"]
+    assert f["evidence"]["tool"] == "nvd_correlation"  # the console says who found it
+
+
+def test_a_cve_with_only_unbounded_rows_is_reported_flagged_and_weighted_down(monkeypatch):
+    findings = _run_with_candidates(monkeypatch, [{"cve_id": "CVE-2010-0001", "cvss_base": 7.5}], version="9.6p1")
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["evidence"]["affected_versions"] == "unbounded"
+    assert "every version of the product matches" in f["evidence"]["note"]
+    assert f["exposure_factor"] == correlate.UNBOUNDED_EXPOSURE_FACTOR < 1.0
+    assert f["confidence"] == "inferred"  # never "validated": nothing here proves anything
+
+
+def test_an_exact_version_row_counts_as_bounded(monkeypatch):
+    candidates = [
+        {"cve_id": "CVE-2011-0002", "cvss_base": 5.0},
+        {"cve_id": "CVE-2011-0002", "cvss_base": 5.0, "exact_versions": ["1.0"]},
+    ]
+    assert _run_with_candidates(monkeypatch, candidates, version="9.6p1") == []
+    assert len(_run_with_candidates(monkeypatch, candidates, version="1.0")) == 1
+
+
+def test_match_cves_judges_each_cve_on_its_own_rows():
+    rows = [
+        {"cve_id": "A", "cvss_base": 1.0},                                   # A: unbounded only
+        {"cve_id": "B", "cvss_base": 2.0}, {"cve_id": "B", "cvss_base": 2.0, "version_end_excluding": "2.0"},
+        {"cve_id": "C", "cvss_base": 3.0, "version_start_including": "9.0"},  # C: bounded, matches
+    ]
+    got = {m["cve_id"]: m["bounded"] for m in correlate.match_cves("9.6p1", rows)}
+    assert got == {"A": False, "C": True}  # B's bounded row excludes 9.6p1 and its unbounded row cannot save it
