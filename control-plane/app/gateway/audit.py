@@ -37,6 +37,15 @@ def _append(db: Session, engagement_id: uuid.UUID, entries: list[dict]) -> list[
     Timestamps strictly increase: the predecessor lookup and the live-stream
     cursor (`ts > last_ts`) both order by ts, so two rows must never share one.
     """
+    # REQ-TESTACCT-005: nothing the platform keeps contains a test account's secret. Replaced BEFORE the row is hashed, so the
+    # chain is over what is stored. (Lazy import: the test-account module itself writes audit rows.)
+    from app import testaccounts
+
+    entries = [
+        {**e, "reason": testaccounts.scrub_text(db, engagement_id, e["reason"]) if isinstance(e.get("reason"), str) else e.get("reason"),
+         "payload": testaccounts.scrub_json(db, engagement_id, e["payload"])}
+        for e in entries
+    ]
     # One transaction-scoped lock per engagement serializes the read of the
     # predecessor and the insert. PostgreSQL releases it on commit/rollback.
     lock_key = int.from_bytes(engagement_id.bytes[:8], "big") & 0x7FFFFFFFFFFFFFFF

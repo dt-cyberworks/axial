@@ -456,6 +456,8 @@ export default function EngagementEdit() {
             ? "This campaign has its own override, shown below. Clear the box and save to revert to the global default."
             : "Showing the effective (global/built-in) instructions. Edit and save to set a campaign-specific override; leave untouched and other saves on this page won't affect it."}
           {" "}Safe to edit either way: the Scope Gateway decides every action regardless of the prompt.
+          {" "}<strong>Never put a password or token here:</strong> these instructions are stored in plain text and shown to everyone who can read
+          the engagement. Enter a test account on the Test accounts tab instead; it is stored encrypted.
         </div>
         <textarea
           rows={12}

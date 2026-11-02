@@ -13,6 +13,7 @@ const dashboard = read("frontend/src/pages/Dashboard.tsx");
 const edit = read("frontend/src/pages/EngagementEdit.tsx");
 const client = read("frontend/src/api/client.ts");
 const engagementApi = read("control-plane/app/api/engagements.py");
+const letterSource = `${engagementApi}\n${read("control-plane/app/authorization_pdf.py")}`;
 const engagementSchema = read("control-plane/app/schemas/engagement.py");
 
 function requirement(id) {
@@ -88,7 +89,8 @@ test("REQ-AUTH-005 implements customer-understandable authorization PDF endpoint
     "Customer representative",
     "Provider / operator representative",
   ]) {
-    contains(engagementApi, requiredText, `PDF content must include ${requiredText}`);
+    // The words of the letter are written in engagements.py and laid out in authorization_pdf.py (REQ-AUTH-007).
+    contains(letterSource, requiredText, `PDF content must include ${requiredText}`);
   }
   contains(engagementApi, 'action="authorization_pdf_generated"', "PDF generation must be audited");
 });

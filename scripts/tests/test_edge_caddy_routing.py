@@ -16,6 +16,7 @@ Docker. Skipped when Docker is unavailable.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import time
@@ -28,6 +29,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_ALPINE = "python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
 CADDY_ALPINE = "caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
+
+
+def _serves_prod() -> bool:
+    """The shared edge serves a prod site only while its block exists. It was taken off the public edge
+    on 2026-10-15 while prod stays down (a stopped backend answered 502 and disclosed API routes); the
+    tests below cover whichever sites the file defines, and test_negative_the_shared_edge_serves_no_prod_
+    site_while_prod_is_down pins the decision."""
+    return re.search(r"^\{\$ASM_DOMAIN_PROD\} \{", (ROOT / "edge-shared" / "Caddyfile").read_text(), re.M) is not None
 
 
 def _docker_available() -> bool:
@@ -174,7 +183,7 @@ def test_edge_shared_caddyfile_routes_api_before_spa_fallback(tmp_path):
             _wait_for_stub_backend(name, port)
 
         text = (ROOT / "edge-shared" / "Caddyfile").read_text()
-        assert text.count("route {") == 2, "expected an explicit route{} block in both site blocks"
+        assert text.count("route {") == (2 if _serves_prod() else 1), "expected an explicit route{} block in every site block"
         text = text.replace("{$ASM_DOMAIN_PROD} {", ":18081 {", 1)
         text = text.replace("{$ASM_DOMAIN_INT} {", ":18082 {", 1)
         caddyfile = tmp_path / "Caddyfile"
@@ -195,6 +204,8 @@ def test_edge_shared_caddyfile_routes_api_before_spa_fallback(tmp_path):
         ]).returncode == 0
 
         for label, api_port, spa_marker in (("prod", "18081", "SPA_FALLBACK_PROD"), ("int", "18082", "SPA_FALLBACK_INT")):
+            if label == "prod" and not _serves_prod():
+                continue
             status_api, body_api = _get(f"http://127.0.0.1:{api_port}/auth/me")
             status_spa, body_spa = _get(f"http://127.0.0.1:{api_port}/some/client/route")
             assert spa_marker not in body_api, f"[{label}] API path served the SPA fallback, not the backend"
@@ -302,18 +313,18 @@ def test_edge_shared_caddyfile_spa_routes_survive_hard_navigation_despite_api_pr
             CADDY_ALPINE,
         ]).returncode == 0
 
-        base = "http://127.0.0.1:18084"
+        base = "http://127.0.0.1:18085"
         status, body = _get(f"{base}/admin/users", headers=_XHR_HEADERS)
-        assert "SPA_FALLBACK_PROD" not in body
+        assert "SPA_FALLBACK_INT" not in body
         assert status == 404 and "Error response" in body
 
         for path in ("/settings", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/admin/users", "/findings"):
             status, body = _get(f"{base}{path}", headers=_HTML_NAVIGATION_HEADERS)
-            assert status == 200 and "SPA_FALLBACK_PROD" in body, f"hard navigation to {path} did not get the SPA shell"
+            assert status == 200 and "SPA_FALLBACK_INT" in body, f"hard navigation to {path} did not get the SPA shell"
 
         for path in ("/settings/llm", "/engagements/019fa8b1-ea8f-7308-9464-0811b85fcc47", "/findings"):
             status, body = _get(f"{base}{path}", headers=_XHR_HEADERS)
-            assert "SPA_FALLBACK_PROD" not in body
+            assert "SPA_FALLBACK_INT" not in body
             assert status == 404 and "Error response" in body
     finally:
         _rm(backend_prod, caddy)
@@ -393,7 +404,7 @@ def test_edge_shared_caddyfile_routes_callback_to_backend_not_spa(tmp_path):
             _wait_for_stub_backend(name, port)
 
         text = (ROOT / "edge-shared" / "Caddyfile").read_text()
-        assert text.count("path /callback*") == 2, "expected a /callback* matcher in both site blocks"
+        assert text.count("path /callback*") == (2 if _serves_prod() else 1), "expected a /callback* matcher in every site block"
         text = text.replace("{$ASM_DOMAIN_PROD} {", ":20287 {", 1)
         text = text.replace("{$ASM_DOMAIN_INT} {", ":20288 {", 1)
         caddyfile = tmp_path / "Caddyfile"
@@ -414,6 +425,8 @@ def test_edge_shared_caddyfile_routes_callback_to_backend_not_spa(tmp_path):
         ]).returncode == 0
 
         for label, api_port, spa_marker in (("prod", "20287", "SPA_FALLBACK_PROD"), ("int", "20288", "SPA_FALLBACK_INT")):
+            if label == "prod" and not _serves_prod():
+                continue
             for accept_label, headers in (("no-accept-override", {}), ("html-accept", _HTML_NAVIGATION_HEADERS)):
                 status, body = _get(f"http://127.0.0.1:{api_port}/callback/openwire/some-token", headers=headers)
                 assert spa_marker not in body, f"[{label}/{accept_label}] /callback served the SPA fallback"
@@ -502,7 +515,7 @@ def test_edge_shared_caddyfile_never_compresses_api_responses(tmp_path):
         _wait_for_stub_backend(backend, "19183")
 
         text = (ROOT / "edge-shared" / "Caddyfile").read_text()
-        assert text.count("encode @not_api gzip") == 2, "expected encode scoped away from API paths in both blocks"
+        assert text.count("encode @not_api gzip") == (2 if _serves_prod() else 1), "expected encode scoped away from API paths in every block"
         text = text.replace("{$ASM_DOMAIN_PROD} {", ":19181 {", 1)
         text = text.replace("{$ASM_DOMAIN_INT} {", ":19182 {", 1)
         caddyfile = tmp_path / "Caddyfile"
@@ -524,6 +537,8 @@ def test_edge_shared_caddyfile_never_compresses_api_responses(tmp_path):
 
         gzip_headers = {"Accept-Encoding": "gzip"}
         for label, port in (("prod", "19181"), ("int", "19182")):
+            if label == "prod" and not _serves_prod():
+                continue
             base = f"http://127.0.0.1:{port}"
             resp_static = _get_raw(f"{base}/", tries=20, headers=gzip_headers)
             assert resp_static.headers.get("Content-Encoding") == "gzip", f"[{label}] static shell must be compressed"
@@ -604,10 +619,79 @@ def test_edge_shared_caddyfile_sends_security_headers_for_both_environments(tmp_
                      "-v", f"{tmp_path / 'frontend-prod'}:/srv/frontend-prod:ro",
                      "-v", f"{tmp_path / 'frontend-int'}:/srv/frontend-int:ro", CADDY_ALPINE]).returncode == 0
         for port, env in ((18101, "prod"), (18102, "int")):
+            if env == "prod" and not _serves_prod():
+                continue
             _assert_security_headers(f"http://127.0.0.1:{port}/settings", f"{env} SPA")
             _assert_security_headers(f"http://127.0.0.1:{port}/auth/me", f"{env} API (proxied)")
     finally:
         _rm(backend, caddy)
+
+
+def _assert_error_response(url: str, label: str, status: int, headers: dict[str, str]) -> None:
+    """GitHub #68: an error response (404 from file_server, 502 from reverse_proxy) must carry the
+    same hardening headers as any other response, and must not announce the server."""
+    resp = _get_raw(url, headers=headers)
+    assert resp.status == status if hasattr(resp, "status") else resp.code == status, f"[{label}] expected {status}"
+    for name, value in EXPECTED_SECURITY_HEADERS.items():
+        assert resp.headers.get(name) == value, f"[{label}] {name} missing on the {status}: got {resp.headers.get(name)!r}"
+    assert resp.headers.get("Server") is None, f"[{label}] Server banner leaked on the {status}: {resp.headers.get('Server')!r}"
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker not available")
+def test_negative_edge_caddyfile_sends_security_headers_on_error_responses(tmp_path):
+    """GitHub #68 / REQ-WEBSEC-001: the deferred header directive does not reach Caddy's own error
+    responses; a handle_errors block must. Real Caddy, a backend taken down mid-test (502) and a
+    console directory with nothing to serve (404): a text check of the Caddyfile cannot see this."""
+    net = "asm-edge-errhdr-net"
+    backend, caddy = "asm-edge-errhdr-backend", "asm-edge-errhdr-caddy"
+    _rm(backend, caddy)
+    subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=15)
+    assert _run(["docker", "network", "create", net]).returncode == 0
+    try:
+        assert _run(["docker", "run", "-d", "--rm", "--name", backend, "--network", net,
+                     "--network-alias", "control-plane", PYTHON_ALPINE, "python3", "-m", "http.server", "8000"]).returncode == 0
+        _wait_for_stub_backend(backend, "8000")
+        text = (ROOT / "edge" / "Caddyfile").read_text().replace("{$ASM_DOMAIN} {", ":18110 {", 1)
+        (tmp_path / "Caddyfile").write_text(text)
+        (tmp_path / "frontend").mkdir()  # nothing to serve: the SPA fallback finds no index.html
+        assert _run(["docker", "run", "-d", "--rm", "--name", caddy, "--network", net, "-p", "18110:18110",
+                     "-v", f"{tmp_path / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
+                     "-v", f"{tmp_path / 'frontend'}:/srv/frontend:ro", CADDY_ALPINE]).returncode == 0
+        _assert_error_response("http://127.0.0.1:18110/", "edge 404 (empty console)", 404, _HTML_NAVIGATION_HEADERS)
+        assert _run(["docker", "stop", "-t", "1", backend]).returncode == 0  # the backend goes away
+        _assert_error_response("http://127.0.0.1:18110/auth/me", "edge 502 (backend down)", 502, _XHR_HEADERS)
+        _assert_error_response("http://127.0.0.1:18110/engagements/x", "edge 502 (backend down, API path)", 502, _XHR_HEADERS)
+    finally:
+        _rm(backend, caddy)
+        subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=15)
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker not available")
+def test_negative_edge_shared_caddyfile_sends_security_headers_on_error_responses(tmp_path):
+    """The same for both site blocks of the shared edge (this is the one that served the retired public site
+    with an empty console directory and a stopped backend)."""
+    caddy = "asm-edge-shared-errhdr-caddy"
+    _rm(caddy)
+    try:
+        text = (ROOT / "edge-shared" / "Caddyfile").read_text()
+        assert text.count("handle_errors {") == (2 if _serves_prod() else 1), "expected a handle_errors block in every site block"
+        text = text.replace("{$ASM_DOMAIN_PROD} {", ":18111 {", 1).replace("{$ASM_DOMAIN_INT} {", ":18112 {", 1)
+        (tmp_path / "Caddyfile").write_text(text)
+        (tmp_path / "frontend-prod").mkdir()
+        (tmp_path / "frontend-int").mkdir()
+        # No backend is started on these ports at all: every API path is a 502.
+        assert _run(["docker", "run", "-d", "--rm", "--name", caddy, "--network", "host",
+                     "-e", "PROD_API_PORT=18119", "-e", "INT_API_PORT=18118",
+                     "-v", f"{tmp_path / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
+                     "-v", f"{tmp_path / 'frontend-prod'}:/srv/frontend-prod:ro",
+                     "-v", f"{tmp_path / 'frontend-int'}:/srv/frontend-int:ro", CADDY_ALPINE]).returncode == 0
+        for port, env in ((18111, "prod"), (18112, "int")):
+            if env == "prod" and not _serves_prod():
+                continue
+            _assert_error_response(f"http://127.0.0.1:{port}/", f"{env} 404 (empty console)", 404, _HTML_NAVIGATION_HEADERS)
+            _assert_error_response(f"http://127.0.0.1:{port}/auth/me", f"{env} 502 (no backend)", 502, _XHR_HEADERS)
+    finally:
+        _rm(caddy)
 
 
 @pytest.mark.skipif(not _docker_available(), reason="docker not available")
@@ -681,3 +765,14 @@ def test_negative_both_caddyfiles_route_the_same_shared_prefixes():
         for f in ("edge/Caddyfile", "edge-shared/Caddyfile")
     )
     assert single == shared
+
+
+def test_negative_the_shared_edge_serves_no_prod_site_while_prod_is_down():
+    """johannes, 2026-10-15: prod stays down and its site comes off the public edge, because a stopped
+    backend answered 502 and disclosed the API's route names on the retired public site. An old Caddyfile
+    deployed by mistake would publish it again. To bring prod back, restore the block deliberately and
+    change this test with the same decision (docs/deployment-ionos.md)."""
+    text = (ROOT / "edge-shared" / "Caddyfile").read_text()
+    assert not _serves_prod(), "a prod site block is back on the shared edge while prod is down"
+    code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    assert not any("PROD_API_PORT" in line or "/srv/frontend-prod" in line for line in code)

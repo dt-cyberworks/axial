@@ -17,6 +17,9 @@ from app.api.openwire_callback import router as openwire_callback_router
 from app.api.password_reset import router as password_reset_router
 from app.api.portfolio import router as portfolio_router
 from app.api.settings import router as settings_router
+from app.api.open_items import router as open_items_router
+from app.api.targets import router as targets_router
+from app.api.test_accounts import router as test_accounts_router
 from app.api.stream import router as stream_router
 from app.api.tools import router as tools_router
 from app.security import enforce_engagement_access, require_admin, require_user
@@ -33,9 +36,12 @@ api_router.include_router(password_reset_router)
 public_router = APIRouter(dependencies=[Depends(require_user), Depends(enforce_engagement_access)])
 public_router.include_router(engagements_router)
 public_router.include_router(monitoring_router)
+public_router.include_router(targets_router)
+public_router.include_router(open_items_router)
 public_router.include_router(monitoring_inbox_router)
 public_router.include_router(approvals_router)
 public_router.include_router(findings_router)
+public_router.include_router(test_accounts_router)
 public_router.include_router(discovery_artifacts_router)
 # REQ-PORTFOLIO-001: no engagement_id in its path, so the access check above
 # does not apply (and it only reads: every signed-in user sees every engagement).

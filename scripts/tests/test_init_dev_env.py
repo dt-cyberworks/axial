@@ -186,3 +186,24 @@ def test_make_up_runs_env_first():
     makefile = (ROOT / "Makefile").read_text()
     assert "\nup: env" in makefile and "python3 scripts/init_dev_env.py" in makefile
     assert os.access(SCRIPT, os.R_OK)
+
+
+# --- GitHub #89 (REQ-TESTACCT-002): a third key, for the secrets of test accounts --------------------------------------------
+
+EXAMPLE_WITH_THREE_KEYS = EXAMPLE + "TESTACCOUNT_ENCRYPTION_KEY=\nTESTACCOUNT_ENCRYPTION_KEY_PREVIOUS=\n"
+
+
+def test_the_test_account_key_is_generated_and_differs_from_the_other_two(tmp_path):
+    _, env_path = _run(tmp_path, None, EXAMPLE_WITH_THREE_KEYS)
+    values = _values(env_path)
+    assert _is_fernet_key(values["TESTACCOUNT_ENCRYPTION_KEY"])
+    assert len({values["MFA_ENCRYPTION_KEY"], values["SETTINGS_ENCRYPTION_KEY"], values["TESTACCOUNT_ENCRYPTION_KEY"]}) == 3, \
+        "a leak of one key must not open another secret"
+    assert values["TESTACCOUNT_ENCRYPTION_KEY_PREVIOUS"] == "", "the rotation list is not filled in"
+
+
+def test_negative_an_existing_test_account_key_is_never_replaced(tmp_path):
+    """A replaced key would make every stored test-account secret unreadable."""
+    existing = "ENVIRONMENT=development\nTESTACCOUNT_ENCRYPTION_KEY=keep-this-one-exactly\n"
+    _, env_path = _run(tmp_path, existing, EXAMPLE_WITH_THREE_KEYS)
+    assert _values(env_path)["TESTACCOUNT_ENCRYPTION_KEY"] == "keep-this-one-exactly"

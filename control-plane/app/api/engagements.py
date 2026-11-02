@@ -3,9 +3,10 @@ import fnmatch
 import hashlib
 import ipaddress
 import json
+import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -20,9 +21,14 @@ from app import (
     scan_readiness,
     scheduling,
 )
+from app import handover
+from app import open_items
+from app import targets as targets_module
+
+logger = logging.getLogger(__name__)
 from app.config import get_settings
 from app.pdf import pdf_escape as _pdf_escape  # noqa: F401  (kept for existing callers/tests)
-from app.pdf import simple_pdf as _simple_pdf
+from app import authorization_pdf
 from app.pdf import text as _text
 from app.pdf import wrap_pdf_lines as _wrap_pdf_lines  # noqa: F401
 from app.celery_client import enqueue_scan
@@ -44,6 +50,7 @@ from app.models.scan_run import AgentStep, ScanRun
 from app.models.surface_graph import SurfaceEdge, SurfaceNode
 from app.models.user import User
 from app.scan_lifecycle import ScanRunAlreadyActive, reap_stale_runs, start_scan_run
+from app import testaccounts
 from app.security import can_manage_engagement, require_admin, require_operator, require_user
 from app.schemas.asset_review import AssetReviewDecisionIn, AssetReviewOut
 from app.schemas.engagement import (
@@ -65,7 +72,10 @@ from app.schemas.engagement import (
     ToolGrantMode,
     ToolGrantOut,
 )
+from app.schemas.handover import HandoverCreatedOut, HandoverIn
 from app.schemas.internal import ScanRunOut
+
+ENGAGEMENT_SOURCES = ("lab", "own_domain", "bug_bounty", "customer")  # the database type's values
 
 router = APIRouter(prefix="/engagements", tags=["engagements"])
 
@@ -79,6 +89,9 @@ def _annotate(eng: Engagement, user: User, owner: User | None, db: Session | Non
     eng.owner_name = owner.display_name if owner else None
     eng.owner_email = owner.email if owner else None
     eng.can_manage = can_manage_engagement(user, eng)
+    # REQ-HANDOVER-007: the monitor this assessment was started from, while it still exists.
+    source = db.get(Engagement, eng.handover_from_id) if (db is not None and eng.handover_from_id) else None
+    eng.handover_from = {"id": source.id, "title": source.title, "status": source.status} if source is not None else None
     return eng
 
 
@@ -90,17 +103,16 @@ def list_engagements(user: User = Depends(require_user), db: Session = Depends(g
         .join(User, User.id == Engagement.owner_user_id)
         .order_by(Engagement.created_at.desc())
     ).all()
-    return [_annotate(eng, user, owner) for eng, owner in rows]
+    return [_annotate(eng, user, owner, db) for eng, owner in rows]
 
 
 @router.post("", response_model=EngagementOut, status_code=201)
 def create_engagement(body: EngagementCreate, user: User = Depends(require_user), db: Session = Depends(get_db)):
     """Wizard Schritt 1-2 (Operator-Konsole UI Kap. 2.1): Art + Parteien."""
-    # REQ-BENCH-007: source='benchmark' unlocks benchmark-only capabilities
-    # (e.g. default-credential testing) and must be reachable ONLY through the
-    # benchmark harness's own seeding path, never this operator-facing endpoint.
-    if body.source == "benchmark":
-        raise HTTPException(403, "source 'benchmark' cannot be set via this endpoint")
+    # REQ-BENCHSEP-001: a source the platform does not know is refused with a 422, like any invalid value. The database
+    # type has four values, and nothing in the product behaves differently because of how an engagement is named.
+    if body.source not in ENGAGEMENT_SOURCES:
+        raise HTTPException(422, f"source must be one of {', '.join(ENGAGEMENT_SOURCES)}")
     # REQ-IAM-007: owner is always the creating user - never client-supplied.
     if body.operating_mode == "monitoring" and body.asset_review_enabled:
         # REQ-MODE-001: a review gate would block a run nobody supervises.
@@ -112,9 +124,8 @@ def create_engagement(body: EngagementCreate, user: User = Depends(require_user)
         # REQ-MODE-006: start from the installation's monitoring defaults, COPIED now.
         defaults = monitoring_settings.get_monitoring_defaults(db)
         capability_registry.apply_defaults(db, eng, defaults)
-        eng.new_asset_policy = (
-            defaults["new_asset_policy_customer"] if eng.source == "customer" else defaults["new_asset_policy_other"]
-        )
+        # REQ-BASE-005: one default for every engagement; ownership is not a factor.
+        eng.new_asset_policy = defaults["new_asset_policy"]
         eng.fragility_breaker = bool(defaults["fragility_breaker"])
         if "scan_profile" not in body.model_fields_set:
             eng.scan_profile = defaults["scan_profile"]
@@ -200,17 +211,12 @@ def _host_rules_overlap(a: ScopeAsset, b: ScopeAsset) -> bool:
     return fnmatch.fnmatch(domain_val, wildcard_val) or fnmatch.fnmatch(wildcard_val, domain_val)
 
 
-def _check_no_active_scope_overlap(db: Session, eng: Engagement, candidate_assets: list[ScopeAsset]) -> None:
-    """REQ-CONCUR-003: refuse to activate (or extend an already-active
-    engagement's allow-scope) into overlap with another currently active
-    engagement - any owner. Discovered this way, at the source, instead of as
-    a confusing `ambiguous_host` scan failure well into a run. REQ-IAM-024:
-    every signed-in user can see every engagement now, so the error names the
-    engagement(s) in the way (title and owner, at most three) - the operator
-    needs to know whom to ask."""
+def _active_scope_overlaps(
+    db: Session, eng: Engagement, candidate_assets: list[ScopeAsset],
+) -> list[tuple[Engagement, User]]:
     own_allow = [a for a in candidate_assets if a.rule == "allow"]
     if not own_allow:
-        return
+        return []
     others = db.execute(
         select(ScopeAsset, Engagement, User)
         .join(Engagement, Engagement.id == ScopeAsset.engagement_id)
@@ -223,23 +229,56 @@ def _check_no_active_scope_overlap(db: Session, eng: Engagement, candidate_asset
         for other, other_eng, owner in others:
             if _host_rules_overlap(mine, other):
                 conflicts.setdefault(other_eng.id, (other_eng, owner))
-    if conflicts:
-        shown = list(conflicts.values())[:3]
-        named = ", ".join(f'"{e.title}" (owner {o.display_name}, {o.email})' for e, o in shown)
-        if len(conflicts) > len(shown):
-            named += f" and {len(conflicts) - len(shown)} more"
+    return list(conflicts.values())
+
+
+def _named_engagements(conflicts: list[tuple[Engagement, User]]) -> str:
+    shown = conflicts[:3]
+    named = ", ".join(f'"{e.title}" (owner {o.display_name}, {o.email})' for e, o in shown)
+    if len(conflicts) > len(shown):
+        named += f" and {len(conflicts) - len(shown)} more"
+    return named
+
+
+def _check_no_active_scope_overlap(
+    db: Session, eng: Engagement, candidate_assets: list[ScopeAsset],
+) -> list[tuple[Engagement, User]]:
+    """REQ-CONCUR-003: refuse to activate (or extend an already-active
+    engagement's allow-scope) into overlap with another currently active
+    engagement - any owner. Discovered this way, at the source, instead of as
+    a confusing `ambiguous_host` scan failure well into a run. REQ-IAM-024:
+    every signed-in user can see every engagement now, so the error names the
+    engagement(s) in the way (title and owner, at most three) - the operator
+    needs to know whom to ask.
+
+    REQ-EGRESS-011 (GitHub #81): once the egress proxy requires a signed run token it no longer guesses the engagement
+    from the destination, so the overlap is no reason to refuse. The conflicts are returned instead, for a notice and
+    the audit trail. While the proxy does not require it, the refusal stays."""
+    conflicts = _active_scope_overlaps(db, eng, candidate_assets)
+    if conflicts and not get_settings().egress_require_token:
         raise HTTPException(
             409,
-            f"allow-scope overlaps another currently active engagement's allow-scope: {named}; "
+            f"allow-scope overlaps another currently active engagement's allow-scope: {_named_engagements(conflicts)}; "
             "resolve the conflict with its owner before activating",
         )
+    return conflicts
+
+
+def _overlap_notice(conflicts: list[tuple[Engagement, User]]) -> str | None:
+    if not conflicts:
+        return None
+    return (f"This engagement shares hosts with {_named_engagements(conflicts)}. Both can run: each request is "
+            "judged by the authorization of its own engagement. The target will see traffic from both.")
 
 
 def _authorization_config_payload(
     eng: Engagement, assets: list[ScopeAsset], grants: list[ToolGrant], policies: list[ToolApprovalPolicy],
-    capabilities: list[dict] | None = None, alert_hosts: list[str] | None = None,
+    capabilities: list[dict] | None = None, alert_hosts: list[str] | None = None, test_accounts: list[dict] | None = None,
 ) -> dict:
     return {
+        # REQ-TESTACCT-009: only when there are accounts, so a document signed before them keeps its checksum; adding, changing or
+        # deleting an account after signing changes it.
+        **({"test_accounts": test_accounts} if test_accounts else {}),
         "engagement_id": str(eng.id),
         "title": eng.title,
         "authorized_from": eng.authorized_from.isoformat() if eng.authorized_from else None,
@@ -283,110 +322,158 @@ def _authorization_config_payload(
     }
 
 
+def _authorization_document(
+    eng: Engagement, assets: list[ScopeAsset], grants: list[ToolGrant], policies: list[ToolApprovalPolicy],
+    capabilities: list[dict] | None = None, alert_hosts: list[str] | None = None, tz: str | None = None,
+    test_accounts: list[dict] | None = None,
+) -> authorization_pdf.AuthorizationDocument:
+    """The authorization letter in words (REQ-AUTH-005/007). The wording of the purpose, the monitoring
+    statements, the guardrails and the customer statement is the signed text and is not changed by its
+    layout; the checksum is the hash of `_authorization_config_payload()` and does not depend on any of this."""
+    payload = _authorization_config_payload(eng, assets, grants, policies, capabilities, alert_hosts, test_accounts)
+    checksum = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    zone, zone_name = authorization_pdf.resolve_timezone(tz)
+    monitoring = eng.operating_mode == "monitoring"
+
+    scope = [
+        authorization_pdf.ScopeLine(
+            "Allow", a.asset_type, a.value,
+            "Active checks allowed" if a.active_allowed else "Passive only",
+            authorization_pdf.authorization_label(bool(a.authorization_verified), a.authorization_method),
+        ) for a in assets if a.rule == "allow"
+    ] + [
+        authorization_pdf.ScopeLine("Deny", a.asset_type, a.value, "-", "-") for a in assets if a.rule == "deny"
+    ]
+    switches = _discovery_switches(eng)
+    on_off = lambda flag: "Enabled" if flag else "Disabled"  # noqa: E731
+    bullets = None
+    if monitoring:
+        bullets = [
+            "This engagement runs without a person watching. Runs are started by a person or by a schedule, "
+            "and nothing waits for a person's decision during a run.",
+            f"Scan depth: {eng.scan_profile}",
+            "New hosts found by discovery: " + (
+                "held until acknowledged (not tested before)" if eng.new_asset_policy == "hold"
+                else "tested as soon as they are covered by the scope"),
+            "Automatic runs: " + (
+                f"every {eng.schedule_every_days} day{'' if eng.schedule_every_days == 1 else 's'}"
+                if eng.schedule_every_days else "none (started by a person)"),
+            "Authorization review date: " + (
+                authorization_pdf.format_instant(eng.review_at, zone) if eng.review_at else "set at activation"),
+            "Calls that would need a person's approval are not made; they are listed as suggestions.",
+            ("Capabilities switched on: " + (", ".join(c["label"] for c in capabilities if c["enabled"]) or "none"))
+            if capabilities is not None else "Capabilities: see the tool permissions above.",
+            "Alerts go to: " + (", ".join(alert_hosts) if alert_hosts else "no webhook (changes are visible in the console only)"),
+            "Credential testing and exploitation are not part of monitoring.",
+        ]
+    return authorization_pdf.AuthorizationDocument(
+        engagement_title=_text(eng.title), engagement_id=str(eng.id),
+        purpose="Purpose: This document summarizes the authorized external attack surface management engagement "
+                "configuration for customer review and signature.",
+        checksum=checksum,
+        period_label="Authorized period" if monitoring else "Test window",
+        period_text=f"{authorization_pdf.format_instant(eng.authorized_from, zone)} to "
+                    f"{authorization_pdf.format_instant(eng.authorized_until, zone)} ({zone_name})",
+        time_note=f"Dates are shown in {zone_name}. The configuration checksum covers the exact stored times: "
+                  f"{authorization_pdf.format_utc(eng.authorized_from)} to {authorization_pdf.format_utc(eng.authorized_until)}.",
+        emergency_contact=_text(eng.emergency_contact),
+        agent_text="enabled" if eng.ai_testing_allowed else "disabled",
+        scope=scope,
+        no_allow_text="No allow-scope assets configured.",
+        no_deny_text="No explicit deny entries configured.",
+        grants=[
+            authorization_pdf.GrantLine(
+                authorization_pdf.category_label(g.tool_category), authorization_pdf.mode_label(g.mode),
+                "Yes" if g.requires_manual_approval else "No",
+            ) for g in sorted(grants, key=lambda g: (g.tool_category, g.mode))
+        ],
+        no_grants_text="No tool grants configured.",
+        discovery=[
+            ("Passive subdomain discovery with subfinder", on_off(switches["subfinder_enabled"])),
+            ("Crawling and URL history", on_off(switches["crawling_enabled"])),
+            ("Out-of-band interaction testing", on_off(switches["oob_enabled"])),
+            ("Web screenshots", on_off(switches["screenshots_enabled"])),
+        ],
+        monitoring=bullets,
+        test_accounts=_account_lines(test_accounts, eng),
+        manual_tools=sorted(p.tool_name for p in policies if p.requires_manual_approval),
+        no_manual_tools_text="No concrete tools require manual approval.",
+        guardrails=[
+            "Every active tool call is authorized by the Scope Gateway before execution.",
+            "Active checks are limited to allow-scope assets and the configured test window.",
+            "Domain scope includes discovered subdomains unless explicitly denied.",
+            "Default posture is non-destructive, bug-bounty-style validation with bounded tool budgets.",
+            "Manual approval tools stop at the gateway until an operator approves the exact call.",
+        ],
+        customer_statement="By signing, the customer confirms that the scope, test window, emergency contact, and tool "
+                           "guardrails above are authorized for the engagement.",
+    )
+
+
+def _account_lines(test_accounts: list[dict] | None, eng: Engagement) -> list[str] | None:
+    """REQ-TESTACCT-009: one line per test account, and for a monitor the consent wording. Never a secret."""
+    if not test_accounts:
+        return None
+    lines = []
+    for a in test_accounts:
+        who = f" Attested by {a['attested_by']} on {str(a['attested_at'])[:10]}." if a.get("attested_by") else ""
+        hosts = ", ".join(a["hosts"]) or "no host (it cannot be used anywhere)"
+        lines.append(f"{a['label']} (role {a['role']}, {a['kind'].replace('_', ' ')}"
+                     f"{', username ' + a['username'] if a.get('username') else ''}): valid on {hosts} only.{who}")
+    lines.append("A test account is a dedicated account without a second factor. The scanner may sign in with it only on the hosts listed, "
+                 "and the account is sent to the language-model provider with every request of a run.")
+    if eng.operating_mode == "monitoring":
+        lines.append("Login consent: " + testaccounts.CONSENT_WORDING)
+    return lines
+
+
 def _authorization_pdf(
     eng: Engagement, assets: list[ScopeAsset], grants: list[ToolGrant], policies: list[ToolApprovalPolicy],
-    capabilities: list[dict] | None = None, alert_hosts: list[str] | None = None,
+    capabilities: list[dict] | None = None, alert_hosts: list[str] | None = None, tz: str | None = None,
+    test_accounts: list[dict] | None = None,
 ) -> bytes:
-    payload = _authorization_config_payload(eng, assets, grants, policies, capabilities, alert_hosts)
-    checksum = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-    allow_assets = [a for a in assets if a.rule == "allow"]
-    deny_assets = [a for a in assets if a.rule == "deny"]
-    manual_tools = sorted(p.tool_name for p in policies if p.requires_manual_approval)
+    return authorization_pdf.render_authorization_pdf(
+        _authorization_document(eng, assets, grants, policies, capabilities, alert_hosts, tz, test_accounts))
 
-    lines = [
-        "Purpose: This document summarizes the authorized external attack surface management engagement configuration for customer review and signature.",
-        f"Configuration checksum: {checksum}",
-        "",
-        "Engagement",
-        f"- Title: {eng.title}",
-        f"- Engagement ID: {eng.id}",
-        f"- Test window: {eng.authorized_from} to {eng.authorized_until}",
-        f"- Emergency contact: {_text(eng.emergency_contact)}",
-        f"- Vector Agent autonomous proposals: {'enabled' if eng.ai_testing_allowed else 'disabled'}",
-        "",
-        "Authorized scope",
+
+@router.get("/{engagement_id}/handover-preview")
+def handover_preview(engagement_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """REQ-HANDOVER-006: what "Test deeper" would carry, the hosts to pick from, and whether both engagements can run. A read
+    like every other (REQ-IAM-022: it shows only what any signed-in user can already read about the monitor); starting a
+    handover is the owner's or an administrator's, in `start_handover`."""
+    eng = _get_engagement_or_404(db, engagement_id)
+    handover.require_source(eng)
+    return handover.preview(db, eng)
+
+
+@router.post("/{engagement_id}/handover", response_model=HandoverCreatedOut, status_code=201)
+def start_handover(
+    engagement_id: uuid.UUID, body: HandoverIn, db: Session = Depends(get_db), user: User = Depends(require_user),
+):
+    """REQ-HANDOVER-001..004: a draft assessment from a monitor. Authorizes nothing and changes nothing on the monitor."""
+    monitor = _get_engagement_or_404(db, engagement_id)
+    if not can_manage_engagement(user, monitor):
+        raise HTTPException(403, "handover_forbidden")
+    eng = handover.create(db, monitor, user, body)
+    overlap = handover.overlap_policy()
+    return {"id": eng.id, "title": eng.title, "status": eng.status, "scope_mode": body.scope_mode,
+            "overlap": overlap, "notices": handover.notices(overlap)}
+
+
+@router.get("/{engagement_id}/handovers")
+def list_handovers(engagement_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_user)):
+    """REQ-HANDOVER-007: the assessments started from this monitor (reading is open, REQ-IAM-022)."""
+    _get_engagement_or_404(db, engagement_id)
+    rows = db.execute(
+        select(Engagement, User).join(User, User.id == Engagement.owner_user_id)
+        .where(Engagement.handover_from_id == engagement_id).order_by(Engagement.created_at.desc())
+    ).all()
+    return [
+        {"id": str(e.id), "title": e.title, "status": e.status, "owner_name": o.display_name,
+         "authorized_from": e.authorized_from.isoformat(), "authorized_until": e.authorized_until.isoformat(),
+         "created_at": e.created_at.isoformat() if e.created_at else None}
+        for e, o in rows
     ]
-    if allow_assets:
-        for asset in allow_assets:
-            lines.append(
-                f"- ALLOW {asset.asset_type}: {asset.value} | "
-                f"{'active checks allowed' if asset.active_allowed else 'passive only'} | "
-                f"authorization {'attested' if asset.authorization_verified else 'not attested'}"
-                f"{f' ({asset.authorization_method})' if asset.authorization_method else ''}"
-            )
-    else:
-        lines.append("- No allow-scope assets configured.")
-
-    lines.append("")
-    lines.append("Explicitly denied scope")
-    if deny_assets:
-        for asset in deny_assets:
-            lines.append(f"- DENY {asset.asset_type}: {asset.value}")
-    else:
-        lines.append("- No explicit deny entries configured.")
-
-    lines.extend(["", "Tool permissions"])
-    if grants:
-        for grant in sorted(grants, key=lambda g: (g.tool_category, g.mode)):
-            lines.append(
-                f"- {grant.tool_category} / {grant.mode}: granted; "
-                f"category manual approval default {'on' if grant.requires_manual_approval else 'off'}"
-            )
-    else:
-        lines.append("- No tool grants configured.")
-
-    switches = _discovery_switches(eng)
-    lines.extend([
-        "",
-        "Extended discovery (per-engagement switches)",
-        f"- Passive subdomain discovery with subfinder: {'enabled' if switches['subfinder_enabled'] else 'disabled'}",
-        f"- Crawling and URL history: {'enabled' if switches['crawling_enabled'] else 'disabled'}",
-        f"- Out-of-band interaction testing: {'enabled' if switches['oob_enabled'] else 'disabled'}",
-        f"- Web screenshots: {'enabled' if switches['screenshots_enabled'] else 'disabled'}",
-    ])
-
-    if eng.operating_mode == "monitoring":
-        lines.extend([
-            "",
-            "Unattended monitoring",
-            "- This engagement runs without a person watching. Runs are started by a person or by a schedule,",
-            "  and nothing waits for a person's decision during a run.",
-            f"- Scan depth: {eng.scan_profile}",
-            f"- New hosts found by discovery: {'held until acknowledged (not tested before)' if eng.new_asset_policy == 'hold' else 'tested as soon as they are covered by the scope'}",
-            f"- Automatic runs: {('every ' + str(eng.schedule_every_days) + ' day' + ('' if eng.schedule_every_days == 1 else 's')) if eng.schedule_every_days else 'none (started by a person)'}",
-            f"- Authorization review date: {eng.review_at.date() if eng.review_at else 'set at activation'}",
-            "- Calls that would need a person's approval are not made; they are listed as suggestions.",
-            "- Capabilities switched on: " + (", ".join(c["label"] for c in capabilities if c["enabled"]) or "none")
-            if capabilities is not None else "- Capabilities: see the tool permissions above.",
-            "- Alerts go to: " + (", ".join(alert_hosts) if alert_hosts else "no webhook (changes are visible in the console only)"),
-            "- Credential testing and exploitation are not part of monitoring.",
-        ])
-    lines.extend(["", "Tools requiring manual approval"])
-    if manual_tools:
-        for tool in manual_tools:
-            lines.append(f"- {tool}")
-    else:
-        lines.append("- No concrete tools require manual approval.")
-
-    lines.extend([
-        "",
-        "Guardrails",
-        "- Every active tool call is authorized by the Scope Gateway before execution.",
-        "- Active checks are limited to allow-scope assets and the configured test window.",
-        "- Domain scope includes discovered subdomains unless explicitly denied.",
-        "- Default posture is non-destructive, bug-bounty-style validation with bounded tool budgets.",
-        "- Manual approval tools stop at the gateway until an operator approves the exact call.",
-        "",
-        "Customer authorization",
-        "By signing, the customer confirms that the scope, test window, emergency contact, and tool guardrails above are authorized for the engagement.",
-        "",
-        "Customer representative: ________________________________",
-        "Date: ____________________",
-        "",
-        "Provider / operator representative: ______________________",
-        "Date: ____________________",
-    ])
-    return _simple_pdf("ASM Engagement Authorization Summary", lines)
 
 
 @router.get("/{engagement_id}", response_model=EngagementOut)
@@ -629,6 +716,7 @@ def delete_engagement(
 @router.get("/{engagement_id}/authorization-pdf")
 def download_authorization_pdf(
     engagement_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_user),
+    tz: str | None = Query(default=None, max_length=64, description="IANA time zone for the dates (default UTC)"),
 ):
     """Customer-facing authorization summary for signature before activation."""
     eng = _get_engagement_or_404(db, engagement_id)
@@ -646,7 +734,7 @@ def download_authorization_pdf(
             urlsplit(t.url).hostname or t.url for t in db.scalars(
                 select(NotificationTarget).where(NotificationTarget.engagement_id == engagement_id))
         })
-    pdf = _authorization_pdf(eng, assets, grants, policies, capabilities, alert_hosts)
+    pdf = _authorization_pdf(eng, assets, grants, policies, capabilities, alert_hosts, tz, testaccounts.authorization_lines(db, eng))
     append_audit_log(
         db,
         engagement_id=engagement_id,
@@ -693,7 +781,9 @@ def add_scope_asset(
     if eng.status == "active" and asset.rule == "allow" and asset.active_allowed:
         # REQ-CONCUR-003: adding active-mode allow scope to an already-active
         # engagement gets the same overlap check as activation itself.
-        _check_no_active_scope_overlap(db, eng, [asset])
+        extended_over = _check_no_active_scope_overlap(db, eng, [asset])
+    else:
+        extended_over = []
     db.add(asset)
     # Scope changes invalidate any previous name->IP materialization. It will be
     # rebuilt from the current allow/deny rules before the next raw/proxy egress.
@@ -704,6 +794,12 @@ def add_scope_asset(
         db, engagement_id=engagement_id, actor=f"user:{user.email}", action="scope_materialization_invalidated",
         decision=None, reason="scope_asset_changed", payload={"scope_asset_id": str(asset.id)},
     )
+    if extended_over:
+        append_audit_log(
+            db, engagement_id=engagement_id, actor=f"user:{user.email}", action="scope_overlap_noted",
+            decision="ALLOW", reason="egress_identity_required",
+            payload={"scope_asset_id": str(asset.id), "overlaps": [str(e.id) for e, _ in extended_over]},
+        )
     return asset
 
 
@@ -1084,11 +1180,16 @@ def activate_engagement(
     # REQ-CONCUR-003: catch scope overlap with another already-active
     # engagement (any owner) at activation time, before it can surface as a
     # confusing ambiguous_host scan failure later.
-    _check_no_active_scope_overlap(db, eng, allow_assets)
+    overlaps = _check_no_active_scope_overlap(db, eng, allow_assets)
 
     now = datetime.datetime.now(datetime.timezone.utc)
     if not (eng.authorized_from and eng.authorized_until and eng.authorized_from < eng.authorized_until):
         raise HTTPException(409, "Cannot activate: the test window is missing or ends before it starts.")
+
+    # REQ-TESTACCT-006/009: a monitor whose accounts have a login that no current consent covers is not activated.
+    problems = testaccounts.activation_problems(db, eng)
+    if problems:
+        raise HTTPException(409, problems[0])
 
     if eng.operating_mode == "monitoring":
         if eng.asset_review_enabled:
@@ -1107,9 +1208,22 @@ def activate_engagement(
         db, engagement_id=eng.id, actor=f"user:{user.email}", action="engagement_activated",
         decision="ALLOW", reason="activation_checklist_passed",
         payload={"at": now.isoformat(), "operating_mode": eng.operating_mode,
-                 "review_at": eng.review_at.isoformat() if eng.review_at else None},
+                 "review_at": eng.review_at.isoformat() if eng.review_at else None,
+                 # REQ-EGRESS-011: engagements this one shares hosts with (empty unless the proxy requires the token)
+                 **({"overlaps": [str(e.id) for e, _ in overlaps]} if overlaps else {})},
     )
-    return _annotate(eng, user, None, db)
+    if eng.operating_mode == "monitoring":
+        # REQ-BASE-001: a monitor is activated into a passive discovery. Nothing scans until its
+        # owner has chosen the targets; a discovery that cannot start leaves it `discovery_failed`
+        # and the owner can start it again.
+        try:
+            targets_module.start_discovery(db, eng, initiated_by=user.email, activation=True)
+        except targets_module.TargetsError as exc:
+            logger.warning("discovery of %s did not start: %s", eng.id, exc.detail)
+        db.refresh(eng)
+    annotated = _annotate(eng, user, None, db)
+    annotated.scope_overlap_notice = _overlap_notice(overlaps)
+    return annotated
 
 
 @router.get("/{engagement_id}/scan-readiness")
@@ -1118,7 +1232,12 @@ def get_scan_readiness(engagement_id: uuid.UUID, db: Session = Depends(get_db)):
     die engagement-weiten Blocking-Bedingungen des Gateways (REQ-RUN-002)."""
     _get_engagement_or_404(db, engagement_id)
     r = scan_readiness.evaluate(db, engagement_id)
-    return {"ready": r.ready, "blockers": [{"code": b.code, "message": b.message, "action": b.action} for b in r.blockers]}
+    return {
+        "ready": r.ready,
+        "blockers": [{"code": b.code, "message": b.message, "action": b.action} for b in r.blockers],
+        # REQ-GRANT-002: things that will not work as expected but do not stop a run.
+        "warnings": [{"code": w.code, "message": w.message, "action": w.action} for w in r.warnings],
+    }
 
 
 def _scope_hosts(db: Session, eng: Engagement, hosts: list[str]) -> list[str]:
@@ -1143,6 +1262,23 @@ def _scope_hosts(db: Session, eng: Engagement, hosts: list[str]) -> list[str]:
     if unknown:
         raise HTTPException(422, f"not an in-scope host of this engagement: {', '.join(unknown)}")
     return wanted
+
+
+def _retest_items(db: Session, eng: Engagement, body: ScanStartIn) -> list[dict] | None:
+    """REQ-RETEST-002: the restriction of a run. None is a full run; a list (empty when the run only sends the
+    requests a person confirmed) is a restricted one."""
+    if body.items is None:
+        return [] if body.send_requests else None
+    if not body.items:
+        raise HTTPException(422, "items must name at least one check")
+    items: list[dict] = []
+    for item in body.items:
+        if item.tool is not None and registry.get(item.tool) is None:
+            raise HTTPException(422, f"unknown tool: {item.tool}")
+        entry = {"host": item.host.strip().lower().rstrip("."), "port": item.port,
+                 "check": open_items.family(item.check) if item.check else None, "tool": item.tool}
+        items.append({k: v for k, v in entry.items() if v is not None})
+    return items
 
 
 @router.post("/{engagement_id}/scan", status_code=202)
@@ -1176,15 +1312,25 @@ def start_scan(
         retest_finding_id = finding.id
     if body.hosts:
         scope_hosts = _scope_hosts(db, eng, body.hosts + (scope_hosts or []))
+    retest_items = _retest_items(db, eng, body)
+    if retest_items:
+        # REQ-RETEST-002: a restricted run covers the hosts of its items and nothing else.
+        scope_hosts = _scope_hosts(db, eng, [i["host"] for i in retest_items] + (scope_hosts or []))
+    try:
+        send_rows = open_items.load_confirmable(db, eng, body.send_requests or [])
+    except open_items.OpenRequestRefused as exc:
+        raise HTTPException(exc.status, exc.detail) from None
     try:
         started = operating_modes.begin_scan(
             db, engagement_id, trigger="manual", initiated_by=user.email, supervision=body.supervision,
             scan_profile=scan_profile, scope_hosts=scope_hosts, retest_finding_id=retest_finding_id,
+            retest_items=retest_items, send_requests=send_rows, confirmed_by=user.email,
         )
     except operating_modes.ScanNotStartable as exc:
         raise HTTPException(exc.status, exc.detail) from None
     return {"task_id": started.task_id, "scan_run_id": str(started.run.id),
-            "supervision": started.run.supervision, "scan_profile": started.run.scan_profile}
+            "supervision": started.run.supervision, "scan_profile": started.run.scan_profile,
+            "restricted": started.run.retest_items is not None, "requests_confirmed": len(send_rows)}
 
 
 def _stop_active_runs(db: Session, engagement_id: uuid.UUID, now: datetime.datetime, reason: str) -> list[str]:
@@ -1242,6 +1388,9 @@ def _lifecycle(
     )
     db.commit()
     db.refresh(eng)
+    if to in testaccounts.TERMINAL_STATUSES:
+        # REQ-TESTACCT-002: the secrets of its test accounts do not outlive the engagement.
+        testaccounts.erase_engagement(db, eng.id, reason=f"engagement_{to}", actor=f"user:{user.email}")
     return eng
 
 

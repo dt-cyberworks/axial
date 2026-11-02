@@ -8,6 +8,7 @@ deny rules for monitoring/passive/held hosts, and the standing consent."""
 from __future__ import annotations
 
 import datetime as dt
+import re
 import uuid
 
 import pytest
@@ -1109,7 +1110,8 @@ def test_a_change_after_signing_changes_the_checksum(client, db):
     # the fixture's fingerprint grant makes this one capability active; switching it off changes what runs
     client.put(f"/engagements/{eng.id}/capabilities", json={"capabilities": {"web_fingerprint": False}}, headers=h)
     second = _pdf_text(client.get(f"/engagements/{eng.id}/authorization-pdf", headers=h).content)
-    grab = lambda t: next(line for line in t.splitlines() if "Configuration checksum" in line)  # noqa: E731
+    # The checksum has its own labelled row since REQ-AUTH-007; read the 64-hex value, not a line of text.
+    grab = lambda t: re.search(r"Configuration checksum.*?([0-9a-f]{64})", t, re.S).group(1)  # noqa: E731
     assert grab(first) != grab(second)
 
 

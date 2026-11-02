@@ -23,12 +23,13 @@ from sqlalchemy.orm import Session
 import fnmatch
 
 from app.config import get_settings
+from app.gateway import address_vetting
 from app.gateway.audit import append_audit_log
 from app.gateway.authorize import Decision, ToolCall, authorize
 from app.gateway.raw_egress_policy import policy_for_engagement
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset
 from app.models.resolved_host import ResolvedHost
-from app.models.scan_run import ScanRun
+from app.models.scan_run import ScanRun, executes_calls
 
 # REQ-CIDRDISC-002: fixed TCP-SYN discovery-probe ports for the host-discovery
 # sweep (-PS80,443) - never operator/agent-chosen. Kept in sync with
@@ -304,7 +305,7 @@ def issue_raw_egress_lease(
     run = db.get(ScanRun, scan_run_id)
     if (
         run is None or run.engagement_id != engagement_id
-        or run.state != "running" or run.cancel_requested
+        or not executes_calls(run) or run.cancel_requested
     ):
         return _audit_denial(
             db, engagement_id, reason="scan_run_not_active", scan_run_id=scan_run_id,
@@ -401,6 +402,16 @@ def issue_raw_egress_lease(
     except ValueError:
         return _audit_denial(
             db, engagement_id, reason="resolved_target_invalid", scan_run_id=scan_run_id,
+            target=authorized_target, resolved_target=resolved_target,
+        )
+
+    # REQ-SCAN-016: an address that can never be a scan target (loopback, link-local incl. a zone id, the metadata
+    # address, multicast, IPv4-mapped / NAT64 / 6to4 forms of those) never gets a lease, whatever the materialization
+    # or the scope says. No traffic is sent.
+    blocked = address_vetting.never_legitimate_reason(resolved_target)
+    if blocked is not None:
+        return _audit_denial(
+            db, engagement_id, reason="resolved_target_blocked_address", scan_run_id=scan_run_id,
             target=authorized_target, resolved_target=resolved_target,
         )
 

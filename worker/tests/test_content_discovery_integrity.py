@@ -196,6 +196,28 @@ def test_negative_the_marker_is_matched_case_insensitively():
         assert parse_httpx_json(_httpx_line(header={name: "out_of_scope_port"})) == [], name
 
 
+@pytest.mark.parametrize("name", ["x_asm_egress_denied", "X_ASM_EGRESS_DENIED", "X_Asm_Egress_Denied", " x_asm_egress_denied "])
+def test_negative_the_marker_httpx_reports_snake_cased_is_matched_too(name):
+    """GitHub #81: on int the proxy's own `409 ambiguous_host` page reached the parser as `x_asm_egress_denied`, was not
+    recognised, and became a service with status 409 and two `validated` missing-security-header findings."""
+    from app.httpx_parse import parse_httpx_json
+
+    assert parse_httpx_json(_httpx_line(status_code=409, header={name: "ambiguous_host", "content_length": "14"})) == []
+
+
+def test_negative_the_snake_cased_marker_is_also_detected_in_a_raw_response_blob():
+    from app.httpx_parse import parse_httpx_json
+
+    assert parse_httpx_json(_httpx_line(status_code=409, response="HTTP/1.1 409 Blocked\r\nx_asm_egress_denied: ambiguous_host\r\n\r\n")) == []
+
+
+def test_a_snake_cased_header_that_is_not_the_marker_does_not_hide_a_real_response():
+    from app.httpx_parse import parse_httpx_json
+
+    rows = parse_httpx_json(_httpx_line(status_code=200, title="Home", header={"strict_transport_security": "max-age=1", "x_asm_other": "1"}))
+    assert len(rows) == 1 and rows[0]["status_code"] == 200
+
+
 def test_negative_the_marker_is_also_detected_in_a_raw_response_blob():
     from app.httpx_parse import parse_httpx_json
 

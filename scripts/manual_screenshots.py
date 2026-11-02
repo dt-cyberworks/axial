@@ -161,8 +161,10 @@ class Stack:
             "DATABASE_URL": dsn, "REDIS_URL": f"redis://{self.prefix}-redis:6379/0", "ENVIRONMENT": "development",
             "INTERNAL_API_TOKEN": secrets.token_urlsafe(24), "OPERATOR_API_TOKEN": secrets.token_urlsafe(24),
             "SCOPE_SIGNING_SECRET": secrets.token_urlsafe(24), "MFA_ENCRYPTION_KEY": _fernet_key(),
-            "SETTINGS_ENCRYPTION_KEY": _fernet_key(), "CORS_ALLOWED_ORIGINS": self.web_url,
+            "SETTINGS_ENCRYPTION_KEY": _fernet_key(), "TESTACCOUNT_ENCRYPTION_KEY": _fernet_key(), "CORS_ALLOWED_ORIGINS": self.web_url,
             "PUBLIC_BASE_URL": self.api_url,
+            # The compose file's default (REQ-EGRESS-014): two engagements may cover one host, which the handover dialog says.
+            "EGRESS_REQUIRE_TOKEN": "true",
         }
         flags = [x for key, value in env.items() for x in ("-e", f"{key}={value}")]
         self.log("seeding the demo data")
@@ -247,6 +249,16 @@ class Shot:
     pending_approval: bool = False
 
 
+def _tick_rows(count: int) -> Callable:
+    """REQ-TRIAGE-005: tick the first `count` findings so the bulk bar shows."""
+    def act(page):
+        boxes = page.locator("tr.finding-row input[type=checkbox]")
+        for index in range(count):
+            boxes.nth(index).check()
+        page.get_by_role("button", name="Mark false positive…", exact=True).click()
+    return act
+
+
 def _click_tab(label: str) -> Callable:
     return lambda page: page.get_by_role("button", name=label, exact=True).click()
 
@@ -271,6 +283,16 @@ def _open_menu(page) -> None:
     page.locator("#primary-navigation").wait_for(state="visible")
 
 
+def _open_handover(page) -> None:
+    """REQ-HANDOVER-001: open "Test deeper", give a window and tick the first host, so the screen shows what a person would send."""
+    page.get_by_role("button", name="Test deeper", exact=True).click()
+    page.locator(".handover-card").wait_for()
+    page.locator(".handover-hosts input[type=checkbox]").first.wait_for()
+    page.locator("input[type=datetime-local]").nth(0).fill("2026-11-02T09:00")
+    page.locator("input[type=datetime-local]").nth(1).fill("2026-11-09T18:00")
+    page.locator(".handover-hosts input[type=checkbox]").first.check()
+
+
 def _open_agent_step(page) -> None:
     page.get_by_role("button", name="Vector Agent", exact=True).click()
     page.locator(".agent-step-head").first.wait_for()
@@ -284,11 +306,17 @@ SHOTS: list[Shot] = [
     Shot("new-engagement-choice", "operator", "/new", "h1:has-text('What do you want to do?')"),
     Shot("wizard-step-1", "operator", "/new?mode=assessment", "h1:has-text('New engagement')"),
     Shot("monitor-changes", "operator", "/engagements/{monitor}?tab=changes", "h2:has-text('Changes')", viewport=TALL),
+    Shot("handover-dialog", "operator", "/engagements/{monitor}", "h1", act=_open_handover,
+         viewport=TALL, element=".handover-card"),
+    Shot("handover-banner", "operator", "/new?mode=assessment&draft={handover_draft}", ".handover-banner", viewport=TALL),
     Shot("monitor-capabilities", "operator", "/engagements/{monitor}?tab=setup", "h2:has-text('Capabilities')", viewport=TALL),
     Shot("monitor-schedule", "operator", "/engagements/{monitor}", "h2:has-text('Automatic runs')",
          element="section[aria-label='Automatic runs']"),
     Shot("inbox", "operator", "/inbox", "h1:has-text('Inbox')"),
+    Shot("open-items", "operator", "/engagements/{monitor}/open-items", "h2:has-text('Review before you run')",
+         viewport=TALL),
     Shot("engagement-findings", "operator", "/engagements/{main}", "tr.finding-row"),
+    Shot("findings-bulk-triage", "operator", "/engagements/{main}", "tr.finding-row", act=_tick_rows(3)),
     Shot("engagement-read-only", "analyst", "/engagements/{main}", ".read-only-notice"),
     Shot("finding-detail", "operator", "/engagements/{main}", "tr.finding-row",
          act=_open_finding("Exposed .git directory"), viewport=TALL),

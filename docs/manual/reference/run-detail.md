@@ -29,8 +29,11 @@ While a tool is running, a banner says which tool on which target and for how lo
 **Scan plan** shows what this run planned and what became of it. There is one block per open port: its class (web, redirect only, TLS service, other service), the technologies identified and, for each check, the reason it runs or is skipped, its state (*complete*, *partial*, *failed*, *skipped*, *running*), the number of templates, the time and the findings. The plan appears once the scan has found which ports are open and what runs on them, and it updates while the run executes.
 
 - A port that only redirects to another scanned port is listed with its checks skipped and the target named.
+- A note lists the **hosts in scope that this run did not test at all**, each with its reason (held back by the hold policy, no DNS address, no open port). A host with a port in the plan is not listed there. The same list is in the PDF report under *Hosts in scope that were not tested*.
 - A check that stopped at its time budget is **partial** and a failed one is **failed**: **neither means the service is clean**.
 - A run that is resumed after a restart continues with the checks that were not finished; checks that were complete are not run again.
+- A run restricted to what was open ([retest](../guides/retest-and-open-items.md)) lists the checks it did not run as *skipped* with the reason *not in this run*. That says nothing about those checks and is not a failure.
+- A step that is still open shows **Run this step again** for the engagement's owner or an administrator. It opens **Review before you run**; nothing starts until you press its button.
 - Every check is still authorised by the Scope Gateway when it runs. The plan itself authorises nothing.
 
 The reasons shown for a skipped or failed check are explained in [Troubleshooting](../troubleshooting.md#why-a-check-was-skipped-or-failed).
@@ -44,6 +47,8 @@ The reasons shown for a skipped or failed check are explained in [Troubleshootin
 ## Vector Agent
 
 ![The Vector Agent tab with one step expanded](../img/run-agent.png)
+
+If the Vector Agent is switched off for the engagement, or the bug-bounty program does not permit it, the scan does not start it: no request is made to the language model and no tokens are spent. The tab then shows one step, **Vector Agent: off for this engagement**, with the reason. That is a setting and not a failure: the run is not marked reduced coverage, and everything the deterministic phases found is unchanged. Switch the agent on under **Edit engagement** if you want it to run.
 
 **Vector Agent steps** lists every agent iteration. Click a step to see the exact input sent to the model (the system prompt and the running messages) and the model's response and proposed tool calls. API keys are never stored. An observation marked *EGRESS BLOCKED* means the request was stopped at the egress proxy and never reached the target: it is an infrastructure block, not a clean result. If the agent did not run, the tab says why: no AI provider configured, the agent switched off, or the run stopped before the agent phase.
 
@@ -59,7 +64,7 @@ Three words to keep apart: *completed* means a tool result was received; *author
 
 ![The approval popup: what the request will do, why the agent wants it, and its risk](../img/approval-popup.png)
 
-A scan runs on its own, but a state-changing request (POST, PUT, DELETE, PATCH, or any request with a body), and any tool you marked for approval, never runs on its own. When the agent proposes one, the run pauses (`waiting_approval`) and a popup titled **Approval required — state-changing request** shows:
+A scan runs on its own, but a state-changing request (POST, PUT, DELETE, PATCH, or any request with a body), and any tool you marked for approval, never runs on its own. When the agent proposes one, that action waits and the run shows `waiting_approval` (the other checks of the run carry on) and a popup titled **Approval required — state-changing request** shows:
 
 | Part | Shows |
 |---|---|

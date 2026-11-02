@@ -34,11 +34,31 @@ class BlockedAddressError(RuntimeError):
         self.reason = reason
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_SIXTO4 = ipaddress.ip_network("2002::/16")
+
+
+def _embedded_v4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """The IPv4 address an IPv6 address carries (IPv4-mapped, NAT64, 6to4): judged as the IPv4 address it reaches."""
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip in _NAT64:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    if ip in _SIXTO4:
+        return ipaddress.IPv4Address((int(ip) >> 80) & 0xFFFFFFFF)
+    return None
+
+
 def _classify(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
-    """Return a block reason if this address may never be a scan target, else None."""
-    # IPv4-mapped IPv6 (::ffff:a.b.c.d) - evaluate the embedded v4 address too.
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        return _classify(ip.ipv4_mapped)
+    """Return a block reason if this address may never be a scan target, else None.
+
+    A copy of control-plane/app/gateway/address_vetting.py (GitHub #77): scripts/tests/test_address_vetting_parity.py
+    fails when the two disagree."""
+    # IPv4-mapped (::ffff:a.b.c.d), NAT64 (64:ff9b::/96) and 6to4 (2002::/16): evaluate the embedded v4 address too.
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = _embedded_v4(ip)
+        if embedded is not None:
+            return _classify(embedded)
     if ip.is_loopback:
         return "blocked_loopback_address"
     if ip.is_link_local:

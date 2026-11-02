@@ -51,6 +51,10 @@ from app.report_builder import (
     ReportModel,
 )
 
+# The product's name on every customer-facing document (REQ-BRAND-001). The report said "ASM-Konsole", a
+# leftover of the rebrand, while the authorization letter must carry the same name.
+PRODUCT_NAME = "Axial"
+
 PAGE_WIDTH, PAGE_HEIGHT = LETTER
 MARGIN = 20 * mm
 CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN
@@ -162,7 +166,7 @@ def _cover_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]) -> l
     ]))
     return [
         Spacer(1, 70 * mm),
-        Paragraph("ASM-Konsole", styles["CoverTitle"]),
+        Paragraph(PRODUCT_NAME, styles["CoverTitle"]),
         Paragraph("Attack Surface Assessment Report", styles["CoverSubtitle"]),
         _p(model.engagement_title, styles["CoverEngagement"]),
         Spacer(1, 10 * mm),
@@ -527,6 +531,7 @@ def _methodology_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]
             flowables.append(_p(f"... and {scope.runs_truncated} more (see the console for the full list).", styles["Muted"]))
 
     flowables.extend(_coverage_flowables(model, styles))
+    flowables.extend(_authenticated_flowables(model, styles))
 
     if scope.degraded:
         flowables.append(Spacer(1, 10))
@@ -535,32 +540,48 @@ def _methodology_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]
     return flowables
 
 
+def _authenticated_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]) -> list:
+    """REQ-TESTACCT-008: what was tested behind a login, and what was not."""
+    if not model.authenticated_testing:
+        return []
+    flowables: list = [Spacer(1, 8), Paragraph("Authenticated testing", styles["H2"])]
+    flowables.append(_p(
+        "These test accounts were assigned to hosts of this engagement. A host where the login was rejected or not attempted was NOT "
+        "tested behind its login: what is behind it is untested, not clean.", styles["Body"]))
+    rows = [[_p(h, styles["CellHead"]) for h in ("Account", "Role", "Host", "Result")]]
+    for row in model.authenticated_testing:
+        rows.append([_p(row.account, styles["Cell"]), _p(row.role, styles["Cell"]), _p(row.host, styles["Cell"]), _p(row.result, styles["Cell"])])
+    flowables.append(_table(rows, [CONTENT_WIDTH * 0.2, CONTENT_WIDTH * 0.12, CONTENT_WIDTH * 0.26, CONTENT_WIDTH * 0.42], TableStyle(_HEADER_ROW_STYLE)))
+    return flowables
+
+
 def _coverage_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]) -> list:
     """REQ-PIPE-011: per service, which checks ran completely, partially, failed
-    or were skipped, and why."""
+    or were skipped, and why. REQ-BASE-008: and which in-scope hosts were not tested at all."""
     coverage = model.coverage
-    if coverage is None or not coverage.rows:
+    if coverage is None or (not coverage.rows and not coverage.untested):
         return []
-    depth = "thorough (all non-intrusive web templates on every web service)" if coverage.scan_depth == "thorough" else \
-        "standard (checks chosen from what the scan found)"
-    flowables: list = [
-        Spacer(1, 8), Paragraph("Coverage of this run", styles["H2"]),
-        _p(f"Scan depth: {depth}. Each row shows how many checks ran completely, stopped at their time budget "
-           "(partial), failed, or were skipped on that service.", styles["Body"]),
-    ]
-    header = [_p(h, styles["CellHead"]) for h in ("Service", "Type", "Technologies", "Complete", "Partial", "Failed", "Skipped")]
-    rows = [header]
-    for row in coverage.rows:
-        rows.append([
-            _p(row.service, styles["Cell"]), _p(row.kind, styles["Cell"]), _p(row.technologies, styles["Cell"]),
-            _p(str(row.complete), styles["Cell"]), _p(str(row.partial), styles["Cell"]),
-            _p(str(row.failed), styles["Cell"]), _p(str(row.skipped), styles["Cell"]),
-        ])
-    flowables.append(_table(
-        rows,
-        [CONTENT_WIDTH * 0.24, CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.23] + [CONTENT_WIDTH * 0.1] * 4,
-        TableStyle(_HEADER_ROW_STYLE),
-    ))
+    flowables: list = [Spacer(1, 8), Paragraph("Coverage of this run", styles["H2"])]
+    if coverage.rows:
+        depth = "thorough (all non-intrusive web templates on every web service)" if coverage.scan_depth == "thorough" else \
+            "standard (checks chosen from what the scan found)"
+        flowables.append(_p(
+            f"Scan depth: {depth}. Each row shows how many checks ran completely, stopped at their time budget "
+            "(partial), failed, or were skipped on that service.", styles["Body"],
+        ))
+        header = [_p(h, styles["CellHead"]) for h in ("Service", "Type", "Technologies", "Complete", "Partial", "Failed", "Skipped")]
+        rows = [header]
+        for row in coverage.rows:
+            rows.append([
+                _p(row.service, styles["Cell"]), _p(row.kind, styles["Cell"]), _p(row.technologies, styles["Cell"]),
+                _p(str(row.complete), styles["Cell"]), _p(str(row.partial), styles["Cell"]),
+                _p(str(row.failed), styles["Cell"]), _p(str(row.skipped), styles["Cell"]),
+            ])
+        flowables.append(_table(
+            rows,
+            [CONTENT_WIDTH * 0.24, CONTENT_WIDTH * 0.13, CONTENT_WIDTH * 0.23] + [CONTENT_WIDTH * 0.1] * 4,
+            TableStyle(_HEADER_ROW_STYLE),
+        ))
     notes = [(row.service, line) for row in coverage.rows for line in row.not_covered]
     if notes:
         flowables.append(Spacer(1, 6))
@@ -569,6 +590,18 @@ def _coverage_flowables(model: ReportModel, styles: dict[str, ParagraphStyle]) -
             flowables.append(_p(f"{service} - {line}", styles["Bullet"]))
         if len(notes) > 60:
             flowables.append(_p(f"... and {len(notes) - 60} more (see the Plan tab of the run in the console).", styles["Muted"]))
+    if coverage.not_run_classes:
+        flowables.append(Spacer(1, 6))
+        flowables.append(Paragraph("Template classes not run (no interaction server)", styles["H2"]))
+        for line in coverage.not_run_classes:
+            flowables.append(_p(line, styles["Bullet"]))
+    if coverage.untested:
+        flowables.append(Spacer(1, 6))
+        flowables.append(Paragraph("Hosts in scope that were not tested", styles["H2"]))
+        for line in coverage.untested[:60]:
+            flowables.append(_p(line, styles["Bullet"]))
+        if len(coverage.untested) > 60:
+            flowables.append(_p(f"... and {len(coverage.untested) - 60} more.", styles["Muted"]))
     return flowables
 
 
@@ -582,21 +615,25 @@ class _NumberedCanvas(Canvas):
     count is known and draws the footer before the real `showPage`/`save`.
     """
 
-    def __init__(self, *args, footer_label: str = "", **kwargs):
+    def __init__(self, *args, footer_label: str = "", has_cover: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
         self._saved_page_states: list[dict] = []
         self._footer_label = footer_label
+        # The report's first page is a cover without a footer and is not counted. The authorization letter
+        # has no cover: every page, the first included, carries "Page x of y".
+        self._has_cover = has_cover
 
     def showPage(self) -> None:
         self._saved_page_states.append(dict(self.__dict__))
         self._startPage()
 
     def save(self) -> None:
-        total_content_pages = len(self._saved_page_states) - 1
+        offset = 1 if self._has_cover else 0
+        total_content_pages = len(self._saved_page_states) - offset
         for state in self._saved_page_states:
             self.__dict__.update(state)
-            if self._pageNumber > 1:
-                self._draw_footer(self._pageNumber - 1, total_content_pages)
+            if self._pageNumber > offset:
+                self._draw_footer(self._pageNumber - offset, total_content_pages)
             Canvas.showPage(self)
         Canvas.save(self)
 
@@ -616,7 +653,7 @@ def _header(canvas: Canvas, doc: BaseDocTemplate, label: str) -> None:
     canvas.saveState()
     canvas.setFont("Helvetica-Bold", 8)
     canvas.setFillColor(TEAL_DARK)
-    canvas.drawString(MARGIN, PAGE_HEIGHT - 12 * mm, "ASM-Konsole")
+    canvas.drawString(MARGIN, PAGE_HEIGHT - 12 * mm, PRODUCT_NAME)
     canvas.setFont("Helvetica", 8)
     canvas.setFillColor(MUTED)
     canvas.drawRightString(PAGE_WIDTH - MARGIN, PAGE_HEIGHT - 12 * mm, label)

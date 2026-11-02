@@ -82,6 +82,41 @@ class FindingTriageIn(BaseModel):
         return self
 
 
+# REQ-TRIAGE-005: how many findings one bulk action may name.
+BULK_TRIAGE_MAX = 500
+
+
+class FindingBulkTriageIn(BaseModel):
+    """REQ-TRIAGE-005: one decision for many existing findings, each triaged as itself.
+    Same note rule as a single finding. No filter, no pattern: only the ids named."""
+
+    finding_ids: list[uuid.UUID] = Field(min_length=1, max_length=BULK_TRIAGE_MAX)
+    status: Literal["open", "accepted_risk", "false_positive", "resolved"]
+    note: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def _note_where_required(self) -> "FindingBulkTriageIn":
+        self.note = (self.note or "").strip() or None
+        if self.status in NOTE_REQUIRED_STATUSES and (self.note is None or len(self.note) < 3):
+            raise ValueError(f"a note of at least 3 characters is required for status {self.status!r}")
+        return self
+
+
+class FindingBulkTriageOut(BaseModel):
+    bulk_id: uuid.UUID
+    status: str
+    changed: int
+    unchanged: int
+    finding_ids: list[uuid.UUID]  # the findings that changed, in the order given
+
+
+class FindingBulkUndoOut(BaseModel):
+    bulk_id: uuid.UUID
+    undo_of: uuid.UUID
+    restored: int
+    skipped: int  # changed again since; left exactly as they are
+
+
 class EngagementSummary(BaseModel):
     """GET /engagements/{id}/summary (Architektur Kap. 6.3)."""
 

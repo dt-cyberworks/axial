@@ -29,9 +29,13 @@ class Settings(BaseSettings):
     # prove deserialization RCE. Must be reachable from wherever a real
     # target's network can reach - i.e. the actual public domain in int/prod
     # (scan.example.org / scan-int.example.org), not an internal
-    # container hostname. The dev default only works for the benchmark VM,
-    # which is on the same host.
+    # container hostname. The dev default only works for a target that runs
+    # on the same host.
     public_base_url: str = "http://localhost:8000"
+
+    # REQ-RETEST-004: how long a request a monitor held back stays sendable. Older than this it is shown as
+    # expired, because the page, the session or the data it was made for may have changed.
+    open_item_max_age_days: int = 14
 
     database_url: str = "postgresql+psycopg://asm:asm@localhost:5432/asm"
     redis_url: str = "redis://localhost:6379/0"
@@ -85,6 +89,14 @@ class Settings(BaseSettings):
     # receives only this verifier key, never the operator/internal API token.
     raw_egress_signing_secret: str = "raw-egress-change-me-in-dev"
     raw_egress_lease_ttl_seconds: int = 900
+    # REQ-EGRESS-006 (GitHub #81): signs the short-lived identity (engagement + run) that the egress proxy verifies.
+    # Only the control plane and the proxy hold it; the worker and the tool-runner never do.
+    egress_run_token_secret: str = "egress-run-token-change-me-in-dev"
+    egress_run_token_ttl_seconds: int = 600
+    # REQ-EGRESS-011 (GitHub #81): true when the egress proxy REQUIRES a valid run token (it then never guesses the
+    # engagement from the destination), so two engagements may cover the same host. Set from the same environment
+    # variable as the proxy's own switch; while it is false the overlap refusal of REQ-CONCUR-003 stays.
+    egress_require_token: bool = False
     raw_egress_materialization_max_age_seconds: int = 900
     nmap_max_rate: int = 300
     # GitHub issue #35: no upper bound previously existed anywhere - a `cidr`
@@ -155,6 +167,13 @@ class Settings(BaseSettings):
     settings_encryption_key: str = ""
     settings_encryption_key_previous: str = ""
 
+    # GitHub #89 (REQ-TESTACCT-002): encrypts the secret of a test account. A THIRD key, distinct from the two above. Unlike the
+    # MFA key it is not required at startup (an installation that never enters a test account needs none): without it saving a
+    # test account answers 503 and nothing is stored, and nothing falls back to another key. A malformed key is rejected in
+    # production so it cannot surface later as a confusing 500.
+    testaccount_encryption_key: str = ""
+    testaccount_encryption_key_previous: str = ""
+
 
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
@@ -176,6 +195,10 @@ class Settings(BaseSettings):
             insecure.append("scope_signing_secret")
         if self.raw_egress_signing_secret in ("", "raw-egress-change-me-in-dev"):
             insecure.append("raw_egress_signing_secret")
+        if self.egress_run_token_secret in ("", "egress-run-token-change-me-in-dev"):
+            insecure.append("egress_run_token_secret")
+        if not 60 <= self.egress_run_token_ttl_seconds <= 3600:
+            insecure.append("egress_run_token_ttl_seconds")
         if self.mfa_encryption_key == "":
             insecure.append("mfa_encryption_key")
         # GitHub issue #25: unlike the other dev-default checks above, an
@@ -192,6 +215,11 @@ class Settings(BaseSettings):
                 Fernet(self.settings_encryption_key.encode())
             except ValueError:
                 insecure.append("settings_encryption_key")
+        if self.testaccount_encryption_key:
+            try:
+                Fernet(self.testaccount_encryption_key.encode())
+            except ValueError:
+                insecure.append("testaccount_encryption_key")
         if not 60 <= self.raw_egress_lease_ttl_seconds <= 1800:
             insecure.append("raw_egress_lease_ttl_seconds")
         if not 1 <= self.nmap_max_rate <= 1000:

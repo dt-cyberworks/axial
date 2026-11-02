@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 
 from app.tech_profile import product_keys
 from app.tool_runner_client import (
@@ -241,6 +242,52 @@ def _declared_budget(check: PlannedCheck) -> int | None:
     if check.check_id.startswith("nuclei:") and check.args.get("mode") == "select":
         return None
     return check_budget_s(check.tool, check.args)
+
+
+# REQ-RETEST-002: a check a restricted run did not select. The control plane never lists it as open: it says nothing
+# about the check, only that this run did not look at it.
+NOT_IN_THIS_RUN = "not_in_this_run"
+_SHARD_RE = re.compile(r"^(.*):\d+of\d+$")
+
+
+def check_family(check_id: str) -> str:
+    """Shards of one check ('nuclei:generic:2of5') count as the same check ('nuclei:generic')."""
+    match = _SHARD_RE.match(check_id or "")
+    return match.group(1) if match else check_id
+
+
+def _item_selects(item: dict, host: str, port: int, check: PlannedCheck) -> bool:
+    if str(item.get("host") or "").lower().rstrip(".") != host.lower().rstrip("."):
+        return False
+    if item.get("port") is not None and int(item["port"]) != int(port):
+        return False
+    if item.get("check"):
+        return check_family(check.check_id) == check_family(str(item["check"]))
+    if item.get("tool"):
+        return check.tool == item["tool"]
+    return False
+
+
+def restrict_checks(checks: list[PlannedCheck], host: str, port: int, items: list[dict] | None) -> list[PlannedCheck]:
+    """The plan of one surface for a restricted run (pure). `items` None is a full run and changes nothing.
+
+    A planned check that no item selects becomes skipped with `not_in_this_run`; a check the planner already skipped
+    keeps its own reason; a check a selected one depends on is selected too. Nothing is ever added: a restricted plan
+    is a subset of what the full plan would have been."""
+    if items is None:
+        return checks
+    by_id = {c.check_id: c for c in checks}
+    selected = {c.check_id for c in checks if c.state == "planned" and any(_item_selects(i, host, port, c) for i in items)}
+    frontier = list(selected)
+    while frontier:
+        dep = by_id[frontier.pop()].depends_on
+        if dep and dep in by_id and by_id[dep].state == "planned" and dep not in selected:
+            selected.add(dep)
+            frontier.append(dep)
+    return [
+        _skipped(c.check_id, c.tool, NOT_IN_THIS_RUN) if c.state == "planned" and c.check_id not in selected else c
+        for c in checks
+    ]
 
 
 def plan_all(surfaces: list[SurfaceInput], options: Options, index: IndexInfo | None = None) -> dict[str, list[PlannedCheck]]:

@@ -92,6 +92,8 @@ COPY patch_hexstrike.py /tmp/patch_hexstrike.py
 COPY runner_auth.py /tmp/runner_auth.py
 # REQ-PIPE-007: the per-request time budget rule, imported the same way.
 COPY runner_budget.py /tmp/runner_budget.py
+# REQ-TESTACCT-012: the log masking (declared secrets, credential-bearing headers), imported the same way.
+COPY runner_logmask.py /tmp/runner_logmask.py
 # GitHub issue #43: HexStrike's own requirements.txt is loose version ranges,
 # so a plain `pip install -r requirements.txt` picks whatever PyPI serves on
 # build day. The vendored lock file pins every package (and every transitive
@@ -104,7 +106,8 @@ RUN git clone https://github.com/0x4m4/hexstrike-ai.git . \
   && git checkout --detach "${HEXSTRIKE_SHA}" \
   && cp /tmp/runner_auth.py /opt/hexstrike/runner_auth.py \
   && cp /tmp/runner_budget.py /opt/hexstrike/runner_budget.py \
-  && rm /tmp/runner_auth.py /tmp/runner_budget.py \
+  && cp /tmp/runner_logmask.py /opt/hexstrike/runner_logmask.py \
+  && rm /tmp/runner_auth.py /tmp/runner_budget.py /tmp/runner_logmask.py \
   && sed -i '/^pwntools/d; /^angr/d' requirements.txt \
   && sed -i "s#logging.FileHandler('hexstrike.log')#logging.FileHandler('/tmp/hexstrike.log')#" hexstrike_server.py \
   && python3 /tmp/patch_hexstrike.py hexstrike_server.py \
@@ -197,6 +200,11 @@ RUN set -e; \
     else \
       setcap cap_net_raw+eip /usr/bin/nmap; \
     fi
+
+# REQ-EGRESS-010 (GitHub #81): loopback forwarder that adds the run's proxy credentials for the tools that cannot send
+# them themselves (testssl, the screenshot browser). Standard library only; a small layer of its own, after the large ones.
+COPY egress_forwarder.py /opt/asm/egress_forwarder.py
+RUN chmod a+rx /opt/asm/egress_forwarder.py && python3 -c "import ast,sys; ast.parse(open('/opt/asm/egress_forwarder.py').read())"
 
 USER runner
 EXPOSE 8888

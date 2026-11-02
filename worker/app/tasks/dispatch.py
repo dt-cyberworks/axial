@@ -20,7 +20,7 @@ import logging
 import time
 import uuid as _uuid
 
-from app import command_redaction
+from app import command_redaction, session_state, test_accounts
 from app.control_plane_client import client
 from app.ffuf_parse import is_catch_all, parse_ffuf_json
 from app.httpx_parse import parse_httpx_json
@@ -73,12 +73,18 @@ TOOL_CATEGORY = {
 class Observation:
     """Ergebnis eines Dispatch-Laufs, knapp fuer das LLM aufbereitet."""
 
-    def __init__(self, tool: str, target: str, summary: str, services: int = 0, findings: int = 0):
+    def __init__(self, tool: str, target: str, summary: str, services: int = 0, findings: int = 0,
+                 set_cookies: dict[str, str] | None = None):
         self.tool = tool
         self.target = target
         self.summary = summary
         self.services = services
         self.findings = findings
+        # name -> value of the Set-Cookie headers of the RAW response, for the run-scoped session jar only (REQ-AGENT-022/023,
+        # REQ-TESTACCT-012). The text above is the REDACTED response (REQ-AUDIT-007: a cookie's value is dropped before the model, the
+        # audit trail or anything durable sees it), so the session cannot be read from it. None = not extracted (not an http_request).
+        # In memory, never serialized: as_text() does not carry it.
+        self.set_cookies = set_cookies
 
     def as_text(self) -> str:
         return f"[{self.tool} {self.target}] {self.summary}"
@@ -141,8 +147,28 @@ def _run(
     agent's own summary reported the target clean having never actually
     tested it - the exact failure mode REQ-SCAN-014 exists to catch, just not
     wired into this dispatch path."""
+    # REQ-TESTACCT-005: the one place where a test account's value is put back - for this request only, at the last step before it goes
+    # to the runner. A placeholder that cannot be resolved (the run ended, the account is gone) is NEVER sent as the value.
+    log_mask: list[str] = []
+    try:
+        if test_accounts.has_placeholder(args):
+            # Taken BEFORE the value is put back: the runner masks these forms in its own log (REQ-TESTACCT-012).
+            log_mask = test_accounts.mask_forms(args, run_key=scan_run_id)
+            args = test_accounts.resolve(args, run_key=scan_run_id)
+        # The agent merges its session jar into the headers in the clear (the gateway must see the exact request); the live session is
+        # masked in the runner's log like a password (REQ-TESTACCT-014).
+        log_mask += [v for v in test_accounts.session_values_in(args, scan_run_id) if v not in log_mask]
+    except test_accounts.UnresolvedPlaceholder as exc:
+        result = tool_execution.failed_result("credential_unresolvable", exc)
+        tool_execution.record(
+            engagement_id, scan_run_id=scan_run_id, tool=tool, phase="agent",
+            authorized_target=target, resolved_target=ip, port_range=port_range, result=result, discovered_services=0,
+        )
+        return result
     try:
         extra = {} if budget_s is None else {"budget_s": budget_s}
+        if log_mask:
+            extra["log_mask"] = log_mask
         result = tool_runner.run(tool, target, args, scan_run_id=scan_run_id, engagement_id=engagement_id, **extra)
     except Exception as exc:  # noqa: BLE001 - Runner-Ausfall darf den Agent nicht abreissen
         logger.warning("dispatch %s on %s failed: %s", tool, target, exc)
@@ -300,7 +326,7 @@ def _dispatch_testssl(
         client.add_finding(
             engagement_id, asset_id=asset_id, category="misconfig",
             title=f["title"], confidence="validated", severity_override=f["severity"],
-            evidence={"check": f["id"], "tool": "testssl"},
+            evidence={"check": f["id"], "tool": "testssl", "tested_name": target, **({"cve": f["cve"]} if f.get("cve") else {})},
             exposure_factor=1.0, business_factor=0.4,
         )
     if issues:
@@ -385,7 +411,8 @@ def _dispatch_http_request(
     if not body.strip():
         return Observation("http_request", target, f"{method} {path} -> no response / error")
     # Die Rohantwort ist die Beobachtung (bereits auf 16 KB gedeckelt im Runner).
-    return Observation("http_request", target, f"{method} {path} ->\n{body}")
+    return Observation("http_request", target, f"{method} {path} ->\n{body}",
+                       set_cookies=session_state.extract_cookies(result.get("stdout") or ""))
 
 
 def _dispatch_ffuf(
@@ -594,7 +621,7 @@ def _dispatch_activemq_openwire_probe(
 
     client.add_service(engagement_id, asset_id=asset_id, port=port, protocol="tcp", product="activemq")
     client.add_finding(
-        engagement_id, asset_id=asset_id, category="rce",
+        engagement_id, asset_id=asset_id, category="cve",
         title="Apache ActiveMQ OpenWire Deserialization RCE (CVE-2023-46604) - confirmed via callback",
         cve_ids=["CVE-2023-46604"], cvss_base=9.8, is_kev=True,
         confidence="validated", severity_override="critical",

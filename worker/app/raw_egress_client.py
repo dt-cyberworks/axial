@@ -15,11 +15,34 @@ RAW_EGRESS_QUEUE_POLL_SECONDS = max(0.2, min(float(os.environ.get("RAW_EGRESS_QU
 # gateway's reservation/lease API - mirrors RUNNER_API_TOKEN's own header
 # pattern below (worker/app/tool_runner_client.py).
 RAW_EGRESS_API_TOKEN = os.environ.get("RAW_EGRESS_API_TOKEN", "raw-egress-api-change-me-in-dev")
+# REQ-RAWLEASE-006: how long one answer about the proxy's reachability is reused. The gateway re-checks every second
+# while the proxy is unreachable (every few seconds otherwise), so a longer reuse would only delay the recovery.
+PROXY_STATE_TTL_SECONDS = 2.0
 
 class RawEgressGatewayClient:
     def __init__(self, base_url: str = RAW_EGRESS_GATEWAY_URL, timeout: float = 5.0):
         default_headers = {"X-ASM-RawEgress-Token": RAW_EGRESS_API_TOKEN} if RAW_EGRESS_API_TOKEN else None
         self._client = httpx.Client(base_url=base_url, timeout=timeout, headers=default_headers)
+        self._proxy_state: tuple[float, bool | None] | None = None
+
+    def proxy_reachable(self) -> bool | None:
+        """Whether the runner's namespace can open a connection to the egress proxy, as the gateway sees it
+        (REQ-RAWLEASE-006). None when that is not known - the gateway did not answer, or it predates the field - which
+        callers must NOT read as "down": only an explicit False is."""
+        now = time.monotonic()
+        cached = self._proxy_state
+        if cached is not None and now - cached[0] < PROXY_STATE_TTL_SECONDS:
+            return cached[1]
+        value: bool | None
+        try:
+            response = self._client.get("/health")
+            response.raise_for_status()
+            reachable = ((response.json().get("egress") or {}).get("proxy") or {}).get("reachable")
+            value = reachable if isinstance(reachable, bool) else None
+        except Exception:  # noqa: BLE001
+            value = None
+        self._proxy_state = (time.monotonic(), value)
+        return value
 
     def available(self) -> bool:
         try:

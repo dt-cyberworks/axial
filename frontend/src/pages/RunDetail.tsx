@@ -5,6 +5,7 @@ import { Link, useParams } from "react-router-dom";
 import { api, isNotFound, type AgentStep, type AssetReview } from "../api/client";
 import NotFound from "./NotFound";
 import { severityClass } from "../components/FindingsSection";
+import InventoryDiffPanel from "../components/InventoryDiffPanel";
 import ReadOnlyNotice from "../components/ReadOnlyNotice";
 import RunActivity from "../components/RunActivity";
 import ScanPlanView from "../components/ScanPlanView";
@@ -135,7 +136,7 @@ export default function RunDetail() {
             {run?.trigger ? ` · started ${run.trigger === "scheduled" ? "by schedule" : `by ${run.initiated_by ?? "a person"}`}` : ""}
             {run?.supervision ? ` · ${run.supervision.replace("_", "-")}` : ""}
             {run?.scope_hosts && run.scope_hosts.length > 0 ? ` · limited to ${run.scope_hosts.join(", ")}` : ""}
-            {run?.state_reason ? ` · ${run.state_reason}` : ""}
+            {run?.state_reason ? ` · ${run.state_reason === "approval_wait" ? "one action waits for your decision" : run.state_reason}` : ""}
           </p>
         </div>
         <div className="header-actions">
@@ -215,9 +216,10 @@ export default function RunDetail() {
         </section>
       )}
 
-      {tab === "plan" && <ScanPlanView plan={plan} />}
+      {tab === "plan" && <ScanPlanView plan={plan} engagementId={id} runId={runId} canManage={!!engagement?.can_manage} />}
 
       {tab === "diff" && (
+        <>
         <section className="table-panel">
           <div className="panel-heading"><div><h2>Changes vs previous run</h2>
             <p>{diff?.has_baseline
@@ -242,6 +244,9 @@ export default function RunDetail() {
             </div>
           )}
         </section>
+        {/* REQ-DIFF-001: the same comparison for hosts and ports, against the same previous run. */}
+        <InventoryDiffPanel inventory={diff?.inventory} engagementId={id!} />
+        </>
       )}
 
       {tab === "agent" && (

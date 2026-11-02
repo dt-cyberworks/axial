@@ -27,7 +27,7 @@ from app.scan_lifecycle import ScanRunAlreadyActive, reap_stale_runs, start_scan
 
 MODES = ("monitoring", "assessment")
 SUPERVISIONS = ("attended", "semi_attended", "unattended")
-TRIGGERS = ("manual", "scheduled")
+TRIGGERS = ("manual", "scheduled", "baseline")
 SCAN_PROFILES = ("passive", "light", "standard", "thorough")
 NEW_ASSET_POLICIES = ("auto", "hold")
 
@@ -51,10 +51,16 @@ def is_monitoring(eng: Engagement) -> bool:
     return eng.operating_mode == "monitoring"
 
 
-def resolve_supervision(eng: Engagement, trigger: str, requested: str | None) -> str:
+def resolve_supervision(eng: Engagement, trigger: str, requested: str | None, restricted: bool = False) -> str:
     """REQ-MODE-002: a monitoring run is always unattended; an assessment run is
-    attended unless the person starting it says it is semi-attended."""
+    attended unless the person starting it says it is semi-attended.
+
+    REQ-RETEST-008, the one exception: a person can start a run of a monitor that is restricted to what is still
+    open (a retest, or the open items) and say it is attended. For any other run the request is ignored, as before:
+    a full run of a monitor stays unattended, and the scheduler never asks for anything else."""
     if is_monitoring(eng):
+        if requested == "attended" and trigger == "manual" and restricted:
+            return "attended"
         return "unattended"
     if trigger == "scheduled":
         raise ScanNotStartable(409, "only a monitoring engagement can run on a schedule")
@@ -76,6 +82,9 @@ def begin_scan(
     scope_hosts: list[str] | None = None,
     retest_finding_id: uuid.UUID | None = None,
     schedule_id: uuid.UUID | None = None,
+    retest_items: list[dict] | None = None,
+    send_requests: list | None = None,
+    confirmed_by: str | None = None,
     enqueue=None,
 ) -> StartedScan:
     """Create the run (race-safe) and queue it for the worker.
@@ -88,15 +97,30 @@ def begin_scan(
     if eng is None:
         raise ScanNotStartable(404, "engagement not found")
 
+    if trigger == "baseline":
+        # REQ-BASE-001: the discovery that opens a monitor's target baseline. Passive only, whatever
+        # the engagement's own depth is, and only for a monitor.
+        if not is_monitoring(eng):
+            raise ScanNotStartable(409, "target discovery belongs to a monitoring engagement")
+        scan_profile = "passive"
+
     reap_stale_runs(db, engagement_id)
     readiness = scan_readiness.evaluate(db, engagement_id)
-    if not readiness.ready:
+    blockers = [
+        b for b in readiness.blockers
+        if not (trigger == "baseline" and b.code == "targets_not_confirmed")
+    ]
+    if blockers:
         raise ScanNotStartable(409, {
             "error": "engagement_not_scan_ready",
-            "blockers": [{"code": b.code, "message": b.message, "action": b.action} for b in readiness.blockers],
+            "blockers": [{"code": b.code, "message": b.message, "action": b.action} for b in blockers],
         })
 
-    resolved_supervision = resolve_supervision(eng, trigger, supervision)
+    restricted = retest_items is not None or bool(send_requests)
+    resolved_supervision = resolve_supervision(eng, trigger, supervision, restricted)
+    if send_requests and resolved_supervision == "unattended":
+        # REQ-RETEST-006: an unattended run never sends a request that changes data.
+        raise ScanNotStartable(422, "a request that changes data is sent only in an attended run")
     profile = scan_profile or eng.scan_profile or "standard"
     if profile not in SCAN_PROFILES:
         raise ScanNotStartable(422, f"scan depth must be one of {', '.join(SCAN_PROFILES)}")
@@ -107,7 +131,7 @@ def begin_scan(
         run = start_scan_run(
             db, engagement_id, scan_profile=profile, trigger=trigger,
             initiated_by=initiated_by, supervision=resolved_supervision, scope_hosts=scope_hosts,
-            retest_finding_id=retest_finding_id, schedule_id=schedule_id,
+            retest_finding_id=retest_finding_id, schedule_id=schedule_id, retest_items=retest_items,
         )
     except ScanRunAlreadyActive:
         raise ScanNotStartable(409, "engagement already has an active scan_run") from None
@@ -123,8 +147,14 @@ def begin_scan(
             "budget_tool_calls_max": run.budget_tool_calls_max,
             "scope_hosts": scope_hosts, "retest_finding_id": str(retest_finding_id) if retest_finding_id else None,
             "schedule_id": str(schedule_id) if schedule_id else None,
+            "retest_items": retest_items, "send_requests": [str(r.id) for r in send_requests or []],
         },
     )
+    if send_requests:
+        # REQ-RETEST-006: 'Send this request' is the approval, bound to the exact stored call for this run.
+        from app import open_items  # lazy: open_items imports monitoring, which imports this module
+
+        open_items.confirm_requests(db, eng, run, list(send_requests), confirmed_by or initiated_by)
     if eng.schedule_every_days is not None:
         # REQ-MON-001: any run, whoever started it, restarts the count of the interval
         # (done here, not in scheduling.py, which imports this module).

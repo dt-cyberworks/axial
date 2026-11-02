@@ -165,3 +165,31 @@ def test_recording_without_a_scan_run_id_is_a_no_op(rec):
     """Some call sites have no run context; they must not crash or pollute."""
     _record("nmap", _fail(), None, run=None)
     assert tool_execution.coverage_summary(None) == {}
+
+
+# ---- GitHub #59 / REQ-EXPLAIN-004: a skip is shown as a skip, but coverage is judged on success ------------
+
+
+def test_a_gateway_refusal_is_a_skip_in_the_recorded_outcome():
+    assert tool_execution.outcome_of(tool_execution.failed_result("gateway_denied:no_tool_grant")) == "skipped:gateway_denied:no_tool_grant"
+    assert tool_execution.outcome_of(tool_execution.failed_result("materialized_ip_missing")) == "skipped:materialized_ip_missing"
+    # [negative] a real failure stays a failure
+    assert tool_execution.outcome_of(tool_execution.failed_result("nonzero_exit")) == "failed"
+
+
+def test_negative_a_run_whose_only_nmap_and_httpx_were_skipped_for_lack_of_an_address_is_still_degraded(rec):
+    """Showing an unresolvable name as a calm skip must not make the run read as clean: nothing was
+    scanned, and the run-level warning still says so."""
+    rec("nmap", _fail("materialized_ip_missing"))
+    rec("httpx", _fail("materialized_ip_missing"))
+    warning = pipeline._coverage_warning(RUN)
+    assert warning is not None and warning.startswith("coverage_degraded:")
+    assert "nmap=materialized_ip_missing" in warning and "httpx=materialized_ip_missing" in warning
+
+
+def test_one_resolvable_name_alongside_an_unresolvable_one_is_not_degraded(rec):
+    rec("nmap", _fail("materialized_ip_missing"))
+    rec("nmap", _ok())
+    rec("httpx", _fail("materialized_ip_missing"))
+    rec("httpx", _ok())
+    assert pipeline._coverage_warning(RUN) is None

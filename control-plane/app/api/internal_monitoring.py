@@ -1,7 +1,7 @@
 """Worker-facing endpoints of the monitoring mode (internal token only).
 
 The worker never writes the database; everything it learns about a run's mode,
-the hold policy, suggestions, withdrawn approvals and alert delivery goes
+the hold policy, withdrawn approvals (kept as held-back requests) and alert delivery goes
 through here, where the control plane decides.
 """
 
@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import monitoring, scheduling
+from app import monitoring, open_items, scheduling
 from app.api.internal import require_internal_token
 from app.db.base import get_db
 from app.gateway.audit import append_audit_log
@@ -49,20 +49,6 @@ def evaluate_hold(scan_run_id: uuid.UUID, body: HoldIn, db: Session = Depends(ge
     return monitoring.evaluate_hold(db, run, [c.model_dump() for c in body.candidates])
 
 
-class SuggestionIn(BaseModel):
-    tool: str
-    target: str
-    rationale: str = ""
-
-
-@router.post("/engagements/{engagement_id}/suggestions", status_code=201)
-def add_suggestion(engagement_id: uuid.UUID, body: SuggestionIn, db: Session = Depends(get_db)):
-    """REQ-MODE-007: a proposal an unattended run could not get a decision for."""
-    item = monitoring.add_suggestion(db, engagement_id, body.tool[:60], body.target[:253], body.rationale)
-    db.commit()
-    return {"created": item is not None}
-
-
 class WithdrawIn(BaseModel):
     reason: str = "unattended_run"
 
@@ -84,7 +70,12 @@ def withdraw_approval(approval_id: uuid.UUID, body: WithdrawIn, db: Session = De
         db, engagement_id=ap.engagement_id, actor="worker", action="approval_withdrawn", decision="DENY",
         reason=body.reason, payload={"approval_id": str(ap.id), "scan_run_id": (ap.tool_call or {}).get("scan_run_id")},
     )
-    return {"id": str(ap.id), "state": ap.state, "withdrawn": True}
+    held_back = None
+    if body.reason == "unattended_run":
+        # REQ-RETEST-004: keep the exact call, so that a person can look at it and send it later.
+        row = open_items.park_request(db, ap)
+        held_back = str(row.id) if row is not None else None
+    return {"id": str(ap.id), "state": ap.state, "withdrawn": True, "open_request_id": held_back}
 
 
 @router.post("/monitoring/housekeeping")

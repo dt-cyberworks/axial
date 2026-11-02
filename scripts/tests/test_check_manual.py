@@ -234,6 +234,57 @@ def test_the_real_gateway_reasons_are_all_found():
             "asset_review_pending", "not_a_tls_service"} <= found
 
 
+# REQ-EXPLAIN-001 (GitHub #59): the list of codes is derived from the console's own map and from what the
+# worker records, not kept by hand.
+
+CONSOLE_MAP = (
+    "const REASON_COPY: Record<string, string> = {\n"
+    '  explained_in_console: "It happened. Do this.",\n'
+    '  only_in_the_map: "Also happened.",\n'
+    "};\n"
+)
+
+
+def console_tree(tmp_path, documented: str, worker_source: str = ""):
+    write(tmp_path, cm.CONSOLE_REASON_MAP, CONSOLE_MAP)
+    write(tmp_path, "worker/app/tasks/x.py", worker_source)
+    write(tmp_path, cm.TROUBLESHOOTING, PAGE.format(title="T", body=documented))
+    return tmp_path
+
+
+def test_negative_a_code_added_to_the_console_map_without_a_manual_entry_fails(tmp_path):
+    console_tree(tmp_path, "`explained_in_console`")
+    problems = cm.check_codes(tmp_path)
+    assert any("only_in_the_map" in p for p in problems)
+    assert not any("explained_in_console" in p for p in problems)
+
+
+def test_the_console_map_is_read_as_the_source_of_codes(tmp_path):
+    console_tree(tmp_path, "")
+    assert {"explained_in_console", "only_in_the_map"} <= set(cm._source_codes(tmp_path))
+
+
+def test_negative_a_worker_code_without_a_console_text_fails(tmp_path):
+    console_tree(tmp_path, "`explained_in_console` `only_in_the_map` `brand_new_failure`",
+                 worker_source='r = tool_execution.failed_result("brand_new_failure")\nr = tool_execution.failed_result("explained_in_console")\n')
+    problems = cm.check_console_texts(tmp_path)
+    assert any("brand_new_failure" in p for p in problems)
+    assert not any("explained_in_console" in p for p in problems)
+
+
+def test_worker_codes_of_every_recording_form_are_found(tmp_path):
+    console_tree(tmp_path, "", worker_source=(
+        'a = failed_result("one_code")\nb = _failed("two_code", str(e))\nc = skipped_result("three_code")\n'
+        'd = {"error_reason": "four_code"}\ne = dict(error_reason="five_code")\n'
+    ))
+    assert {"one_code", "two_code", "three_code", "four_code", "five_code"} <= cm._worker_codes(tmp_path)
+
+
+def test_the_real_console_has_a_text_for_everything_the_system_emits():
+    assert cm.check_console_texts(ROOT) == []
+    assert len(cm.console_reason_codes(ROOT)) > 100
+
+
 # --- images ---------------------------------------------------------------------------------------
 
 def test_negative_an_image_that_is_not_there_is_reported(tree):

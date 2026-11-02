@@ -19,6 +19,7 @@
 | **Automatic runs** | a monitoring engagement started by itself every set number of days (1 to 90), counted from its last run. See [Monitor an attack surface](guides/monitor-an-attack-surface.md#automatic-runs) |
 | **Backup codes** | ten one-time codes shown once at enrolment; the way in if the authenticator is lost |
 | **Baseline** | the previous run a run is compared with. The first run has none |
+| **Target baseline** | the hosts a monitor's owner chose to monitor after the passive discovery that activation starts. Nothing is scanned until it is confirmed; see [Choose the targets](guides/monitor-an-attack-surface.md#choose-the-targets) |
 | **Budget** | a limit on a run: tool calls (200 by default, one global setting; a run that uses it up is *reduced coverage*), agent iterations (50), and a time limit per check (30 minutes at most) |
 | **Campaign** | one engagement's own settings, as opposed to the installation-wide defaults. See *override* |
 | **Capability** | a function of the scanner (for example vulnerability templates) that a monitoring engagement switches on or off once, for every run |
@@ -41,10 +42,14 @@
 | **Finding** | one problem on one target, with evidence, a score and a status |
 | **Force on / Force off** | a campaign override for one tool. It cannot create a grant |
 | **Grant (tool grant)** | the authorisation for a category of tools on an engagement. See [Control which tools run](guides/control-which-tools-run.md) |
+| **Test deeper** | the action on a monitor that creates a draft assessment from it, filled in with the hosts you pick and what the monitor found, and authorizing nothing. See [Test a monitored target in depth](guides/test-a-monitored-target-in-depth.md) |
+| **Held-back request** | a request a monitor could not make because it needed a person (for example a POST). It is kept whole, listed as **Held back for you** and on **Not done yet**, and sent only if you choose it, one request at a time. See [Retest and run only what is open](guides/retest-and-open-items.md) |
 | **Held host** | a newly found host that a monitoring engagement inventories but does not test until you release it |
-| **Inbox** | the list of everything that needs a person: held hosts, suggestions, runs that need a decision or were degraded, a quiet monitor. See [Inbox](reference/inbox.md) |
+| **Open item** | something the latest runs left unfinished that you can run again: a failed, partial or unreachable check, or a held-back request. Listed on **Not done yet** |
+| **Inbox** | the list of everything that needs a person: held hosts, held-back requests, runs that need a decision or were degraded, a quiet monitor. See [Inbox](reference/inbox.md) |
 | **Inferred** | see *confidence* |
 | **KEV** | the public list of vulnerabilities known to be exploited in the wild; a listed CVE is scored critical |
+| **Test account** | a dedicated account the owner enters into an engagement and assigns to specific hosts so the Vector Agent can log in; bound to those hosts only, stored encrypted, erased when the engagement ends |
 | **Lens Agent** | the AI model that explains a finding in plain language |
 | **MFA / TOTP** | two-factor authentication with a time-based code from an authenticator app |
 | **Monitoring** | an engagement that runs without anyone watching and tells you what changed. Compare *assessment*. See [Monitor an attack surface](guides/monitor-an-attack-surface.md) |

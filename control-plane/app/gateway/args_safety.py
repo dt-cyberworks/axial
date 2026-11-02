@@ -220,6 +220,12 @@ def _default_cred_check_args_safe(args: dict) -> bool:
     return max_attempts <= 3 and wordlist == "default"
 
 
+# REQ-EGRESS-008 (GitHub #81): headers that carry the platform's own identity towards the egress proxy. A caller (the
+# agent, an operator) never sets them: an identity that a caller can choose is no identity. The worker's curl builder
+# drops them as well (tool_runner_client._PLATFORM_HEADERS), so a call that bypassed this rule still cannot send one.
+PLATFORM_HEADERS = frozenset({"proxy-authorization", "x-asm-engagement-id"})
+
+
 def _http_request_args_safe(args: dict) -> bool:
     """STRUKTURELLE Gueltigkeit eines http_request (REQ-HTTP-002): erlaubte
     Methode, injektions-/groessensichere Header/Pfad/Body. Gilt fuer LESENDE
@@ -241,6 +247,8 @@ def _http_request_args_safe(args: dict) -> bool:
         return False
     for name, value in headers.items():
         if not isinstance(name, str) or not _HEADER_NAME_RE.match(name):
+            return False
+        if name.strip().lower() in PLATFORM_HEADERS:
             return False
         if not isinstance(value, str) or len(value) > 1024 or "\n" in value or "\r" in value:
             return False

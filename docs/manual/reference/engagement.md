@@ -9,7 +9,7 @@
 
 ![The engagement page: status band, readiness, Start run and the three tabs](../img/engagement-findings.png)
 
-The hub of one engagement. At the top: the title, links to **Edit**, **Audit** and the **Authorization PDF**, and a status band. Below it the readiness panel with the **Start run** button, then three tabs.
+The hub of one engagement. At the top: the title, links to **Edit**, **Audit** and the **Authorization PDF**, and a status band. Below it the readiness panel with the **Start run** button, then the tabs: **Findings**, **Assets**, **Test accounts** (see [Test behind a login](../guides/test-behind-a-login.md)) and **Runs & reports**.
 
 **On someone else's engagement the page is read-only.** Everyone can read every engagement, but only its owner and administrators can change it. When you are neither, a notice at the top says whose it is (name and email), and the controls that change it are not offered: **Edit**, activation, **Attest authorization**, tool grants, **Start run**, **Generate report**, triage and the Lens request in the findings, and stopping a run. The tabs, the filters, the downloads (**Authorization PDF**, **Download PDF**) and the **Audit** log all work. See [Roles and ownership](../concepts.md#roles-and-ownership).
 
@@ -24,6 +24,9 @@ The header says whether the engagement is a *monitoring* engagement (unattended)
 | **Pause engagement** | stops the active run and makes the gateway deny every call until **Resume engagement** (only inside the authorized window) |
 | **Close engagement** | ends a finished engagement; refused while a run is active; it cannot be resumed |
 | **Revoke authorization** | the kill switch: stops everything now; final |
+| **Test deeper** (a monitor that is active or paused) | creates a draft assessment from the monitor, with the hosts you pick and what the monitor found as its starting point; authorizes nothing and changes nothing on the monitor. See [Test a monitored target in depth](../guides/test-a-monitored-target-in-depth.md) |
+
+A monitor's page also lists **Assessments from this monitor**; an assessment that was started from one says **Follows monitoring engagement** under its title, with a link.
 
 A test engagement offers, next to **Start run**, a choice of *I will watch (decide live)* or *Notify me when you need me* (a semi-attended run, see [Approve or deny a tool call](../guides/approve-or-deny-a-tool-call.md#when-you-are-not-there)). A monitoring engagement offers **Run now**, an **Automatic runs** panel (the interval in days, the next run, and why a due run waited), shows **What changed** above the tabs, and has two more tabs, **Changes** and **Capabilities & alerts**; see [Monitor an attack surface](../guides/monitor-an-attack-surface.md). The runs table shows who started each run (a person, or a schedule) and how supervised it was.
 
@@ -68,6 +71,12 @@ The selected tab is part of the page address, so a link, a reload or the browser
 
 - The runs table, newest first: run number, **Started**, **Finished**, **Duration**, **Phase**, **State** and **Tool budget** (tool calls used of the allowed number, 200 by default). *Stopping…* appears while a stop is being applied. Click a row to open [Run detail](run-detail.md). A run whose worker crashed or hung stops sending a heartbeat and is aborted automatically (reason `reaped_stale_heartbeat`), so it can never block a new scan permanently. The reason a run stopped is shown with it; see [Troubleshooting](../troubleshooting.md#why-a-run-stopped).
 - **Reports.** **Generate report** creates the customer-facing PDF; the list shows when it was generated, which run it covers, its status and size, and **Download PDF**. See [Reports](../guides/reports.md).
+
+## Not done yet (`/engagements/:id/open-items`)
+
+Opens from **Not done yet (n)** in the header of the engagement, which appears when n is more than zero, from a **Held back for you** item in the inbox, and is where you run only what is open instead of the whole engagement again. The page lists the checks that failed, stopped early, were skipped for a reason you can change or never ran, and the requests a monitor held back. Under the list, **Review before you run** has the groups **Runs without asking (read-only)** and **Needs your confirmation - this sends data to the target**, a choice per item (**Do not send** or **Send this request**, **Do not run** or **Run this check**), **Never send this** for a held-back request, **Too old to send** for the ones past the limit, and a button that names what it will start. Only the engagement's owner or an administrator can run, send or reject; everyone can read. The job from start to finish is in [Retest and run only what is open](../guides/retest-and-open-items.md).
+
+The same step opens as a popup from **Retest this finding** on a finding and from **Run this step again** on the Plan tab of a run.
 
 ## Edit engagement (`/engagements/:id/edit`)
 

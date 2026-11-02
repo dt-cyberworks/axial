@@ -20,6 +20,14 @@ export function parseFindingStatus(value: string | null): FindingStatus {
   return STATUS_TABS.some((tab) => tab.status === value) ? (value as FindingStatus) : "open";
 }
 
+/**
+ * REQ-TRIAGE-005: the OTHER findings in the same list that carry exactly the same title. Used
+ * to select them together; the decision is still made for each of them, not as a rule.
+ */
+export function sameTitleIds(findings: Finding[], finding: Finding): string[] {
+  return findings.filter((other) => other.id !== finding.id && other.title === finding.title).map((other) => other.id);
+}
+
 export function severityClass(severity: string | null | undefined) {
   return severity ? `sev-${severity}` : "sev-info";
 }
@@ -36,7 +44,17 @@ export function serviceLabel(finding: Finding) {
 }
 
 export function evidencePairs(finding: Finding) {
-  return Object.entries(finding.evidence ?? {}).filter(([key, value]) => key !== "lens_agent" && value !== null && value !== undefined && value !== "");
+  // "rating" is the platform's own note on how the severity was decided (REQ-SCORE-005); it has its own line, not a raw object here.
+  return Object.entries(finding.evidence ?? {}).filter(([key, value]) => key !== "lens_agent" && key !== "rating" && value !== null && value !== undefined && value !== "");
+}
+
+/** REQ-SCORE-005: why the finding is rated as it is, when the platform rated it by class instead of copying a tool's label. */
+export function ratingNote(finding: Finding): { rating_class: string; tool_label: string | null; why: string } | null {
+  const value = finding.evidence?.["rating"];
+  if (typeof value !== "object" || value === null) return null;
+  const note = value as Record<string, unknown>;
+  if (typeof note.why !== "string" || !note.why) return null;
+  return { rating_class: String(note.class ?? ""), tool_label: typeof note.tool_label === "string" ? note.tool_label : null, why: note.why };
 }
 function evidenceText(finding: Finding, key: string) {
   const value = finding.evidence?.[key];
@@ -46,7 +64,14 @@ function evidenceList(finding: Finding, key: string) {
   const value = finding.evidence?.[key];
   return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
 }
-const TOOL_LABELS: Record<string, string> = { vector_agent: "Vector Agent" };
+const TOOL_LABELS: Record<string, string> = { vector_agent: "Vector Agent", nvd_correlation: "Live CVE correlation (NVD)" };
+
+/** REQ-CORR-009: NVD lists no version limit for this CVE; the console says so instead of presenting it as a precise match. */
+export function unboundedCveNote(finding: Finding): string | null {
+  if (finding.evidence?.affected_versions !== "unbounded") return null;
+  const note = finding.evidence?.note;
+  return typeof note === "string" && note ? note : "NVD lists no affected-version limit for this CVE, so every version of the product matches.";
+}
 export function evidenceTool(finding: Finding) {
   const tool = evidenceText(finding, "tool");
   return TOOL_LABELS[tool] || tool || "unknown tool";
@@ -68,8 +93,26 @@ export function observedLocationLabel(finding: Finding) {
   if (!location) return serviceLabel(finding);
   return location === finding.asset_value ? serviceLabel(finding) : `Observed at ${location}`;
 }
-export function formatEvidenceValue(value: unknown) {
-  if (Array.isArray(value)) return value.join(", ");
+// REQ-EVIDENCE-001: one line for one entry of a list. `Array.join` turns an object into "[object Object]",
+// so objects are never passed to it. A content-discovery hit reads "status  url  (size)"; any other object is one
+// compact JSON line, so nothing an operator needs to see is replaced by a placeholder.
+function evidenceLine(entry: unknown, key?: string): string {
+  if (entry === null || entry === undefined) return "";
+  if (typeof entry !== "object") return String(entry);
+  const hit = entry as { url?: unknown; status?: unknown; length?: unknown };
+  if (key === "hits" && typeof hit.url === "string") {
+    const size = typeof hit.length === "number" ? `  (${hit.length} bytes)` : "";
+    return `${hit.status ?? "?"}  ${hit.url}${size}`;
+  }
+  return JSON.stringify(entry);
+}
+
+export function formatEvidenceValue(value: unknown, key?: string): string {
+  if (Array.isArray(value)) {
+    const lines = value.map((entry) => evidenceLine(entry, key)).filter((line) => line !== "");
+    // A list of plain words stays on one line; a list of objects gets one line per entry.
+    return value.some((entry) => typeof entry === "object" && entry !== null) ? lines.join("\n") : lines.join(", ");
+  }
   if (typeof value === "object" && value !== null) return JSON.stringify(value);
   return String(value);
 }

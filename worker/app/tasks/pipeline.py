@@ -15,7 +15,7 @@ from app import tool_execution
 from app.cancel_probe import CancelProbe, CancellationStatusUnavailable
 from app.celery_app import celery_app
 from app.control_plane_client import ScanRunNotClaimable, ScanRunSuperseded, client
-from app.tasks import agent, asset_hold, asset_review, correlate, discovery, fingerprint, report, score
+from app.tasks import agent, asset_hold, asset_review, correlate, discovery, fingerprint, open_requests, report, score
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,18 @@ def _plain(value):
     return json.loads(json.dumps(value, default=str))
 
 
+def _known_assets(engagement_id: str) -> list[dict]:
+    """REQ-RETEST-002: what a restricted run looks at - the in-scope assets already known, not a new discovery."""
+    return [
+        {"value": a["value"], "asset_id": str(a["id"]), "asset_type": a.get("asset_type") or "domain"}
+        for a in client.list_discovered_assets(uuid.UUID(engagement_id), in_scope=True)
+    ]
+
+
+def _wants_correlation(retest_items: list[dict]) -> bool:
+    return any(item.get("check") == "correlate" for item in retest_items)
+
+
 def _combine_reasons(*reasons: str | None) -> str | None:
     present = [r for r in reasons if r]
     return "; ".join(present) if present else None
@@ -127,6 +139,10 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
 
     cancel_probe = CancelProbe.for_run(scan_run_id)
     phase = PHASES[start]  # the phase being worked on, for the failure cause
+    # REQ-RETEST-002: None is a full run. A list is a restricted run: it uses the assets already known, runs only
+    # the selected checks, does not run the Vector Agent, and sends the requests a person confirmed.
+    retest_items = client.run_info(scan_run_id).get("retest_items")
+    restricted = retest_items is not None
 
     def _stopped() -> bool:
         """Kooperativer Stopp (REQ-RUN-001): an jeder Phasengrenze geprueft.
@@ -150,7 +166,7 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
                 return _aborted()
             # REQ-CIDRDISC-001: discovery includes an active, run-bound step
             # (the ip/cidr host-discovery sweep), so it needs the scan_run_id.
-            discovered = discovery.run(engagement_id, scan_run_id=str(scan_run_id))
+            discovered = _known_assets(engagement_id) if restricted else discovery.run(engagement_id, scan_run_id=str(scan_run_id))
             # REQ-GRAPH-001: (re)materialize the attack-surface graph at each
             # phase boundary. Best effort - never fails the scan.
             client.materialize_graph(uuid.UUID(engagement_id))
@@ -162,6 +178,9 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
             phase = "fingerprint"
             if _stopped():
                 return _aborted()
+            if not review_done and restricted:
+                review_done = True  # a person chose these hosts; there is no new candidate list to review
+                client.update_scan_run(scan_run_id, checkpoint={"discovered": _plain(discovered), "review_done": True})
             if not review_done:
                 # REQ-ASSETREVIEW-002/006: optional pause; opt-in, otherwise a
                 # no-op. An expired/declined review aborts the run fail-closed
@@ -179,8 +198,9 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
             run_info = client.run_info(scan_run_id)
             discovered = asset_hold.limit_to_hosts(discovered, run_info.get("scope_hosts"))
             discovered = asset_hold.apply(str(scan_run_id), discovered)
-            if run_info.get("scan_profile") == "passive":
-                # REQ-MODE-011: a passive run touches no target; nothing is fingerprinted.
+            if run_info.get("scan_profile") == "passive" or (restricted and not retest_items):
+                # REQ-MODE-011: a passive run touches no target; nothing is fingerprinted. A restricted run
+                # with no check to run (it only sends confirmed requests) fingerprints nothing either.
                 services = []
             else:
                 services = fingerprint.run(
@@ -195,17 +215,35 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
             phase = "correlate"
             if _stopped():
                 return _aborted()
-            correlate.run(engagement_id, services=services)
+            if restricted and not _wants_correlation(retest_items):
+                logger.info("scan_run %s is restricted: the correlation is not part of it", scan_run_id)
+            else:
+                correlate.run(engagement_id, services=services)
             # Graph now carries CVE/finding nodes; the agent phase reads it next.
             client.materialize_graph(uuid.UUID(engagement_id))
             client.update_scan_run(scan_run_id, phase="agent")
 
         if start <= 3:
             phase = "agent"
+            agent_skipped = None  # REQ-AGENT-028: the reason code when the agent phase was skipped on purpose
             if _stopped():
                 return _aborted()
-            if client.run_info(scan_run_id).get("scan_profile") == "passive":
+            if restricted:
+                # REQ-RETEST-002/006: no Vector Agent in a restricted run. The requests a person confirmed for this
+                # run are claimed through the gateway and sent, each exactly as it was confirmed.
+                open_requests.send_confirmed(
+                    engagement_id, str(scan_run_id), client.run_info(scan_run_id).get("send_approval_ids") or [],
+                )
+                agent_warning = None  # a request that was not sent is open again; it never degrades the run
+            elif client.run_info(scan_run_id).get("scan_profile") == "passive":
                 # REQ-MODE-011: the agent only proposes active calls; a passive run makes none.
+                agent_warning = None
+            elif not client.run_info(scan_run_id).get("agent_allowed", True):
+                # REQ-AGENT-028: the Vector Agent is off for this engagement (or its program forbids it). The gateway
+                # would refuse every call it proposed, so it is not started and no language-model request is made.
+                # A deliberate setting is not a failure: no warning, no degraded run.
+                agent_skipped = client.run_info(scan_run_id).get("agent_skip_reason") or "ai_testing_not_enabled"
+                agent.record_skipped(engagement_id, str(scan_run_id), agent_skipped)
                 agent_warning = None
             else:
                 # REQ-MODE-016: a run that parked on a decision is picked up here again.
@@ -230,11 +268,16 @@ def run_scan(self, engagement_id: str, scan_run_id: str, budget_max_iterations: 
                     f"agent_incomplete:{agent_context.incomplete_reason}"
                     if agent_context.incomplete_reason else None
                 )
+                if getattr(agent_context, "auth_coverage_lost", False):
+                    # REQ-TESTACCT-008: a login that was rejected, or an account that never got a session, is lost coverage -
+                    # never a clean "no findings".
+                    agent_warning = _combine_reasons(agent_warning, getattr(agent_context, "auth_coverage_note", None))
             # REQ-SCAN-014: surface a gutted detection phase alongside (not
             # instead of) the agent warning - independent failures, both shown.
             run_warning = _combine_reasons(_coverage(), agent_warning)
             client.update_scan_run(scan_run_id, phase="score", state_reason=run_warning,
-                                   checkpoint={"agent_warning": agent_warning, "coverage_warning": _coverage()})
+                                   checkpoint={"agent_warning": agent_warning, "coverage_warning": _coverage(),
+                                               "agent_skipped": agent_skipped})
 
         if start <= 4:
             phase = "score"

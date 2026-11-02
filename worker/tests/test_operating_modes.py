@@ -28,10 +28,9 @@ def _info(monkeypatch, **fields):
 
 class Recorder:
     def __init__(self, monkeypatch, *, states=("approved",), claim=None):
-        self.withdrawn, self.suggestions, self.claimed, self.completed, self.run_states = [], [], [], [], []
+        self.withdrawn, self.claimed, self.completed, self.run_states = [], [], [], []
         self._states = list(states)
         monkeypatch.setattr(client, "withdraw_approval", lambda aid, reason="": self.withdrawn.append((aid, reason)))
-        monkeypatch.setattr(client, "add_suggestion", lambda eid, **k: self.suggestions.append(k))
         monkeypatch.setattr(client, "get_approval", lambda aid: {"state": self._states.pop(0) if len(self._states) > 1 else self._states[0]})
         monkeypatch.setattr(client, "claim_approval", lambda aid: self.claimed.append(aid) or (claim or {"allowed": True}))
         monkeypatch.setattr(client, "complete_approval", lambda aid, **k: self.completed.append((aid, k)) or {})
@@ -54,7 +53,7 @@ def test_an_attended_run_waits_for_the_decision_and_runs_only_the_claimed_call(m
     assert reason == "approved" and resolved["allowed"] is True
     assert rec.claimed == ["ap-1"] and rec.completed and rec.completed[0][1] == {"success": True}
     assert rec.run_states == ["waiting_approval", "running"]
-    assert rec.withdrawn == [] and rec.suggestions == []
+    assert rec.withdrawn == []
 
 
 @pytest.mark.parametrize("state", ["rejected", "expired", "cancelled"])
@@ -83,14 +82,16 @@ def test_nobody_answering_expires_after_the_timeout(monkeypatch):
 
 
 @pytest.mark.parametrize("fields", [{"supervision": "unattended"}, {"operating_mode": "monitoring", "supervision": None}])
-def test_an_unattended_run_never_waits_it_withdraws_and_keeps_a_suggestion(monkeypatch, fields):
+def test_an_unattended_run_never_waits_it_withdraws_and_leaves_the_keeping_to_the_control_plane(monkeypatch, fields):
     _info(monkeypatch, **fields)
     rec = Recorder(monkeypatch, states=("requested",))
     monkeypatch.setattr(approval_wait, "wait_for_decision", lambda *a, **k: pytest.fail("an unattended run must not wait"))
     resolved, reason = approval_wait.resolve_pending(ENG, PENDING, tool="nuclei", target="a.example.com", scan_run_id=RUN)
     assert resolved is None and reason == "approval_unavailable_unattended"
     assert rec.withdrawn == [("ap-1", "unattended_run")]
-    assert rec.suggestions and rec.suggestions[0]["tool"] == "nuclei" and rec.suggestions[0]["target"] == "a.example.com"
+    # REQ-RETEST-004: the worker no longer writes a one-line suggestion; the control plane keeps the whole call when
+    # it closes the approval, so there is nothing for the worker to add.
+    assert not hasattr(client, "add_suggestion")
     assert rec.run_states == [], "the run is never put into waiting_approval"
 
 
@@ -122,9 +123,8 @@ def test_the_agent_does_not_wait_in_an_unattended_run(monkeypatch):
     monkeypatch.setattr(agent.time, "sleep", lambda s: pytest.fail("must not poll"))
     out = agent._await_approval(ENG, "ap-9", "asset-1", "a.example.com", {"method": "POST", "path": "/login"},
                                 None, {"tool": "http_request", "target": "a.example.com"}, ctx)
-    assert out.startswith("NOT EXECUTED") and "suggestion" in out
+    assert out.startswith("NOT EXECUTED") and "kept for a person to decide later" in out
     assert rec.withdrawn == [("ap-9", "unattended_run")]
-    assert rec.suggestions[0]["tool"] == "http_request" and "POST /login" in rec.suggestions[0]["rationale"]
     assert ctx.denied and ctx.denied[0]["reason"] == "approval_unavailable_unattended"
 
 

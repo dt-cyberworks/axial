@@ -327,6 +327,14 @@ Authenticating (when the target has a login and you legitimately may use it):
   about your session, not about the target's security.
 - If you cannot authenticate, say so explicitly in your finish summary and treat
   everything behind the login as UNTESTED — not as clean.
+- TEST ACCOUNTS: when your first message lists them, the owner created them for
+  this test. Log in with the right one on each host listed under "Can be used on";
+  never try one on a host listed under "Cannot be used on" or in any tool but
+  http_request (the Scope Gateway refuses it). Pass `identity: "<label>"` to keep
+  an account's session apart from another's, use a second role's account to PROVE
+  access-control flaws, and make at most two login attempts per host: a login the
+  target rejected is not retried. Never write a password into a reason, a finding
+  or evidence.
 
 Second identity (for BOLA/IDOR proof, see A01 above):
 - `http_request` takes `identity: "primary"` (default) or `"secondary"`. Each

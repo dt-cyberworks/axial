@@ -60,7 +60,7 @@ EXACT = {"tool": "http_request", "target": "example.org",
 def world(monkeypatch):
     c = agent.client
     monkeypatch.setattr(c, "get_llm_config", lambda: {"base_url": "https://x/v1", "api_key": "k", "model": "m", "is_usable": True})
-    monkeypatch.setattr(c, "list_discovered_assets", lambda eid, in_scope=None: [{"id": "asset-1", "value": "example.org", "in_scope": True}])
+    monkeypatch.setattr(c, "list_discovered_assets", lambda eid, in_scope=None, exclude_held=False: [{"id": "asset-1", "value": "example.org", "in_scope": True}])
     monkeypatch.setattr(c, "materialize_dns", lambda eid, scan_run_id=None: {"resolved": [{"hostname": "example.org", "ip_address": "1.2.3.4"}]})
     monkeypatch.setattr(c, "get_agent_config", lambda eid: {"prompt": "", "enabled_tools": ["httpx", "http_request"]})
     monkeypatch.setattr(c, "get_agent_context", lambda eid: {"hosts": []})
@@ -83,7 +83,6 @@ def world(monkeypatch):
     monkeypatch.setattr(c, "claim_approval", lambda aid: state.claimed.append(aid) or {"allowed": True, "tool_call": EXACT})
     monkeypatch.setattr(c, "complete_approval", lambda aid, **k: state.completed.append((aid, k)) or {})
     monkeypatch.setattr(c, "withdraw_approval", lambda aid, reason="": state.withdrawn.append(aid))
-    monkeypatch.setattr(c, "add_suggestion", lambda *a, **k: None)
     monkeypatch.setattr(agent.time, "sleep", lambda s: pytest.fail("a parked run must not poll"))
 
     def dispatch(eid, asset_id, tool, target, ip=None, args=None, scan_run_id=None, single_port=None,
@@ -188,7 +187,7 @@ def test_a_target_that_left_the_scope_while_parked_is_not_touched(world, monkeyp
     _FakeOpenAI.script = TWO_CALLS()
     parked = agent.run(ENG, 10, scan_run_id=RUN).parked
     monkeypatch.setattr(agent.client, "list_discovered_assets",
-                        lambda eid, in_scope=None: [{"id": "asset-9", "value": "other.example.net", "in_scope": True}])
+                        lambda eid, in_scope=None, exclude_held=False: [{"id": "asset-9", "value": "other.example.net", "in_scope": True}])
     monkeypatch.setattr(agent.client, "materialize_dns", lambda eid, scan_run_id=None: {"resolved": []})
     world.approval = "approved"
     _FakeOpenAI.script = [_assistant(None, "done")]

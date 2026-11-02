@@ -22,12 +22,13 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.settings_store import get_scan_policy
 from app import config_resolver
-from app.gateway import args_safety, rate_reservation
+from app import testaccounts
+from app.gateway import args_safety, credential_rule, hold_rule, rate_reservation
 from app.gateway.audit import append_audit_log
 from app.tools import registry
 from app.models.approval import ApprovalRequest
 from app.models.engagement import BountyProgram, Engagement, ScopeAsset, ToolApprovalPolicy, ToolGrant
-from app.models.scan_run import ScanRun
+from app.models.scan_run import ScanRun, executes_calls, executing_run_clause
 
 settings = get_settings()
 
@@ -81,10 +82,12 @@ class Decision:
     approval_request_id: uuid.UUID | None = None
     is_throttled: bool = False
     retry_after_seconds: float | None = None
+    # REQ-TESTACCT-003: in words, for the agent and the console - the rule and the account's label, never a value.
+    detail: str | None = None
 
 
-def DENY(reason: str) -> Decision:
-    return Decision(allowed=False, reason=reason)
+def DENY(reason: str, detail: str | None = None) -> Decision:
+    return Decision(allowed=False, reason=reason, detail=detail)
 
 
 def ALLOW(reason: str) -> Decision:
@@ -162,10 +165,12 @@ def _tool_requires_manual_approval(db: Session, engagement_id: uuid.UUID, grant:
 
 def _active_scan_run(db: Session, engagement_id: uuid.UUID) -> ScanRun | None:
     """Legacy budget context for non-pipeline gateway checks. Target-touching
-    worker calls use their exact run ID via ``_bound_scan_run`` below."""
+    worker calls use their exact run ID via ``_bound_scan_run`` below. A run that
+    waits for the decision on one action is still this run (REQ-APPROVAL-008):
+    without it the call would be neither counted nor limited."""
     return db.scalar(
         select(ScanRun)
-        .where(ScanRun.engagement_id == engagement_id, ScanRun.state == "running")
+        .where(ScanRun.engagement_id == engagement_id, executing_run_clause())
         .order_by(ScanRun.started_at.desc())
         .limit(1)
     )
@@ -189,7 +194,9 @@ def _bound_scan_run(db: Session, call: ToolCall) -> tuple[ScanRun | None, Decisi
         return None, DENY("scan_run_not_found")
     if run.cancel_requested:
         return run, DENY("scan_run_cancelled")
-    if run.state != "running":
+    # REQ-APPROVAL-008 (#83): a run that waits for the decision on ONE action keeps executing the others; a parked
+    # run and an asset-review pause are `waiting_approval` too and stay refused (`executes_calls` is exact).
+    if not executes_calls(run):
         return run, DENY("scan_run_not_active")
     return run, None
 
@@ -207,7 +214,7 @@ def _create_approval_request(db: Session, call: ToolCall) -> ApprovalRequest:
     timeout_seconds = config_resolver.effective_approval_timeout_seconds(db, call.engagement_id)
     approval = ApprovalRequest(
         engagement_id=call.engagement_id,
-        tool_call=call.as_jsonable(),
+        tool_call=testaccounts.scrub_json(db, call.engagement_id, call.as_jsonable()),  # REQ-TESTACCT-005
         state="requested",
         expires_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=timeout_seconds),
     )
@@ -217,10 +224,14 @@ def _create_approval_request(db: Session, call: ToolCall) -> ApprovalRequest:
     return approval
 
 
-def _log_and_return(db: Session, call: ToolCall, decision: Decision) -> Decision:
+def _log_and_return(db: Session, call: ToolCall, decision: Decision, *, extra: dict | None = None) -> Decision:
     payload = call.as_jsonable()
     if decision.retry_after_seconds is not None:
         payload["retry_after_seconds"] = decision.retry_after_seconds
+    if decision.detail:
+        payload["detail"] = decision.detail
+    if extra:
+        payload.update(extra)
     audit_decision = "PENDING" if decision.is_pending else ("THROTTLE" if decision.is_throttled else ("ALLOW" if decision.allowed else "DENY"))
     append_audit_log(
         db,
@@ -254,7 +265,7 @@ def _claim_matching_approval(db: Session, call: ToolCall, approval_request_id: u
         return DENY("approval_expired")
     if approval.state != "approved":
         return DENY(f"approval_not_claimable:{approval.state}")
-    if approval.tool_call != call.as_jsonable():
+    if approval.tool_call != testaccounts.scrub_json(db, call.engagement_id, call.as_jsonable()):
         return DENY("approval_call_mismatch")
     approval.state = "executing"
     approval.execution_started_at = now
@@ -370,6 +381,20 @@ def authorize(db: Session, call: ToolCall, *, approved_request_id: uuid.UUID | N
         if grant is None:
             return _log_and_return(db, call, DENY("no_tool_grant"))
 
+    # 4b. REQ-MODE-008 (GitHub #79, rule G3): an active call to a host the hold policy is holding is denied, before
+    #     any approval is created or claimed - an approval can never override it, and a held host can never produce
+    #     an approval request. It only narrows; nothing here allows anything.
+    if call.mode == "active" and hold_rule.is_held_host(db, eng.id, call.target):
+        return _log_and_return(db, call, DENY("asset_held_for_review"))
+
+    # 4c. REQ-TESTACCT-004/006/007 (GitHub #89, R4): a test account's credential goes only into an http_request to a host the owner
+    #     assigned to that account, and only while that host is still usable; a password only into its declared login request; at
+    #     most two attempts per host and run. Everything here only DENIES - except one narrow allowance (R-F) further down, for the
+    #     declared login of a consented monitor. Deny wins; the verdict needs no cooperation from the model.
+    credential = credential_rule.evaluate(db, eng, call, run)
+    if credential.denial is not None:
+        return _log_and_return(db, call, DENY(credential.denial, credential.detail))
+
     # 5. Tool-Whitelist (Kategorie + konkretes Tool + Argumente) - Quelle: Registry
     if call.tool not in WHITELIST.get(call.category, set()):
         return _log_and_return(db, call, DENY("tool_not_whitelisted"))
@@ -443,7 +468,9 @@ def authorize(db: Session, call: ToolCall, *, approved_request_id: uuid.UUID | N
         (call.tool == "http_request" and args_safety.http_request_is_state_changing(call.args))
         or call.tool == "activemq-openwire-probe"
     )
-    requires_approval = state_changing or _tool_requires_manual_approval(db, eng.id, grant, call.tool)
+    # R-F (REQ-TESTACCT-006): the one allowance. A monitor's declared login, under a current consent given with the monitor's approval,
+    # needs no per-call approval. Any other state-changing request is unchanged.
+    requires_approval = (state_changing and not credential.consented_login) or _tool_requires_manual_approval(db, eng.id, grant, call.tool)
     if state_changing and not (call.risk and str(call.risk.get("description") or "").strip()):
         rate_reservation.release(db, reservation)
         return _log_and_return(db, call, DENY("risk_statement_required"))
@@ -468,4 +495,8 @@ def authorize(db: Session, call: ToolCall, *, approved_request_id: uuid.UUID | N
         run.budget_tool_calls_used += 1
         db.add(run)
         db.flush()
+    if credential.login_account is not None:
+        testaccounts.record_login_attempt(db, credential.login_account, credential.login_host, run.id if run is not None else None)
+    if credential.consented_login:
+        return _log_and_return(db, call, ALLOW("testaccount_login"), extra={"consent_id": str(credential.consent_id)})
     return _log_and_return(db, call, ALLOW("all_checks_passed"))

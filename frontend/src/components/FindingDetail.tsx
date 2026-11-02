@@ -2,8 +2,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 
 import { api, type Finding, type FindingStatus } from "../api/client";
+import RetestControl from "./RetestControl";
 import {
-  evidenceLocation, evidencePairs, evidenceTool, formatEvidenceValue, serviceLabel, STATUS_LABEL, targetLabel,
+  evidenceLocation, evidencePairs, evidenceTool, formatEvidenceValue, ratingNote, serviceLabel, STATUS_LABEL, targetLabel, unboundedCveNote,
 } from "../lib/findings";
 
 const NOTE_REQUIRED: FindingStatus[] = ["accepted_risk", "false_positive"];
@@ -155,6 +156,8 @@ export default function FindingDetail({ finding, canManage, onTriaged }: { findi
     },
   });
   const lensText = lensTextByFinding[finding.id] || cachedLensExplanation(finding);
+  // REQ-LENS-005: a cut-off analysis is never final. Until a complete one exists the button says "Regenerate".
+  const lensIsCutOff = finding.id in lensTruncatedByFinding ? lensTruncatedByFinding[finding.id] : cachedLensTruncated(finding);
 
   return (
     <div className="finding-detail-panel">
@@ -163,16 +166,16 @@ export default function FindingDetail({ finding, canManage, onTriaged }: { findi
           <div><h3>Lens Agent analysis</h3><p>Explains the finding, impact, and practical remediation from the recorded evidence.</p></div>
           {canManage && (
             <button onClick={(e) => { e.stopPropagation(); lensMutation.mutate(); }} disabled={lensMutation.isPending}>
-              {lensMutation.isPending ? "Asking Lens..." : (lensText ? "Show Lens analysis" : "Explain with Lens Agent")}
+              {lensMutation.isPending ? "Asking Lens..." : (lensText ? (lensIsCutOff ? "Regenerate" : "Show Lens analysis") : "Explain with Lens Agent")}
             </button>
           )}
         </div>
         <div className="lens-output">
-          {(finding.id in lensTruncatedByFinding ? lensTruncatedByFinding[finding.id] : cachedLensTruncated(finding)) && (
+          {lensIsCutOff && (
             <div className="warning-block">
               Lens Agent's analysis was cut off before it finished - the provider hit its
-              response length limit. Some sections (often "What to do") may be missing or
-              incomplete.
+              response length limit, or a section is missing. Some sections (often "What to do") may be
+              missing or incomplete. Use Regenerate to ask again.
             </div>
           )}
           {lensText
@@ -184,6 +187,17 @@ export default function FindingDetail({ finding, canManage, onTriaged }: { findi
       <TriagePanel finding={finding} canManage={canManage} pending={triageMutation.isPending}
         error={triageMutation.isError ? (triageMutation.error as Error) : null}
         onDecide={(status, note) => triageMutation.mutate({ status, note })} />
+      <RetestControl finding={finding} canManage={canManage} />
+      {unboundedCveNote(finding) && (
+        <div className="warning-block" role="note">
+          <strong>No version limit in NVD.</strong> {unboundedCveNote(finding)}
+        </div>
+      )}
+      {ratingNote(finding) && (
+        <p className="muted-line" role="note" data-testid="rating-note">
+          <strong>Why {finding.severity}: </strong>{ratingNote(finding)!.why}
+        </p>
+      )}
       <dl className="finding-facts">
         <dt>Target</dt><dd>{targetLabel(finding)}</dd>
         <dt>Asset type</dt><dd>{finding.asset_type ?? "unknown"}</dd>
@@ -198,7 +212,7 @@ export default function FindingDetail({ finding, canManage, onTriaged }: { findi
       <section>
         <h3>Evidence</h3>
         {evidence.length > 0 ? (
-          <dl className="finding-evidence">{evidence.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{formatEvidenceValue(value)}</dd></div>)}</dl>
+          <dl className="finding-evidence">{evidence.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{formatEvidenceValue(value, key)}</dd></div>)}</dl>
         ) : <p className="muted-line">No structured evidence was attached to this finding.</p>}
       </section>
     </div>

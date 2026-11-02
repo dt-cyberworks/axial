@@ -28,7 +28,9 @@ flowchart TD
     F -->|no| D4["DENY<br/>automation/ai_forbidden"]
     F -->|yes| G{"4. active: active_allowed<br/>& tool_grant?"}
     G -->|no| D5["DENY<br/>active_not_allowed /<br/>no_tool_grant"]
-    G -->|yes| H{"5. tool whitelisted<br/>& args safe?"}
+    G -->|yes| G2{"4b. active call to a<br/>held host?"}
+    G2 -->|yes| D5b["DENY<br/>asset_held_for_review"]
+    G2 -->|no| H{"5. tool whitelisted<br/>& args safe?"}
     H -->|no| D6["DENY<br/>tool_not_whitelisted /<br/>unsafe_arguments"]
     H -->|yes| I{"6. rate limit ok?"}
     I -->|no| D7["DENY rate_limited"]
@@ -38,7 +40,7 @@ flowchart TD
 
     classDef deny fill:#5b1b1b,stroke:#d94a4a,color:#fff
     classDef allow fill:#1b5b2b,stroke:#4ad96a,color:#fff
-    class D1,D2,D3,D4,D5,D6,D7 deny
+    class D1,D2,D3,D4,D5,D5b,D6,D7 deny
     class AL allow
 ```
 
@@ -50,6 +52,10 @@ REQ-AUTH-006's 2026-08-12 amendment made the header itself optional once a
 program row exists (some real programs identify researchers out-of-band).
 Header injection, when a program configures one, happens downstream in the
 egress-proxy/worker, not as a gateway authorization gate.
+
+**The hold rule** (step 4b, GitHub #79) keeps a host that a monitoring engagement is holding for review free of
+every active call, whoever asks and whatever was approved: the denial comes before any approval is created or claimed.
+It only narrows: it reads the engagement's held hosts, writes nothing and cannot allow anything.
 
 **Deny precedence** (step 2) models bug-bounty programs' out-of-scope
 lists, whose violation is a serious infraction. It's the core of the
@@ -205,6 +211,8 @@ Public operator routes require the single-operator credential. Browser clients e
 
 The egress proxy uses a read-only database role and submits bounded audit events to the authenticated control-plane ingestion route. If this audit submission is unavailable, the associated network request is denied. Audit appends take a PostgreSQL transaction advisory lock per engagement, producing one serialized hash chain.
 
+Which engagement a request belongs to is proven, not guessed (REQ-EGRESS-006..009). The control plane signs a short-lived token for one engagement and one run (HMAC-SHA256 under a key that only it and the proxy hold; the worker and the runner hold none). The runner's tools present it as proxy credentials; the proxy verifies it without trusting anything the caller chose, checks that the run is still live (a stopped or finished run's token stops working at once), and then judges the request for that engagement alone with the unchanged `evaluate()`. A credential that is present but not valid is refused and never falls back to a header or to guessing from the destination; the credentials are never forwarded to a target; a caller cannot set the identity headers in a proposal. While the tools are moved over, a request without a token is still handled as before and counted (`TOKENLESS` in the proxy log); `EGRESS_REQUIRE_TOKEN` then refuses it and stops trusting the `X-ASM-Engagement-Id` header. This changes how the proxy learns the engagement, not what the Scope Gateway decides.
+
 The proxy's reply to an allowed `CONNECT` is one fixed constant with a `Proxy-Agent` header line and nothing derived from the request (REQ-EGRESS-004/005). A reply without any header line left nuclei's raw HTTP client waiting for 60 s and sending nothing, so its raw-request templates never reached a target. A denied request never receives this reply and opens no tunnel. `make verify-tunnel-handshake` runs the real nuclei through the real proxy handler and fails if the proxy slows one of those templates down.
 
 Manual approvals use `requested -> approved -> executing -> consumed|execution_failed`. The claim transition re-runs the complete Scope Gateway against the stored call and is protected by a row lock.
@@ -227,6 +235,13 @@ process group, and exposes only exact-run group termination to the worker. If th
 control plane cannot answer a cancellation poll, the worker terminates the tool.
 Raw Nmap retains its independently signed lease and revokes it in `finally` after
 the runner returns or is terminated.
+
+"Inactive" means a run that is not doing work. A run that waits for a person's decision on **one** action is still
+doing work: its other actions are judged by exactly the same rules while it waits, so a pending approval cannot cost
+the run its other checks. That state is `waiting_approval` with the reason `approval_wait`, and only that exact pair
+counts. A parked semi-attended run and an asset-review pause are `waiting_approval` too and stay refused, as does any run
+with another or no reason; a cancellation request is judged first and always wins. One rule decides this for the
+gateway, the raw-egress lease, the budget context and the observation recorder, and the lease checks it again itself.
 
 ## Operating modes
 
@@ -258,3 +273,28 @@ the gateway-resident forms of these rules (`approval_unavailable_unattended`, `p
 enforces the narrowing rules, and a state-changing request still always waits for a person in an
 assessment and is never made by a monitor.
 
+
+## Test accounts (GitHub #89, REQ-TESTACCT-001..014, R4)
+
+An engagement's owner can enter **dedicated test accounts** so the Vector Agent logs in. The model sees the real credentials by decision
+(the language-model provider receives them with every request of a run); everything between the model and the target is deterministic:
+
+- **Reach.** An account is assigned to specific hosts and is bound to them only. `testaccounts.host_verdict` is the one definition of
+  *usable* (assigned, an attested allow rule that permits active testing, no deny rule, not held, not a possible takeover, not suspended
+  on that host); the agent's context, the console and the Scope Gateway use it.
+- **Gateway rule** (`gateway/credential_rule.py`, deny wins): a credential, as a placeholder or as the value in any recognized encoding,
+  is refused unless the tool is `http_request` and the host is usable; a password only in its declared login request; at most 2 login
+  attempts per host and 20 per account per run. One narrow allowance: the declared login of a monitor that has a current login consent
+  covering that (account, host) pair needs no per-call approval. After the login the monitor stays read-only.
+- **Nothing kept contains the value.** The worker rewrites the model's calls to `{{testaccount:<label>}}` before anything leaves the
+  process and puts the value back only in `dispatch._run`; the control plane scrubs again before the audit row is hashed, in approvals,
+  findings and the transcript. A search of every table finds nothing. The tool runner's own log is covered too (REQ-TESTACCT-013): the
+  worker declares the secret forms of the one request to the runner, which masks them in every log record, and masks the value of
+  `Set-Cookie`, `Cookie`, `Authorization` and `Proxy-Authorization` headers and URL credentials by shape. Found by the live verification:
+  the runner's log had held the password, a session cookie and the proxy's run credential. The agent's session jar reads the cookie from
+  the raw response before it is redacted (REQ-TESTACCT-012), in memory only, and a live session value is a `{{session:<token>}}` placeholder in everything the
+  worker sends to the control plane (REQ-TESTACCT-014): found by the first end-to-end run, where the session id sat in 21 audit rows, 2 approvals and 2 open requests.
+- **At rest.** Fernet under `TESTACCOUNT_ENCRYPTION_KEY` (a third key, distinct from the MFA and settings keys), write-only (no response
+  carries the secret or its length), erased at close, revoke, delete and the end of the window.
+- **Not covered:** a value the model hand-encodes in an unrecognized way is not found by value matching (the field-name redaction of
+  REQ-AUDIT-004 still applies); the deterministic tools do not carry the session; two-factor, SSO and OAuth are out of scope.

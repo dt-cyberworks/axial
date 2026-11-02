@@ -37,10 +37,10 @@ Everything is described in the [Run detail reference](../reference/run-detail.md
 
 ## What can pause a run
 
-A run stops and waits for you in two cases only. Both are popups that appear wherever you are in the console.
+Something waits for you in two cases only. Both are popups that appear wherever you are in the console.
 
-1. **A request needs your approval.** Anything that could change data on the target, and any tool you marked for approval, never runs on its own. The run shows `waiting_approval` until you decide, or until the approval timeout (15 minutes by default) rejects it. See [Approve or deny a tool call](approve-or-deny-a-tool-call.md).
-2. **An asset review.** If the engagement has **Pause after discovery for manual asset review** on, the run stops after discovery and asks you to confirm the hosts. See [Run detail](../reference/run-detail.md#asset-review).
+1. **A request needs your approval.** Anything that could change data on the target, and any tool you marked for approval, never runs on its own. **Only that one action waits.** The run shows `waiting_approval` and says that one action is waiting for your decision, while the rest of the scan carries on, so a slow decision never costs you the other checks. The run is `running` again when the last open decision is made, or when the approval timeout (15 minutes by default) rejects it. See [Approve or deny a tool call](approve-or-deny-a-tool-call.md).
+2. **An asset review.** If the engagement has **Pause after discovery for manual asset review** on, the whole run stops after discovery and asks you to confirm the hosts. See [Run detail](../reference/run-detail.md#asset-review).
 
 Nothing else needs you. If the run seems quiet, look at the banner and the **Activity** tab; some checks, such as a large template run, take many minutes and have their own time budget.
 

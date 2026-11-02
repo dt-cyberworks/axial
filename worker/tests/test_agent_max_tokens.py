@@ -134,7 +134,8 @@ def test_run_reads_the_configured_value_from_the_control_plane_config():
     response, not left at the module-level env default."""
     import inspect
 
-    source = inspect.getsource(agent.run)
+    # The phase's body moved from run() to _run_phase() when run() became the wrapper that registers the test accounts (GitHub #89).
+    source = inspect.getsource(agent._run_phase)
     assert 'cfg.get("agent_max_tokens")' in source, "run() must read the resolved cap"
     assert "max_tokens = max(AGENT_MIN_MAX_TOKENS" in source, "run() must re-clamp it"
     assert "retry_max_tokens = min(" in source and "max_tokens * (2 ** AGENT_LENGTH_RETRIES)" in source, (
@@ -150,5 +151,5 @@ def test_falls_back_to_the_env_default_when_the_config_lookup_fails():
     the env default rather than failing."""
     import inspect
 
-    source = inspect.getsource(agent.run)
+    source = inspect.getsource(agent._run_phase)
     assert "max_tokens = AGENT_MAX_TOKENS" in source

@@ -32,6 +32,63 @@ EPSS_CACHE_TTL_SECONDS = 24 * 3600
 KEV_CACHE_TTL_SECONDS = 6 * 3600
 
 
+_BOUND_KEYS = (
+    "version_start_including", "version_start_excluding", "version_end_including", "version_end_excluding",
+)
+# REQ-CORR-009: a CVE whose only NVD rows carry no version limit is weaker evidence than one with a
+# documented affected range, so it carries less weight in the risk score.
+UNBOUNDED_EXPOSURE_FACTOR = 0.5
+UNBOUNDED_NOTE = (
+    "NVD lists no affected-version limit for this CVE, so every version of the product matches. "
+    "Old NVD records are often too sparse to say where the problem ended: check the CVE text against "
+    "the version actually in use before acting on it."
+)
+
+
+def _is_bounded(candidate: dict) -> bool:
+    """True if this NVD row says WHICH versions are affected (an exact version or any range bound)."""
+    return bool(candidate.get("exact_versions")) or any(candidate.get(k) for k in _BOUND_KEYS)
+
+
+def _matches_version(version: str, candidate: dict) -> bool:
+    return version_in_range(
+        version,
+        start_including=candidate.get("version_start_including"),
+        start_excluding=candidate.get("version_start_excluding"),
+        end_including=candidate.get("version_end_including"),
+        end_excluding=candidate.get("version_end_excluding"),
+        exact_versions=candidate.get("exact_versions"),
+    )
+
+
+def match_cves(version: str, candidates: list[dict]) -> list[dict]:
+    """The CVEs a detected version is affected by, one entry per CVE (REQ-CORR-001/009).
+
+    NVD gives one row per CPE-match node of a CVE. Old records often hold a row with no version limit
+    next to correctly bounded rows, or on its own. The rows of one CVE are judged together:
+
+    * if any row of the CVE is bounded, only the bounded rows decide, and a lone unbounded row can no
+      longer make a version affected that every bounded row excludes (GitHub #69: CVE-2007-2768 against
+      OpenSSH 9.6p1);
+    * if no row is bounded, the CVE matches every version, as NVD says, but it is marked `unbounded`
+      so it is reported with less weight and a plain explanation.
+    """
+    by_cve: dict[str, list[dict]] = {}
+    for cand in candidates:
+        if cand.get("cve_id"):
+            by_cve.setdefault(cand["cve_id"], []).append(cand)
+    out: list[dict] = []
+    for cve_id, rows in by_cve.items():
+        bounded = [r for r in rows if _is_bounded(r)]
+        if bounded:
+            hit = next((r for r in bounded if _matches_version(version, r)), None)
+            if hit is not None:
+                out.append({"cve_id": cve_id, "cvss_base": hit.get("cvss_base"), "bounded": True})
+        elif any(_matches_version(version, r) for r in rows):
+            out.append({"cve_id": cve_id, "cvss_base": rows[0].get("cvss_base"), "bounded": False})
+    return out
+
+
 def _is_stale(fetched_at, ttl_seconds: int) -> bool:
     if not fetched_at:
         return True
@@ -110,23 +167,15 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
         except Exception as exc:  # noqa: BLE001 - a cache-write failure must not drop the data we already have
             logger.warning("cve_lookup_cache not writable for %s: %s", key, exc)
 
-    # 2. Local version-range filter -> per-service CVE matches (REQ-CORR-001).
+    # 2. Local version-range filter -> per-service CVE matches (REQ-CORR-001/009).
     matches: list[dict] = []
     for name, version, source_label, entry in signatures:
         key = normalize_product_key(name)
-        for cand in candidates_by_key.get(key, []):
-            if version_in_range(
-                version,
-                start_including=cand.get("version_start_including"),
-                start_excluding=cand.get("version_start_excluding"),
-                end_including=cand.get("version_end_including"),
-                end_excluding=cand.get("version_end_excluding"),
-                exact_versions=cand.get("exact_versions"),
-            ):
-                matches.append({
-                    "entry": entry, "cve_id": cand["cve_id"], "cvss_base": cand.get("cvss_base"),
-                    "source_label": source_label, "name": name, "version": version,
-                })
+        for hit in match_cves(version, candidates_by_key.get(key, [])):
+            matches.append({
+                "entry": entry, "cve_id": hit["cve_id"], "cvss_base": hit["cvss_base"], "bounded": hit["bounded"],
+                "source_label": source_label, "name": name, "version": version,
+            })
 
     if not matches:
         if not nvd_ok:
@@ -181,13 +230,19 @@ def run(engagement_id: str, services: list[dict]) -> list[dict]:
     for m in matches:
         entry = m["entry"]
         cve_id = m["cve_id"]
+        evidence = {
+            # REQ-CORR-009: attributed to the correlation itself, not "unknown tool" in the console.
+            "tool": "nvd_correlation", "source": m["source_label"], "product": m["name"], "version": m["version"],
+            "cve_id": cve_id, "affected_versions": "documented range" if m["bounded"] else "unbounded",
+        }
+        if not m["bounded"]:
+            evidence["note"] = UNBOUNDED_NOTE
         finding = client.add_finding(
             engagement_id, asset_id=entry.get("asset_id"), service_id=entry.get("service_id"),
             category="cve", title=f"{m['name']} {m['version']} - {cve_id}",
             cve_ids=[cve_id], cvss_base=m["cvss_base"], epss=epss_scores.get(cve_id),
-            is_kev=cve_id in kev_ids, confidence="inferred",
-            evidence={"source": m["source_label"], "product": m["name"], "version": m["version"], "cve_id": cve_id},
-            exposure_factor=1.0, business_factor=0.5,
+            is_kev=cve_id in kev_ids, confidence="inferred", evidence=evidence,
+            exposure_factor=1.0 if m["bounded"] else UNBOUNDED_EXPOSURE_FACTOR, business_factor=0.5,
         )
         written.append(finding)
 

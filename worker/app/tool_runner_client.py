@@ -20,6 +20,9 @@ eigene Defaults mit unserer args_are_safe()-Policy (Kap. 3.2) uebereinstimmen.
 
 from __future__ import annotations
 
+import base64
+import contextvars
+import ipaddress
 import json
 import logging
 import math
@@ -91,6 +94,11 @@ OOB_SERVER_URL = os.environ.get("OOB_SERVER_URL", "").strip()
 RUNNER_MAX_BUDGET_S = 1800
 RUNNER_DEFAULT_BUDGET_S = 300
 BUDGET_HEADER = "X-ASM-Timeout-Seconds"
+# REQ-TESTACCT-012: the strings the runner must mask in its own log for this request (base64 of a JSON list). Same name and format as
+# tool-runner/runner_logmask.py, which cannot be imported here (a separate image); tool-runner/tests checks that they agree.
+LOG_MASK_HEADER = "X-ASM-Log-Mask"
+LOG_MASK_MIN_LENGTH = 8
+LOG_MASK_MAX_CHARS = 16000
 # Seconds. Measured step times (dev, 2026-09-29): httpx 1, wafw00f 3, testssl 30,
 # katana 39, screenshot 1-2; nuclei selections run minutes.
 CHECK_BUDGET_S: dict[str, int] = {
@@ -258,6 +266,13 @@ def _nmap_pacing(lease_rate: int) -> str:
 
 
 # tool-Name -> (HexStrike-Endpunkt, Funktion die (target, args) -> Request-Body baut)
+def is_ipv6_literal(target: str) -> bool:
+    try:
+        return ipaddress.ip_address(target).version == 6
+    except ValueError:
+        return False
+
+
 def _nmap_body(target: str, args: dict) -> dict:
     stage = str(args.get("stage", ""))
     ports = str(args.get("ports", ""))
@@ -313,6 +328,12 @@ def _nmap_body(target: str, args: dict) -> dict:
     else:
         raise ValueError("tool_runner_client: nmap stage missing")
 
+    if is_ipv6_literal(target):
+        # GitHub #77: nmap refuses an IPv6 literal without -6 ("looks like an IPv6 target specification") and scans
+        # nothing. The flag is added here from the target, never taken from the caller's arguments: the gateway's
+        # nmap argument rules accept no flag but the fixed profiles.
+        extra = f"-6 {extra}"
+
     return {
         "target": _safe_target(target),
         "scan_type": scan_type,
@@ -342,7 +363,7 @@ def _safe_target(target: str) -> str:
     return target
 
 
-def _proxy_url() -> str:
+def _plain_proxy_url() -> str:
     if not EGRESS_PROXY_URL:
         return ""
     if not _PROXY_RE.match(EGRESS_PROXY_URL):
@@ -350,9 +371,79 @@ def _proxy_url() -> str:
     return EGRESS_PROXY_URL.rstrip("/")
 
 
+# REQ-EGRESS-008 (GitHub #81): the egress proxy learns the engagement of a request from a signed run token that the
+# tool presents as proxy credentials, `http://asm:<token>@egress-proxy:3128`. Off until the proxy runs the new rules: a
+# proxy that does not know them would forward the credentials to a plain-HTTP target.
+EGRESS_RUN_TOKENS = os.environ.get("EGRESS_RUN_TOKENS", "false").strip().lower() in ("1", "true", "yes", "on")
+PROXY_CREDENTIAL_USER = "asm"
+# Headers that carry the platform's identity towards the egress proxy; a caller's headers never include them. The
+# Scope Gateway's rule is control-plane/app/gateway/args_safety.py::PLATFORM_HEADERS (a parity test keeps them equal).
+_PLATFORM_HEADERS = frozenset({"proxy-authorization", "x-asm-engagement-id"})
+# Measured, not assumed (scripts/probe_runner_proxy_credentials.py): these send credentials from a proxy URL on plain
+# HTTP and on CONNECT.
+_PROXY_CREDENTIAL_TOOLS = frozenset({"http_request", "httpx", "nuclei", "ffuf", "katana", "wafw00f", "nikto"})
+# REQ-EGRESS-010: the screenshot browser refuses a proxy URL with credentials (ERR_NO_SUPPORTED_PROXIES) and testssl takes
+# host:port only. For these the command starts a loopback forwarder (tool-runner/egress_forwarder.py) that adds the
+# credentials, and points the tool at it.
+_FORWARDER_TOOLS = frozenset({"testssl", "screenshot"})
+FORWARDER_PATH = "/opt/asm/egress_forwarder.py"
+FORWARDER_PORT_VAR = "ASM_FWD_PORT"
+# The port the forwarder chose, as the shell will expand it when the command runs.
+_FORWARDER_PORT_REF = "${" + FORWARDER_PORT_VAR + "}"
+_PROXY_CREDENTIAL_RE = re.compile(r"^[A-Za-z0-9._-]{1,1024}$")
+# What the audit record shows in place of the token. The same builder renders both, so the stored command differs from
+# the executed one only in this value (REQ-AUDIT-004).
+REDACTED_PROXY_CREDENTIAL = "redacted"
+# The credential in force for the command being built. Set around the builders of ONE call (a builder runs
+# synchronously inside run()), so it can neither leak into another call nor be chosen by a caller's arguments.
+_PROXY_CREDENTIAL: contextvars.ContextVar[str | None] = contextvars.ContextVar("asm_proxy_credential", default=None)
+# True while a forwarder-tool's command is built: its proxy is then the loopback forwarder, not the egress proxy.
+_PROXY_VIA_FORWARDER: contextvars.ContextVar[bool] = contextvars.ContextVar("asm_proxy_via_forwarder", default=False)
+
+
+def _proxy_url() -> str:
+    base = _plain_proxy_url()
+    credential = _PROXY_CREDENTIAL.get()
+    if not base or not credential:
+        return base
+    if not _PROXY_CREDENTIAL_RE.match(credential):
+        raise ValueError("tool_runner_client: unsafe proxy credential")
+    scheme, _, rest = base.partition("://")
+    return f"{scheme}://{PROXY_CREDENTIAL_USER}:{credential}@{rest}"
+
+
 def _proxy_hostport() -> str:
-    """egress-proxy:3128 aus der http://...-URL (testssl --proxy will host:port)."""
-    return _proxy_url().split("://", 1)[-1]
+    """egress-proxy:3128 aus der http://...-URL (testssl --proxy will host:port). Never carries credentials; with the
+    forwarder in force it is the forwarder's loopback address, which adds them (REQ-EGRESS-010)."""
+    if _PROXY_VIA_FORWARDER.get():
+        return f"127.0.0.1:{_FORWARDER_PORT_REF}"
+    return _plain_proxy_url().split("://", 1)[-1]
+
+
+def _with_forwarder(command: str, args: dict) -> str:
+    """The command, run with a loopback forwarder alive for exactly its duration (REQ-EGRESS-010).
+
+    The forwarder takes the credential from its environment (never its command line), chooses its port and writes it to a
+    file; the command refers to it as ${ASM_FWD_PORT}. If the forwarder does not come up, the command fails visibly
+    (exit 70) - it never runs without the identity it was meant to carry. The forwarder is stopped when the command
+    ends, and stops itself when this shell is gone or after the command's budget (plus a margin)."""
+    credential = _PROXY_CREDENTIAL.get() or ""
+    if not _PROXY_CREDENTIAL_RE.match(credential):
+        raise ValueError("tool_runner_client: unsafe proxy credential")
+    upstream = _plain_proxy_url().split("://", 1)[-1]
+    lifetime = int(args.get("_budget_s") or 600) + 60
+    return (
+        "ASM_FWD_DIR=$(mktemp -d) || exit 70; "
+        f"ASM_PROXY_CREDENTIAL={credential} python3 {FORWARDER_PATH} --upstream {shlex.quote(upstream)} "
+        f"--user {PROXY_CREDENTIAL_USER} --port-file \"$ASM_FWD_DIR/port\" --max-lifetime {lifetime} 2>/dev/null & "
+        "ASM_FWD_PID=$!; "
+        'for _i in $(seq 1 100); do [ -s "$ASM_FWD_DIR/port" ] && break; sleep 0.1; done; '
+        f'{FORWARDER_PORT_VAR}=$(cat "$ASM_FWD_DIR/port" 2>/dev/null); '
+        f'if [ -z "${FORWARDER_PORT_VAR}" ]; then kill $ASM_FWD_PID 2>/dev/null; rm -rf "$ASM_FWD_DIR"; '
+        'echo "egress forwarder did not start" >&2; exit 70; fi; '
+        f"( {command} ); ASM_RC=$?; "
+        'kill $ASM_FWD_PID 2>/dev/null; rm -rf "$ASM_FWD_DIR"; exit $ASM_RC'
+    )
 
 
 def _bounty_h_flags(args: dict) -> str:
@@ -712,7 +803,9 @@ def _http_request_command(target: str, args: dict) -> str:
     proxy_url = _proxy_url()
     if proxy_url:
         parts += ["-x", proxy_url]
-    out_headers = dict(args.get("headers") or {})
+    # REQ-EGRESS-008: the identity headers are the platform's, never a caller's. The Scope Gateway refuses them; this
+    # is the second line, so that a call that got here without that rule still cannot send one.
+    out_headers = {k: v for k, v in dict(args.get("headers") or {}).items() if str(k).strip().lower() not in _PLATFORM_HEADERS}
     # GitHub issue #12: for HTTPS this is the ONLY place a bug-bounty
     # program's mandatory identification can be injected (the egress-proxy
     # only sees inside plain-HTTP requests, never a CONNECT tunnel's
@@ -882,11 +975,16 @@ def _screenshot_command(target: str, args: dict) -> str:
         "--window-size=1280,800", "--virtual-time-budget=8000",
         f"--user-data-dir={profile}", f"--screenshot={png}",
     ]
-    proxy_url = _proxy_url()
-    if proxy_url:
-        parts.append(f"--proxy-server={proxy_url}")
-    parts.append(base)
-    cmd = " ".join(shlex.quote(p) for p in parts)
+    proxy_arg = ""
+    if _PROXY_VIA_FORWARDER.get():
+        # REQ-EGRESS-010: Chromium refuses a proxy URL with credentials; the forwarder (started around this command)
+        # carries them. The port is a shell variable, so this argument must not be single-quoted.
+        proxy_arg = f' "--proxy-server=http://127.0.0.1:{_FORWARDER_PORT_REF}"'
+    else:
+        proxy_url = _proxy_url()
+        if proxy_url:
+            parts.append(f"--proxy-server={proxy_url}")
+    cmd = " ".join(shlex.quote(p) for p in parts) + proxy_arg + " " + shlex.quote(base)
     return (
         f"{cmd} >/dev/null 2>&1; "
         f"if [ -f {png} ] && [ \"$(stat -c%s {png})\" -le {_SCREENSHOT_MAX_BYTES} ]; then base64 -w0 {png}; fi; "
@@ -998,15 +1096,18 @@ def _nuclei_command(target: str, args: dict) -> str:
             raise ValueError("tool_runner_client: unknown nuclei oob part")
         paths, shards, index = spec
         dirs = " ".join(shlex.quote(p) for p in paths)
-        if shards == 1:
-            selection = " ".join(f"-t {shlex.quote(p)}" for p in paths)
-        else:
-            # Only constants are interpolated (dirs, ints) - never caller input.
-            selection = (f"-t \"$(find {dirs} -name '*.yaml' | sort | "
-                         f"awk 'NR%{shards}=={index}' | paste -sd, -)\"")
+        # GitHub #76: the templates that need the interaction server are found by what they contain, not by the
+        # `oast` tag. In the CVE tree 238 templates carry the tag and about 190 more (for example CVE-2019-6793,
+        # CVE-2019-13608) use `{{interactsh-url}}` without it: `-tags oast` never selected those, and the main
+        # passes (`-no-interactsh`) drop them, so they ran nowhere, even with a working server. A shard takes every
+        # k-th template of the sorted list, an exact partition. Only constants are interpolated (dirs, ints) -
+        # never caller input.
         return (
+            f"sel=$(grep -rl --include='*.yaml' -e interactsh {dirs} | sort | "
+            f"awk 'NR%{shards}=={index % shards}' | paste -sd, -); "
+            f'if [ -z "$sel" ]; then exit 0; fi; '
             f"timeout {_inner_deadline_s(args, NUCLEI_OOB_TIMEOUT_S)} nuclei -u {shlex.quote(target)} "
-            f"-tags oast {selection} {base}"
+            f'-t "$sel" {base}'
             f'-iserver {shlex.quote(server)} -itoken "$OOB_TOKEN"'
         )
     raise ValueError(f"tool_runner_client: nuclei mode {mode!r} is not a command mode")
@@ -1180,6 +1281,8 @@ def _audit_invocation(builder, target: str, args: dict, *, endpoint: str | None 
     change the tool's outcome, so any failure here yields None rather than
     propagating.
     """
+    # REQ-EGRESS-008: the same builder renders the stored command, with the placeholder in the place of the token.
+    marker = _PROXY_CREDENTIAL.set(REDACTED_PROXY_CREDENTIAL if _PROXY_CREDENTIAL.get() else None)
     try:
         rendered = builder(target, command_redaction.redact_args(args))
         if not isinstance(rendered, str):
@@ -1190,6 +1293,8 @@ def _audit_invocation(builder, target: str, args: dict, *, endpoint: str | None 
     except Exception:  # noqa: BLE001 - telemetry must never break execution
         logger.warning("could not render audit invocation for %s", target, exc_info=True)
         return None
+    finally:
+        _PROXY_CREDENTIAL.reset(marker)
 
 
 def _reached_own_deadline(tool: str, args: dict, duration_s) -> bool:
@@ -1206,6 +1311,69 @@ def _reached_own_deadline(tool: str, args: dict, duration_s) -> bool:
     return duration_s >= deadline - 1
 
 
+class _EgressTokens:
+    """The run tokens of the runs this worker executes (REQ-EGRESS-008, GitHub #81).
+
+    A token lives a few minutes (the control plane decides how many); a run lasts hours, so one is fetched when none is
+    cached and again shortly before it expires. A fetch that fails is remembered for a few seconds so that a control
+    plane that refuses (the run was stopped) is not asked once per tool call. Never raises: a missing token means the
+    tool runs with the plain proxy URL, exactly as before this feature."""
+
+    REFRESH_BEFORE_EXPIRY_S = 60.0
+    RETRY_AFTER_FAILURE_S = 10.0
+
+    def __init__(self, fetch, clock=time.monotonic):
+        self._fetch = fetch
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._tokens: dict[str, tuple[str, float]] = {}   # run -> (token, refresh at)
+        self._failed_until: dict[str, float] = {}
+
+    def get(self, scan_run_id: str) -> str | None:
+        now = self._clock()
+        with self._lock:
+            cached = self._tokens.get(scan_run_id)
+            if cached and now < cached[1]:
+                return cached[0]
+            if now < self._failed_until.get(scan_run_id, 0.0):
+                return None
+        try:
+            issued = self._fetch(scan_run_id)
+            token = issued["token"]
+            if not isinstance(token, str) or not token:
+                raise ValueError("the answer holds no token")
+            lifetime = float(issued.get("expires_in") or 0)
+        except Exception as exc:  # noqa: BLE001 - a missing token must never stop a scan
+            logger.warning("no egress run token for run %s (%s): the tool uses the plain proxy URL", scan_run_id, exc)
+            with self._lock:
+                self._failed_until[scan_run_id] = self._clock() + self.RETRY_AFTER_FAILURE_S
+                self._tokens.pop(scan_run_id, None)
+            return None
+        with self._lock:
+            self._tokens[scan_run_id] = (token, self._clock() + max(1.0, lifetime - self.REFRESH_BEFORE_EXPIRY_S))
+            self._failed_until.pop(scan_run_id, None)
+        return token
+
+    def forget(self, scan_run_id: str) -> None:
+        with self._lock:
+            self._tokens.pop(scan_run_id, None)
+            self._failed_until.pop(scan_run_id, None)
+
+
+def _fetch_egress_token(scan_run_id: str) -> dict:
+    # Local import avoids a module cycle during worker startup (as _cancel_requested does).
+    from app.control_plane_client import client
+
+    return client.egress_token(scan_run_id)
+
+
+def _scrub_secret(raw: dict, secret: str) -> dict:
+    """Replace a known secret in the text a tool printed (a tool may echo its proxy setting)."""
+    if not secret:
+        return raw
+    return {k: (v.replace(secret, REDACTED_PROXY_CREDENTIAL) if isinstance(v, str) else v) for k, v in raw.items()}
+
+
 class ToolRunnerClient:
     @staticmethod
     def raw_network_available() -> bool:
@@ -1213,6 +1381,16 @@ class ToolRunnerClient:
             return False
         from app.raw_egress_client import raw_egress_gateway
         return raw_egress_gateway.available()
+
+    @staticmethod
+    def egress_proxy_unreachable() -> bool:
+        """REQ-RAWLEASE-006: the gateway, which sits in the runner's network namespace, reports that it cannot open a
+        connection to the egress proxy. Only an explicit "no" counts: no gateway (lab) or no answer is "unknown", and
+        the tool then runs and fails on its own if it must."""
+        if RAW_NETWORK_MODE != "lease-gateway":
+            return False
+        from app.raw_egress_client import raw_egress_gateway
+        return raw_egress_gateway.proxy_reachable() is False
 
     def __init__(self, base_url: str = TOOL_RUNNER_URL, timeout: float = 320.0):
         # 320s: nuclei/testssl laufen mit vielen Templates/Checks durch den
@@ -1223,6 +1401,15 @@ class ToolRunnerClient:
         # authenticated by the execution boundary.
         default_headers = {"X-ASM-Runner-Token": RUNNER_API_TOKEN} if RUNNER_API_TOKEN else None
         self._client = httpx.Client(base_url=base_url, timeout=timeout, headers=default_headers)
+        self._egress_tokens = _EgressTokens(_fetch_egress_token)
+
+    def _proxy_credential(self, tool: str, scan_run_id: str | None) -> str | None:
+        """The run token this call presents to the egress proxy, or None (the plain proxy URL, as before): the switch
+        is off, there is no run, the tool cannot carry proxy credentials, or the control plane gave none."""
+        if (not EGRESS_RUN_TOKENS or not scan_run_id or not EGRESS_PROXY_URL
+                or tool not in _PROXY_CREDENTIAL_TOOLS | _FORWARDER_TOOLS):
+            return None
+        return self._egress_tokens.get(str(scan_run_id))
 
     def _terminate_scan_run(self, scan_run_id: str, result_queue: Queue) -> None:
         """Ask the isolated runner to kill only processes tagged with this run.
@@ -1246,8 +1433,12 @@ class ToolRunnerClient:
             except Empty:
                 time.sleep(0.1)
 
-    def _post_cancellable(self, path: str, payload: dict, scan_run_id: str | None, budget_s: int | None = None):
+    def _post_cancellable(self, path: str, payload: dict, scan_run_id: str | None, budget_s: int | None = None,
+                          log_mask: list[str] | None = None):
         headers = {"X-ASM-Scan-Run-ID": scan_run_id} if scan_run_id else {}
+        mask_header = _log_mask_header(log_mask)
+        if mask_header:
+            headers[LOG_MASK_HEADER] = mask_header
         # REQ-PIPE-007: the runner enforces the declared budget; the HTTP read
         # timeout leaves it room to answer (result + kill + cleanup).
         request_kwargs: dict = {}
@@ -1318,7 +1509,7 @@ class ToolRunnerClient:
     def run(
         self, tool: str, target: str, args: dict | None = None, *,
         scan_run_id: str | None = None, engagement_id: str | None = None,
-        budget_s: int | None = None,
+        budget_s: int | None = None, log_mask: list[str] | None = None,
     ) -> dict:
         """Execute one gateway-authorized tool with bounded in-flight cancel.
 
@@ -1328,6 +1519,8 @@ class ToolRunnerClient:
 
         `budget_s` (REQ-PIPE-007) overrides the tool's declared time budget; either way
         the runner clamps it to its hard maximum.
+
+        `log_mask` (REQ-TESTACCT-012) lists secrets this call carries; the runner masks them in its own log. It is never part of the command.
 
         `engagement_id`, when given, is used ONLY to look up whether this is a
         bug-bounty engagement needing self-identification injected into HTTP-
@@ -1357,33 +1550,55 @@ class ToolRunnerClient:
                 "stdout": "", "stderr": "raw network egress is not enabled for this deployment",
                 "exit_code": -1, "success": False, "error_reason": "raw_egress_unavailable",
             }
-        builder = _COMMANDS.get(tool)
-        if tool == "nuclei" and args.get("mode") in NUCLEI_MODES_AS_COMMAND:
-            builder = _nuclei_command
-        if builder is not None:
-            command = builder(target, args)
-            endpoint = "/api/command"
-            payload = {"command": command, "use_cache": False}
-            audit_command = _audit_invocation(builder, target, args)
-        else:
-            endpoint, body_fn = _ENDPOINTS.get(tool, (None, None))
-            if endpoint is None:
-                raise ValueError(f"tool_runner_client: no HexStrike endpoint mapping for '{tool}'")
-            payload = body_fn(target, args)
-            # No literal command exists for these - HexStrike builds the CLI
-            # server-side from this body, so the body IS the invocation spec
-            # (REQ-AUDIT-003).
-            audit_command = _audit_invocation(body_fn, target, args, endpoint=endpoint)
+        if EGRESS_PROXY_URL and tool in _HTTP_PROXIED_TOOLS and self.egress_proxy_unreachable():
+            # Every request such a tool makes goes through the proxy. Several of them (httpx, testssl, the browser) print
+            # nothing for a refused connection and still exit 0, which would read as "no web service" / "no findings".
+            return {
+                "stdout": "", "stderr": "the egress proxy cannot be reached from the tool runner; nothing was sent",
+                "exit_code": -1, "success": False, "error_reason": "egress_proxy_unreachable",
+            }
+        # REQ-EGRESS-008: the credential is in force only while this call's command is built.
+        credential = self._proxy_credential(tool, scan_run_id)
+        credential_scope = _PROXY_CREDENTIAL.set(credential)
+        forwarder_scope = _PROXY_VIA_FORWARDER.set(bool(credential) and tool in _FORWARDER_TOOLS)
+        try:
+            builder = _COMMANDS.get(tool)
+            if tool == "nuclei" and args.get("mode") in NUCLEI_MODES_AS_COMMAND:
+                builder = _nuclei_command
+            if builder is not None and _PROXY_VIA_FORWARDER.get():
+                tool_builder = builder
+                builder = lambda t, a: _with_forwarder(tool_builder(t, a), a)  # noqa: E731
+            if builder is not None:
+                command = builder(target, args)
+                endpoint = "/api/command"
+                payload = {"command": command, "use_cache": False}
+                audit_command = _audit_invocation(builder, target, args)
+            else:
+                endpoint, body_fn = _ENDPOINTS.get(tool, (None, None))
+                if endpoint is None:
+                    raise ValueError(f"tool_runner_client: no HexStrike endpoint mapping for '{tool}'")
+                payload = body_fn(target, args)
+                # No literal command exists for these - HexStrike builds the CLI
+                # server-side from this body, so the body IS the invocation spec
+                # (REQ-AUDIT-003).
+                audit_command = _audit_invocation(body_fn, target, args, endpoint=endpoint)
+        finally:
+            _PROXY_VIA_FORWARDER.reset(forwarder_scope)
+            _PROXY_CREDENTIAL.reset(credential_scope)
+        if credential and audit_command and credential in audit_command:
+            # Belt and braces: the rendering above uses the placeholder, so this cannot happen; if it ever does, the
+            # token still never reaches durable storage.
+            audit_command = audit_command.replace(credential, REDACTED_PROXY_CREDENTIAL)
         if scan_run_id:
             _set_current_activity(scan_run_id, tool, target)
         try:
-            resp = self._post_cancellable(endpoint, payload, scan_run_id, budget)
+            resp = self._post_cancellable(endpoint, payload, scan_run_id, budget, **({"log_mask": log_mask} if log_mask else {}))
             if isinstance(resp, dict):
                 # Cancelled mid-flight: the invocation still ran, so it is still
                 # what the operator needs to see (REQ-AUDIT-003).
-                return {**resp, "command": audit_command}
+                return {**_scrub_secret(resp, credential or ""), "command": audit_command}
             resp.raise_for_status()
-            raw = resp.json()
+            raw = _scrub_secret(resp.json(), credential or "")
             if "error" in raw and "stdout" not in raw:
                 return {
                     "stdout": "", "stderr": str(raw["error"]), "exit_code": -1,
@@ -1419,6 +1634,10 @@ class ToolRunnerClient:
             proxy_failures = (
                 "audit_unavailable", "proxy_capacity_exhausted", "missing_engagement_id_header",
                 "no_engagement_for_host", "ambiguous_host", "out_of_scope_deny",
+                # REQ-EGRESS-007: refusals of the run identity.
+                "invalid_run_token", "run_token_required", "run_not_active", "run_check_unavailable",
+                # REQ-EGRESS-012/013: the proxy shared its slots between engagements, or a destination was too busy.
+                "engagement_share_exhausted", "destination_busy",
                 # REQ-FIDELITY-007: Port-Scope-Ablehnung des Egress-Proxy (REQ-FIDELITY-005).
                 "out_of_scope_port",
                 "received http code 503 from proxy", "received http code 407 from proxy",
@@ -1449,6 +1668,16 @@ class ToolRunnerClient:
         finally:
             if scan_run_id:
                 _clear_current_activity(scan_run_id)
+
+
+def _log_mask_header(strings: list[str] | None) -> str | None:
+    """The `X-ASM-Log-Mask` value for `strings`: shortest first, dropping what would not fit under the cap."""
+    kept: list[str] = []
+    for text in sorted({s for s in strings or [] if isinstance(s, str) and len(s) >= LOG_MASK_MIN_LENGTH}, key=len):
+        if len(base64.b64encode(json.dumps(kept + [text]).encode())) > LOG_MASK_MAX_CHARS:
+            break
+        kept.append(text)
+    return base64.b64encode(json.dumps(kept).encode()).decode() if kept else None
 
 
 tool_runner = ToolRunnerClient()

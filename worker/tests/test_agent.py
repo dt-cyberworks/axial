@@ -63,7 +63,7 @@ def wired(monkeypatch):
     monkeypatch.setattr(agent.client, "get_llm_config",
                         lambda: {"base_url": "https://x/v1", "api_key": "k", "model": "m", "is_usable": True})
     monkeypatch.setattr(agent.client, "list_discovered_assets",
-                        lambda eid, in_scope=None: [{"id": "asset-1", "value": "example.org", "in_scope": True}])
+                        lambda eid, in_scope=None, exclude_held=False: [{"id": "asset-1", "value": "example.org", "in_scope": True}])
     monkeypatch.setattr(agent.client, "materialize_dns",
                         lambda eid, scan_run_id=None: {"resolved": [{"hostname": "example.org", "ip_address": "1.2.3.4"}]})
     monkeypatch.setattr(agent.client, "get_agent_config",

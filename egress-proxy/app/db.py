@@ -74,6 +74,21 @@ def active_engagements_for_materialized_ip(ip: str) -> list[str]:
     return [str(r[0]) for r in rows]
 
 
+def scan_run_live(scan_run_id: str, engagement_id: str) -> bool:
+    """REQ-EGRESS-007: may this run still send traffic? A signed run token proves that the control plane issued it for
+    a run of this engagement; this says the run has not ended or been stopped since. Column-level SELECT only
+    (migration 0044). A failure raises and the caller denies."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT 1 FROM scan_run WHERE id = :run AND engagement_id = :eng "
+                "AND state IN ('running', 'waiting_approval') AND NOT cancel_requested"
+            ),
+            {"run": scan_run_id, "eng": engagement_id},
+        ).first()
+    return row is not None
+
+
 def matching_scope_assets(engagement_id: str, host: str, path: str, rule: str) -> list[dict]:
     with engine.connect() as conn:
         rows = conn.execute(

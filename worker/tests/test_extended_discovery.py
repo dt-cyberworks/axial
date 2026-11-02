@@ -139,12 +139,14 @@ def test_oob_parts_are_disjoint_cover_the_template_set_and_are_all_bounded():
     assert len(all_dirs) == len(set(all_dirs)), "no template directory belongs to two sets"
     for name in parts:
         cmd = trc._nuclei_command("https://a.example.com", {"mode": "oob", "part": name, "_oob_server": "http://x:8080"})
-        assert "-tags oast" in cmd and cmd.startswith(f"timeout {trc.NUCLEI_OOB_TIMEOUT_S} nuclei -u ")
+        # GitHub #76: selected by content (what mentions the interaction server), never by the `oast` tag alone.
+        assert "grep -rl --include='*.yaml' -e interactsh " in cmd and "-tags oast" not in cmd
+        assert f"timeout {trc.NUCLEI_OOB_TIMEOUT_S} nuclei -u " in cmd and '-t "$sel"' in cmd
         assert "-t /opt/nuclei-templates " not in cmd, "never the whole template tree"
     with pytest.raises(ValueError):
         trc._nuclei_command("https://a.example.com", {"mode": "oob", "part": "../x", "_oob_server": "http://x:8080"})
     cmd = trc._nuclei_command("https://a.example.com", {"mode": "oob", "part": "generic_b", "_oob_server": "http://x:8080"})
-    assert "awk 'NR%3==1'" in cmd and "find " in cmd
+    assert "awk 'NR%3==1'" in cmd and "sort" in cmd
 
 
 def test_negative_nuclei_oob_without_a_valid_server_is_refused():

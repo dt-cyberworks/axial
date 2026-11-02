@@ -7,6 +7,7 @@ import os
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from app.endpoints import EndpointWatcher, resolve
 from app.gateway import (
     LeaseBusy, LeaseError, NftPolicyManager, PolicyError, QueueFull, RawEgressGateway,
 )
@@ -27,28 +28,18 @@ enforce_production_token(ENVIRONMENT, API_TOKEN)
 
 PROXY_HOST = os.environ.get("EGRESS_PROXY_HOST", "egress-proxy")
 PROXY_PORT = int(os.environ.get("EGRESS_PROXY_PORT", "3128"))
-try:
-    PROXY_ADDRESSES = sorted({
-        item[4][0] for item in socket.getaddrinfo(PROXY_HOST, PROXY_PORT, proto=socket.IPPROTO_TCP)
-    })
-except OSError as exc:
-    raise RuntimeError("egress proxy cannot be resolved before deny-all policy installation") from exc
+PROXY_ADDRESSES = resolve(PROXY_HOST, PROXY_PORT)
 if not PROXY_ADDRESSES:
-    raise RuntimeError("egress proxy has no address")
+    raise RuntimeError("egress proxy cannot be resolved before deny-all policy installation")
 
 # REQ-COVER-004: optional self-hosted interaction server. Unset -> no extra
 # rule at all (the deny-all policy is exactly as before).
 OOB_HOST = os.environ.get("OOB_SERVER_HOST", "").strip()
 OOB_PORT = int(os.environ.get("OOB_SERVER_PORT", "8080"))
-OOB_ADDRESSES: list[str] = []
-if OOB_HOST:
-    try:
-        OOB_ADDRESSES = sorted({
-            item[4][0] for item in socket.getaddrinfo(OOB_HOST, OOB_PORT, socket.AF_INET, socket.SOCK_STREAM)
-        })
-    except OSError:
-        # The interaction server is optional: if it is not up, run without it.
-        print("raw-egress-gateway: oob server not resolvable; oob disabled", flush=True)
+OOB_ADDRESSES: list[str] = resolve(OOB_HOST, OOB_PORT, socket.AF_INET) if OOB_HOST else []
+if OOB_HOST and not OOB_ADDRESSES:
+    # The interaction server is optional: if it is not up, run without it. The watcher below adds it when it appears.
+    print("raw-egress-gateway: oob server not resolvable yet; running without it", flush=True)
 
 # REQ-CONCUR-002: bounded 1-8, defaulting to 2, so multiple users' raw-network
 # (nmap) scans don't hard-serialize behind a single global slot.
@@ -58,9 +49,19 @@ gateway = RawEgressGateway(
     SECRET,
     NftPolicyManager(
         proxy_addresses=PROXY_ADDRESSES, proxy_port=PROXY_PORT, num_slots=MAX_CONCURRENT_LEASES,
-        oob_addresses=OOB_ADDRESSES, oob_port=OOB_PORT,
+        oob_addresses=OOB_ADDRESSES, oob_port=OOB_PORT, oob_enabled=bool(OOB_HOST),
     ),
     max_concurrent_leases=MAX_CONCURRENT_LEASES,
+)
+
+# REQ-RAWLEASE-005: the proxy and the interaction server are recreated now and then and come back under a new address.
+try:
+    REFRESH_SECONDS = float(os.environ.get("RAW_EGRESS_ENDPOINT_REFRESH_SECONDS", "2"))
+except ValueError:
+    REFRESH_SECONDS = 2.0
+watcher = EndpointWatcher(
+    gateway, proxy_host=PROXY_HOST, proxy_port=PROXY_PORT, oob_host=OOB_HOST, oob_port=OOB_PORT,
+    interval=REFRESH_SECONDS,
 )
 
 class Handler(BaseHTTPRequestHandler):
@@ -116,7 +117,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/health":
             self._json(404, {"error": "not_found"})
             return
-        self._json(200, gateway.status())
+        self._json(200, {**gateway.status(), "egress": watcher.status()})
 
     def do_POST(self):  # noqa: N802
         # GitHub issue #22: checked BEFORE _body() (which reads and parses
@@ -174,6 +175,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def run() -> None:
     gateway.initialize()
+    watcher.start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"raw-egress-gateway listening on {HOST}:{PORT} (deny-all baseline)", flush=True)
     server.serve_forever()

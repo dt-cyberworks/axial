@@ -125,10 +125,45 @@ test("REQ-IAM-025 [negative] a new place that changes an engagement must be revi
     // Reviewed with REQ-MON-004 (2026-10-15): the controls render only for canManage, the API answers a
     // non-owner with 403 either way.
     "frontend/src/components/ScheduleControl.tsx",
+    // Reviewed with REQ-TRIAGE-005/006 (2026-10-15): mounted only behind canManage by FindingsSection.
+    "frontend/src/components/BulkTriageBar.tsx",
+    // Reviewed with REQ-BASE-003/004 (2026-10-19): the confirm control, the discovery control and the
+    // policy choice render only for canManage (the page reads can_manage from the engagement), and the
+    // API answers a non-owner with 403 either way.
+    "frontend/src/pages/TargetSelection.tsx",
     // The monitoring wizard, like the test wizard, only ever edits the draft its own user just created.
     "frontend/src/pages/MonitorWizard.tsx",
+    // Reviewed with REQ-RETEST-005/006 (2026-10-20): the review step starts a restricted run, which can send a
+    // request that changes data. Every control is disabled unless the caller passes canManage, every caller passes
+    // can_manage, and the API answers a non-owner with 403 either way (asserted below).
+    "frontend/src/components/RunReview.tsx",
+    // Reviewed with REQ-HANDOVER-001 (2026-10-31): "Test deeper" creates a draft engagement of the caller from a monitor. The
+    // dialog is mounted only by EngagementLifecycle (which the engagement page renders behind canManage), its button is behind
+    // canStartHandover (can_manage on an active or paused monitor), and the API answers a non-owner with 403 twice, in the
+    // router and in the handler (asserted below).
+    "frontend/src/components/HandoverDialog.tsx",
+    // Reviewed with REQ-TESTACCT-001/006 (2026-11-01): the panel and the monitor wizard's consent block change an engagement's test
+    // accounts and login consent. Every control is behind canManage (the panel reads can_manage from the engagement; the wizard block takes
+    // it from the accounts overview, which the API computes with can_manage_engagement), and the API answers a non-owner with 403 twice,
+    // in the router and in each handler (asserted below).
+    "frontend/src/components/TestAccounts.tsx", "frontend/src/components/TestAccountsAuthorize.tsx",
   ]);
   for (const [file] of users) assert.ok(allowed.has(file), `${file} changes an engagement: review REQ-IAM-025 and add it here`);
+  // REQ-HANDOVER-001: the dialog has exactly one mount, in the lifecycle bar, behind the same rule that decides the button.
+  const mounts = files("frontend/src").filter((f) => /\.tsx?$/.test(f) && read(f).includes("<HandoverDialog"));
+  assert.deepEqual(mounts, ["frontend/src/components/EngagementLifecycle.tsx"], "the handover dialog has one mount");
+  assert.match(read("frontend/src/components/EngagementLifecycle.tsx"), /canStartHandover\(engagement\) && \(/, "Test deeper");
+  assert.match(read("frontend/src/lib/handover.ts"), /return e\.can_manage && e\.operating_mode === "monitoring"/, "can_manage first");
+  // REQ-TESTACCT-001: every write control of the test-account panel is behind canManage, and the API refuses anyone else.
+  const accountsPanel = read("frontend/src/components/TestAccounts.tsx");
+  assert.match(accountsPanel, /\{canManage && !adding && data\.accounts\.length < 4 && \(/, "Add a test account");
+  assert.match(accountsPanel, /\{canManage && !erased && \(\s*<div className="account-actions">/, "replace secret, resume, edit hosts, delete");
+  assert.match(accountsPanel, /\{canManage && editingHosts && \(/, "save hosts");
+  assert.match(accountsPanel, /\{canManage && summary\.needed && \(/, "give login consent");
+  assert.match(accountsPanel, /\{canManage && consent\.current && /, "revoke login consent");
+  const mounts2 = files("frontend/src").filter((f) => /\.tsx?$/.test(f) && read(f).includes("<TestAccounts "));
+  assert.deepEqual(mounts2, ["frontend/src/pages/EngagementDetail.tsx"], "the panel has one mount");
+  assert.match(detail, /<TestAccounts engagementId=\{id\} canManage=\{canManage\} operatingMode=/);
   // The files that sit behind a guard in their parent must still be mounted only behind it.
   assert.match(detail, /canManage && isDraft && <ToolGrantsEditor/);
   assert.match(detail, /\{canManage && !isDraft && <EngagementLifecycle engagement=\{engagement\} \/>\}/, "pause, close, revoke");
@@ -144,7 +179,26 @@ test("REQ-IAM-025 [negative] a new place that changes an engagement must be revi
   assert.match(schedule, /\{canManage \? \(\s*<div className="form-actions schedule-actions">/, "change / switch off the interval");
   assert.match(schedule, /Only the owner or an administrator can change this/);
   assert.match(detail, /<ScheduleControl engagementId=\{engagement\.id\} canManage=\{canManage\} \/>/);
+  // REQ-TRIAGE-005: the bulk bar and the row checkboxes only exist for the owner or an administrator.
+  const findingsList = read("frontend/src/components/FindingsSection.tsx");
+  assert.match(findingsList, /\{canManage && \(\s*<BulkTriageBar /);
+  assert.match(findingsList, /\{canManage && \(\s*<td className="select-cell"/);
+  // REQ-BASE-003: the target screen offers confirming and discovering only to the owner or an administrator.
+  const targetScreen = read("frontend/src/pages/TargetSelection.tsx");
+  assert.match(targetScreen, /const canManage = engagementQuery\.data\?\.can_manage \?\? false;/);
+  assert.match(targetScreen, /\{canManage && \(\s*<div className="form-actions">\s*<button\s+className="primary-action"/, "confirm");
+  assert.match(targetScreen, /\{canManage && \(\s*<div className="bulk-bar-row">/, "discover again and the selection helpers");
+  assert.match(targetScreen, /disabled=\{!canManage\} onChange=\{\(\) => setPolicy/, "the policy choice");
   assert.match(edit, /if \(!engagement\.can_manage\)/);
+  // REQ-RETEST-005/006: the review step is for the owner or an administrator; everyone else can read it.
+  const reviewStep = read("frontend/src/components/RunReview.tsx");
+  assert.match(reviewStep, /disabled=\{!canManage \|\| nothing \|\| start\.isPending\}/, "the run button");
+  assert.equal((reviewStep.match(/disabled=\{!canManage\}/g) ?? []).length, 3, "the checkbox and both radios");
+  assert.match(reviewStep, /\{item\.kind === "request" && canManage && \(/, "Never send this");
+  assert.match(read("frontend/src/components/RetestControl.tsx"), /if \(!canManage \|\| finding\.status !== "open"\) return null;/);
+  assert.match(read("frontend/src/pages/OpenItems.tsx"), /canManage=\{!!engagement\?\.can_manage\}/);
+  assert.match(read("frontend/src/components/ScanPlanView.tsx"), /enabled: !!engagementId && canManage,/, "Run this step again");
+  assert.match(detail.concat(read("frontend/src/pages/RunDetail.tsx")), /canManage=\{!!engagement\?\.can_manage\}/);
 });
 
 let failed = 0;

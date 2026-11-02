@@ -30,7 +30,8 @@ test("REQ-CONSOLE-013 the engagement page has URL-driven tabs, findings first", 
   const tabs = detail.match(/const ENGAGEMENT_TABS = \[([\s\S]*?)\] as const;/);
   assert.ok(tabs, "tab list defined");
   const ids = [...tabs[1].matchAll(/id: "(\w+)"/g)].map((m) => m[1]);
-  assert.deepEqual(ids, ["findings", "assets", "runs"], "Findings is the first tab");
+  // REQ-TESTACCT-010 (#89, johannes 2026-11-01) added the fourth tab, "accounts" (Test accounts); Findings stays first.
+  assert.deepEqual(ids, ["findings", "assets", "accounts", "runs"], "Findings is the first tab");
   assert.match(detail, /: "findings";\s*\}/, "no or an unknown ?tab= falls back to findings");
   assert.match(detail, /const activeTab = parseEngagementTab\(searchParams\.get\("tab"\)\)/);
   // A tab change pushes a history entry (no { replace: true }), so Back returns to the previous tab.

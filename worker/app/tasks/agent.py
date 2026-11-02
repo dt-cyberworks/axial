@@ -37,10 +37,11 @@ import uuid
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
-from app import session_state
+from app import agent_args, approval_wait, session_state, test_accounts
 from app.cancel_probe import CancelProbe
 from app.control_plane_client import client
 from app.target_envelope import single_port_from_envelope
+from app.tool_runner_client import is_ipv6_literal
 from app.tasks import dispatch
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,11 @@ def _audit_agent_event(engagement_id: str, event: str, *, decision: str | None =
         client.agent_event(uuid.UUID(engagement_id), event=event, decision=decision, reason=reason, payload=payload)
     except Exception as exc:  # noqa: BLE001 - telemetry must never break a scan
         logger.warning("agent telemetry failed for %s: %s", event, exc)
+
+
+def record_skipped(engagement_id: str, scan_run_id: str, reason: str) -> None:
+    """REQ-AGENT-028: one audit event for an agent phase that was not started on purpose, in place of a series of denials."""
+    _audit_agent_event(engagement_id, "agent_phase_skipped", scan_run_id=scan_run_id, decision=None, reason=reason)
 
 
 def _normalize_chat_base_url(base_url: str) -> tuple[str, str | None]:
@@ -224,12 +230,11 @@ _TOOLS = [
                     "risk": {"type": "string", "description": "Required for state-changing requests: what it does and what could go wrong"},
                     "identity": {
                         "type": "string",
-                        "enum": ["primary", "secondary"],
                         "description": (
                             "Which session to send. 'primary' (default) is your normal session. "
-                            "'secondary' is a second test identity (from register_test_identity, or "
-                            "operator-supplied second-identity credentials if configured) - use it to "
-                            "test whether identity B can access identity A's objects (BOLA/IDOR)."
+                            "'secondary' is a second test identity (from register_test_identity) - use it to "
+                            "test whether identity B can access identity A's objects (BOLA/IDOR). "
+                            "The label of a TEST ACCOUNT keeps that account's session apart from every other one."
                         ),
                     },
                 },
@@ -431,6 +436,11 @@ class SimpleContext:
     # watching. A decision parks the run rather than blocking a worker.
     semi_attended: bool = False
     parked: dict | None = None
+    # REQ-TESTACCT-007/008: (account label, host) -> session_established | rejected, from the logins this run made.
+    login_outcomes: dict = field(default_factory=dict)
+    # The run came out with a login the target rejected, or an account it never got a session for.
+    auth_coverage_lost: bool = False
+    auth_coverage_note: str | None = None
 
     def observe(self, proposal: dict, result: str) -> None:
         self.observations.append({"proposal": proposal, "result": result})
@@ -443,14 +453,19 @@ def _load_scope(engagement_id: str, scan_run_id: str | None = None) -> tuple[dic
     """(target_lower -> asset_id, target_lower -> materialisierte IP)."""
     asset_by_host: dict[str, str] = {}
     try:
-        for a in client.list_discovered_assets(uuid.UUID(engagement_id), in_scope=True):
+        # REQ-MODE-008 (GitHub #79): the agent's list of hosts leaves out the hosts the hold policy is holding, so a
+        # proposal that names one is rejected as not in the list before it reaches the gateway.
+        for a in client.list_discovered_assets(uuid.UUID(engagement_id), in_scope=True, exclude_held=True):
             asset_by_host[a["value"].lower()] = str(a["id"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("agent: in-scope assets not loadable: %s", exc)
 
     ip_by_host: dict[str, str] = {}
     try:
-        for r in client.materialize_dns(uuid.UUID(engagement_id), scan_run_id=scan_run_id).get("resolved", []):
+        # GitHub #77: a dual-stack name has both an IPv4 and an IPv6 address; the agent's tools get the IPv4 one
+        # (the same primary address the automatic scan uses), whichever record was answered first.
+        for r in sorted(client.materialize_dns(uuid.UUID(engagement_id), scan_run_id=scan_run_id).get("resolved", []),
+                        key=lambda r: is_ipv6_literal(r["ip_address"])):
             ip_by_host.setdefault(r["hostname"].lower(), r["ip_address"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("agent: DNS materialization failed: %s", exc)
@@ -562,8 +577,13 @@ def _handle_http_request(
     # REQ-AGENT-023: which session-slot to read from / write back into. Fails
     # closed to "primary" - today's well-tested behaviour - on anything else,
     # never a hard reject; a malformed identity value is not itself unsafe.
-    identity_raw = str(tool_input.get("identity", "primary")).strip().lower()
-    identity = identity_raw if identity_raw in ("primary", "secondary") else "primary"
+    run_key = context.scan_run_id or engagement_id
+    identity = test_accounts.identity_for(str(tool_input.get("identity", "primary")), run_key)
+    # REQ-TESTACCT-005: whatever the model wrote, a test account's value leaves this function as a placeholder - to the gateway, the
+    # approval, the audit trail and the transcript. The value is put back only in dispatch._run, for the one request that is sent.
+    path = test_accounts.to_placeholders(path)
+    headers = test_accounts.to_placeholders(headers)
+    body = test_accounts.to_placeholders(body)
     proposal = {"tool": "http_request", "target": target, "method": method, "path": path, "identity": identity}
 
     host = target.lower()
@@ -590,11 +610,15 @@ def _handle_http_request(
         "target": target, "args": args, "is_automated": True, "phase": "agent",
         "scan_run_id": context.scan_run_id,
     }
-    # Zustandsaendernder Request: LLM-Risikobewertung mitgeben (REQ-APPROVAL-002).
+    # REQ-APPROVAL-002: the reason travels with EVERY agent request, whatever its method, so that the approval
+    # popup and the audit row can say why it was asked for. (Only a state-changing request must also carry the
+    # agent's risk assessment.) The control plane bounds and redacts it.
+    rationale = test_accounts.to_placeholders(str(tool_input.get("rationale", "") or ""))
+    if rationale or state_changing:
+        payload["rationale"] = rationale
     if state_changing:
-        payload["rationale"] = str(tool_input.get("rationale", ""))
         payload["risk"] = {"level": str(tool_input.get("risk_level", "") or "medium"),
-                           "description": str(tool_input.get("risk", "") or "")}
+                           "description": test_accounts.to_placeholders(str(tool_input.get("risk", "") or ""))}
 
     decision = _authorize_throttled(engagement_id, payload, proposal, context)
 
@@ -608,12 +632,16 @@ def _handle_http_request(
         _audit_agent_event(engagement_id, "proposal_denied", scan_run_id=context.scan_run_id, decision="DENY", reason=reason, proposal=proposal)
         if reason == "risk_statement_required":
             return "DENIED: state-changing requests need a risk assessment. Re-propose with risk_level and risk."
-        return f"DENIED by the Scope Gateway: {reason}."
+        # REQ-TESTACCT-003: a refusal that concerns a test account names the rule and the account in words, so the agent stops trying.
+        detail = f" {decision['detail']}" if decision.get("detail") else ""
+        return f"DENIED by the Scope Gateway: {reason}.{detail}"
 
     _audit_agent_event(engagement_id, "proposal_allowed", scan_run_id=context.scan_run_id, decision="ALLOW", reason="gateway_allowed", proposal=proposal)
+    had_session = bool(context.cookies_by_host.get(host, {}).get(identity))     # before this response can change the jar
     obs = dispatch.dispatch(engagement_id, asset_id, "http_request", target, ip_by_host.get(host), args=args, scan_run_id=context.scan_run_id, single_port=context.single_port,
                             confirmed_protocol=context.protocol_by_host.get(host.lower()))
-    _capture_session(context, host, obs.as_text(), engagement_id, identity=identity)
+    _capture_session(context, host, obs.as_text(), engagement_id, identity=identity, cookies=_raw_cookies(obs))
+    _note_login(context, engagement_id, run_key, host, method, path, args, obs.as_text(), cookies=_raw_cookies(obs), had_session=had_session)
     context.observe(proposal, obs.as_text())
     # REQ-AUDIT-006/007: no separate truncation here - obs.as_text() is
     # already redacted AND bounded upstream by dispatch._run() (the runner's
@@ -692,15 +720,20 @@ def _handle_register_test_identity(
     _audit_agent_event(engagement_id, "proposal_allowed", scan_run_id=context.scan_run_id, decision="ALLOW", reason="gateway_allowed", proposal=proposal)
     obs = dispatch.dispatch(engagement_id, asset_id, "http_request", target, ip_by_host.get(host), args=args, scan_run_id=context.scan_run_id, single_port=context.single_port,
                             confirmed_protocol=context.protocol_by_host.get(host.lower()))
-    _capture_session(context, host, obs.as_text(), engagement_id, identity="secondary")
+    _capture_session(context, host, obs.as_text(), engagement_id, identity="secondary", cookies=_raw_cookies(obs))
     context.observe(proposal, obs.as_text())
     # REQ-AUDIT-006/007: see the identical note in _handle_http_request.
     _audit_agent_event(engagement_id, "observation", scan_run_id=context.scan_run_id, decision="ALLOW", reason="tool_observed", proposal=proposal, observation=obs.as_text())
     return obs.as_text()
 
 
+def _raw_cookies(obs) -> dict[str, str] | None:
+    """The session cookies dispatch read from the raw response (REQ-TESTACCT-012), or None for an observation that carries none."""
+    return getattr(obs, "set_cookies", None)
+
+
 def _capture_session(context: SimpleContext, host: str, response_text: str, engagement_id: str,
-                     identity: str = "primary") -> None:
+                     identity: str = "primary", cookies: dict[str, str] | None = None) -> None:
     """REQ-AGENT-022/023: harvest Set-Cookie from a response into the
     run-scoped jar for THAT host AND THAT identity only.
 
@@ -708,13 +741,19 @@ def _capture_session(context: SimpleContext, host: str, response_text: str, enga
     Domain attribute, which is the one input that could widen replay beyond the
     issuing host (see session_state.extract_cookies) - and by the identity slot
     that made the request, so a secondary identity's session can never bleed
-    into the primary one or vice versa."""
-    fresh = session_state.extract_cookies(response_text)
+    into the primary one or vice versa.
+
+    `cookies` are the Set-Cookie values dispatch read from the RAW response (REQ-TESTACCT-012). `response_text` is the REDACTED text the
+    model and the audit trail get (REQ-AUDIT-007: `Set-Cookie: <redacted>`), so a session can only be taken from it when nothing else is
+    given - which is how a hand-built observation in a test reaches this function."""
+    fresh = cookies if cookies is not None else session_state.extract_cookies(response_text)
     if not fresh:
         return
     host_jars = context.cookies_by_host.setdefault(host, {})
     previous = host_jars.get(identity, {})
     host_jars[identity] = session_state.merge_cookies(previous, fresh)
+    # REQ-TESTACCT-014: from here on the session value is a placeholder in everything that leaves this process but the request that is sent.
+    test_accounts.register_session_values(context.scan_run_id or engagement_id, fresh.values())
     # Audit the fact and the cookie NAMES, never the values - a session id is
     # exactly as sensitive as the credential that produced it.
     _audit_agent_event(
@@ -723,6 +762,20 @@ def _capture_session(context: SimpleContext, host: str, response_text: str, enga
         proposal={"tool": "http_request", "target": host, "identity": identity},
         cookie_names=sorted(fresh), cookie_count=len(host_jars[identity]),
     )
+
+
+def _note_login(context: SimpleContext, engagement_id: str, run_key: str, host: str, method: str, path: str, args, response_text: str,
+                cookies: dict[str, str] | None = None, had_session: bool = False) -> None:
+    """REQ-TESTACCT-007/008: if this request was a test account's declared login, record what came of it for (account, host)."""
+    account = test_accounts.login_account_for(run_key, host, method, path, args)
+    if account is None:
+        return
+    fresh = cookies if cookies is not None else session_state.extract_cookies(response_text)
+    outcome = test_accounts.classify_login(response_text, set(fresh), had_session=had_session)
+    context.login_outcomes[(account.label, host)] = outcome
+    _audit_agent_event(engagement_id, "test_account_login", scan_run_id=context.scan_run_id,
+                       decision="ALLOW" if outcome == "session_established" else "DENY", reason=outcome,
+                       proposal={"tool": "http_request", "target": host, "account": account.label})
 
 
 _WRITE_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
@@ -743,18 +796,14 @@ def _await_approval(engagement_id, approval_id, asset_id, target, args, ip, prop
         context.record_denied(proposal, "pending_no_id")
         return "PENDING: approval could not be created; skipped."
     if context.unattended:
+        # The control plane keeps the exact call of a withdrawn approval as a held-back request (REQ-RETEST-004).
         client.withdraw_approval(str(approval_id), "unattended_run")
-        detail = " ".join(str(x) for x in (args.get("method"), args.get("path")) if x) if isinstance(args, dict) else ""
-        client.add_suggestion(
-            uuid.UUID(engagement_id), tool=tool, target=target,
-            rationale=f"{tool} {detail}".strip() + " needed a person's decision in an unattended run",
-        )
         context.record_denied(proposal, "approval_unavailable_unattended")
         _audit_agent_event(engagement_id, "proposal_not_awaited", scan_run_id=context.scan_run_id, decision="DENY",
                            reason="approval_unavailable_unattended", proposal=proposal, approval_id=str(approval_id))
         return (
-            "NOT EXECUTED: this run is unattended and nobody can approve this request. It was recorded "
-            "as a suggestion for a manual test. Continue without it."
+            "NOT EXECUTED: this run is unattended and nobody can approve this request. It was kept for a person to decide later "
+            "(it is listed as held back). Continue without it."
         )
     _audit_agent_event(engagement_id, "proposal_pending_approval", scan_run_id=context.scan_run_id, decision="PENDING",
                        reason="awaiting_operator_approval", proposal=proposal, approval_id=str(approval_id))
@@ -766,32 +815,22 @@ def _await_approval(engagement_id, approval_id, asset_id, target, args, ip, prop
             "approval_id": str(approval_id), "target": target, "proposal": proposal, "identity": identity, "tool": tool,
         })
     run_id = context.scan_run_id
-    if run_id:
-        try:
-            client.update_scan_run(uuid.UUID(run_id), state="waiting_approval")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("could not set the waiting_approval state: %s", exc)
-
     waited = 0
     decision_state = "expired"
     cancel_probe = CancelProbe.for_run(run_id) if run_id else None
-    while waited < context.approval_timeout_seconds:
-        if cancel_probe is not None and cancel_probe.is_cancelled():  # issue #49: fail closed when unreadable
-            decision_state = "cancelled"
-            break
-        st = client.get_approval(str(approval_id)).get("state")
-        if st in ("approved", "rejected", "expired", "consumed"):
-            decision_state = st
-            break
-        time.sleep(_APPROVAL_POLL_SECONDS)
-        waited += _APPROVAL_POLL_SECONDS
-
-    # Lauf zurueck auf 'running' (der Pipeline-Task setzt danach die Phasen weiter).
-    if run_id:
-        try:
-            client.update_scan_run(uuid.UUID(run_id), state="running")
-        except Exception:  # noqa: BLE001
-            pass
+    # REQ-APPROVAL-008: the run shows `waiting_approval` while this wait is open and is `running` again when the last wait
+    # of the run ends (the pipeline task carries on with the phases after that).
+    with approval_wait.live_wait(run_id):
+        while waited < context.approval_timeout_seconds:
+            if cancel_probe is not None and cancel_probe.is_cancelled():  # issue #49: fail closed when unreadable
+                decision_state = "cancelled"
+                break
+            st = client.get_approval(str(approval_id)).get("state")
+            if st in ("approved", "rejected", "expired", "consumed"):
+                decision_state = st
+                break
+            time.sleep(_APPROVAL_POLL_SECONDS)
+            waited += _APPROVAL_POLL_SECONDS
 
     return _finish_approval(engagement_id, approval_id, asset_id, target, ip, proposal, context, decision_state,
                             identity=identity, tool=tool)
@@ -843,7 +882,10 @@ def _finish_approval(engagement_id, approval_id, asset_id, target, ip, proposal,
         # the jar would miss the one response that matters most. `identity`
         # tags it into the right slot - "secondary" for register_test_identity
         # and any http_request explicitly proposed with identity="secondary".
-        _capture_session(context, exact_target.lower(), obs.as_text(), engagement_id, identity=identity)
+        had_session = bool(context.cookies_by_host.get(exact_target.lower(), {}).get(identity))     # before this response can change the jar
+        _capture_session(context, exact_target.lower(), obs.as_text(), engagement_id, identity=identity, cookies=_raw_cookies(obs))
+        _note_login(context, engagement_id, context.scan_run_id or engagement_id, exact_target.lower(), str(exact_args.get("method", "GET")),
+                    str(exact_args.get("path", "")), exact_args, obs.as_text(), cookies=_raw_cookies(obs), had_session=had_session)
         context.observe(proposal, obs.as_text())
         # REQ-AUDIT-006/007: see the identical note in _handle_http_request.
         _audit_agent_event(engagement_id, "observation", scan_run_id=context.scan_run_id, decision="ALLOW", reason="tool_observed_after_approval",
@@ -890,12 +932,19 @@ def _handle_ffuf(
         _audit_agent_event(engagement_id, "proposal_rejected", scan_run_id=context.scan_run_id, decision="DENY", reason="not_in_scope_list", proposal=proposal)
         return f"REJECTED: {target!r} is not in the in-scope list. Choose a listed target."
 
-    args = {"wordlist": wordlist, "path": path, "extensions": extensions, "extra_candidates": extra_candidates}
+    # REQ-RETEST-009: harmless whitespace is removed here; the gateway's validator stays strict.
+    args = agent_args.normalize_ffuf_args(
+        {"wordlist": wordlist, "path": path, "extensions": extensions, "extra_candidates": extra_candidates}
+    )
     payload = {
         "tool": "ffuf", "category": "vuln", "mode": "active",
         "target": target, "args": args, "is_automated": True, "phase": "agent",
         "scan_run_id": context.scan_run_id,
     }
+    # REQ-APPROVAL-002: the reason reaches the approval and the audit row for this tool too.
+    rationale = str(tool_input.get("rationale", "") or "")
+    if rationale:
+        payload["rationale"] = rationale
     decision = _authorize_throttled(engagement_id, payload, proposal, context)
     if decision.get("is_pending"):
         context.record_denied(proposal, "pending_approval")
@@ -905,6 +954,9 @@ def _handle_ffuf(
         reason = decision.get("reason", "denied")
         context.record_denied(proposal, reason)
         _audit_agent_event(engagement_id, "proposal_denied", scan_run_id=context.scan_run_id, decision="DENY", reason=reason, proposal=proposal)
+        problem = agent_args.describe_ffuf_problem(args) if reason == "unsafe_arguments" else None
+        if problem:
+            return f"DENIED by the Scope Gateway: {reason}. {problem}. Correct it and propose again."
         return f"DENIED by the Scope Gateway: {reason}."
 
     _audit_agent_event(engagement_id, "proposal_allowed", scan_run_id=context.scan_run_id, decision="ALLOW", reason="gateway_allowed", proposal=proposal)
@@ -1216,6 +1268,36 @@ def _engagement_params_block(engagement_params: dict | None) -> str:
     )
 
 
+def _render_known_from_monitor(known: dict | None) -> str:
+    """REQ-HANDOVER-005: what the monitoring engagement this assessment was started from last reported, for the hosts of THIS
+    engagement's own scope. A claim of an earlier unattended run, never a result of this engagement and never a target list:
+    it changes nothing about what is in scope (the Scope Gateway decides every action). The control plane already left out
+    evidence and every host outside this engagement's scope; this only renders what it sent, with a hard size cap."""
+    if not isinstance(known, dict) or not known.get("hosts"):
+        return ""
+    source = known.get("source") or {}
+    lines = [
+        "KNOWN FROM MONITORING (context only; does NOT change what is in scope):",
+        f"Source: the monitoring engagement \"{str(source.get('title') or '?')[:120]}\", as of {known.get('as_of') or 'its last healthy run'}.",
+        str(known.get("note") or ""),
+    ]
+    for entry in (known.get("hosts") or [])[:40]:
+        host = str(entry.get("host") or "")[:120]
+        if not host:
+            continue
+        services = "; ".join(
+            f"{s.get('port')}/{s.get('protocol') or 'tcp'} {s.get('product') or ''} {s.get('version') or ''}".strip()
+            for s in (entry.get("services") or [])[:20]
+        ) or "none recorded"
+        findings = "; ".join(
+            f"[{f.get('severity') or '?'}] {str(f.get('title') or '')[:100]}"
+            + (f" (port {f['port']})" if f.get("port") else "") + (f" {', '.join(f['cve_ids'][:3])}" if f.get("cve_ids") else "")
+            for f in (entry.get("findings") or [])[:15]
+        ) or "none open"
+        lines.append(f"- {host}: services: {services}. Open findings: {findings}.")
+    return "\n".join(lines) + "\n\n"
+
+
 def _initial_context(
     engagement_id: str, asset_by_host: dict[str, str], enabled_tools: list[str] | None = None,
     engagement_params: dict | None = None,
@@ -1224,6 +1306,8 @@ def _initial_context(
     ctx = _safe_agent_context(engagement_id)
     evidence = _render_evidence(engagement_id, asset_by_host, ctx)
     relationships = _render_relationships(ctx.get("graph"))
+    known_from_monitor = _render_known_from_monitor(ctx.get("known_from_monitor"))
+    accounts_block = test_accounts.render_for_agent(ctx.get("test_accounts") or [])   # REQ-TESTACCT-003: real value, where it may be used
     tools_line = ""
     if enabled_tools:
         tools_line = (
@@ -1242,6 +1326,8 @@ def _initial_context(
         "it collected per host. This is your starting intelligence — reason from "
         "it, do not re-derive it blindly:\n\n"
         f"{evidence}\n\n"
+        f"{accounts_block}"
+        f"{known_from_monitor}"
         f"{relationships}"
         "Now work the surface: propose the few highest-value checks that fill a "
         "coverage gap or validate/deepen a promising lead, each with a concrete "
@@ -1320,6 +1406,42 @@ def _process_tool_calls(
 def run(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None = None,
         findings_and_services: dict | None = None, approval_timeout_seconds: int = 900,
         resume_state: dict | None = None) -> SimpleContext:
+    """The agent phase. REQ-TESTACCT-003..008: the engagement's test accounts are registered for the phase only (in memory), the phase
+    runs, they are forgotten, and the logins' outcomes are reported so that a lost login reads as degraded coverage, not as 'nothing found'."""
+    run_key = scan_run_id or engagement_id
+    given = (_safe_agent_context(engagement_id) or {}).get("test_accounts") or []
+    registered = test_accounts.register(run_key, given) if given else {}
+    try:
+        context = _run_phase(engagement_id, budget_max_iterations, scan_run_id, findings_and_services, approval_timeout_seconds, resume_state)
+    finally:
+        test_accounts.unregister(run_key)
+    if registered and scan_run_id and getattr(context, "parked", None) is None:
+        _report_test_account_outcomes(scan_run_id, given, context)
+    return context
+
+
+def _report_test_account_outcomes(scan_run_id: str, given: list[dict], context: SimpleContext) -> None:
+    outcomes = []
+    for account in given:
+        hosts = {h.lower() for h in account.get("can_use_on") or []} | {h for (label, h) in context.login_outcomes if label == account["label"]}
+        for host in sorted(hosts):
+            outcomes.append({"label": account["label"], "host": host,
+                             "outcome": context.login_outcomes.get((account["label"], host), "not_attempted")})
+    if not outcomes:
+        return
+    try:
+        result = client.record_test_account_outcomes(scan_run_id, outcomes)
+    except Exception as exc:  # noqa: BLE001 - reporting must never break the scan
+        logger.warning("test account outcomes were not recorded: %s", exc)
+        return
+    if result.get("coverage_lost"):
+        context.auth_coverage_lost = True
+        context.auth_coverage_note = "coverage_degraded:authenticated_coverage_lost"
+
+
+def _run_phase(engagement_id: str, budget_max_iterations: int, scan_run_id: str | None = None,
+               findings_and_services: dict | None = None, approval_timeout_seconds: int = 900,
+               resume_state: dict | None = None) -> SimpleContext:
     context = SimpleContext(scan_run_id=scan_run_id, approval_timeout_seconds=approval_timeout_seconds)
     context.unattended = (
         client.run_info(scan_run_id).get("supervision") == "unattended"

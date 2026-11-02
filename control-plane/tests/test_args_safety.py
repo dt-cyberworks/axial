@@ -193,3 +193,28 @@ def test_negative_the_openwire_probe_rejects_any_agent_supplied_argument():
     assert not args_are_safe("activemq-openwire-probe", {"gadget": "something-else"})
     assert not args_are_safe("activemq-openwire-probe", {"_send_bytes": b"\x00\x01"})
     assert not args_are_safe("activemq-openwire-probe", {"callback_url": "https://attacker.example"})
+
+
+def test_negative_nmap_takes_no_ipv6_flag_from_a_caller():
+    """REQ-SCAN-017 (GitHub #77): nmap needs `-6` for an IPv6 target, and the worker's request builder adds it from the
+    target itself. A caller (the agent, an operator) can never supply it - or any other flag outside the fixed profiles."""
+    profile = {"port_profile": "configured_tcp", "ports": "1-65535", "max_rate": 300}
+    assert args_are_safe("nmap", {**profile, "flags": ["-ss", "-p"]})
+    assert not args_are_safe("nmap", {**profile, "flags": ["-ss", "-p", "-6"]})
+    assert not args_are_safe("nmap", {"flags": ["-sV", "-6"]})
+    assert not args_are_safe("nmap", {"flags": ["-6"]})
+
+
+def test_negative_a_proposal_cannot_set_the_headers_that_carry_the_platforms_identity():
+    """REQ-EGRESS-008 (GitHub #81): `Proxy-Authorization` and `X-ASM-Engagement-Id` are what the egress proxy reads to learn
+    the engagement of a request. An identity that a caller can choose is no identity, so no proposal may carry one."""
+    assert args_are_safe("http_request", {"method": "GET", "path": "/", "headers": {"X-Test": "1", "Accept": "*/*"}})
+    for name in ("Proxy-Authorization", "proxy-authorization", "PROXY-AUTHORIZATION", "X-ASM-Engagement-Id", "x-asm-engagement-id",
+                 " X-ASM-Engagement-Id"):
+        assert not args_are_safe("http_request", {"method": "GET", "path": "/", "headers": {name: "x"}}), name
+        assert not args_are_safe("http_request", {"method": "POST", "path": "/", "headers": {"A": "b", name: "x"}, "body": "{}"}), name
+
+
+def test_other_authorization_headers_stay_allowed_for_authenticated_testing():
+    """The agent logs in with credentials that the operator supplied; only the PROXY's credentials are the platform's."""
+    assert args_are_safe("http_request", {"method": "GET", "path": "/", "headers": {"Authorization": "Bearer abc", "Cookie": "s=1"}})

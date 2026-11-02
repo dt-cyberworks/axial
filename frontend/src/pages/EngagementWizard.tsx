@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
-import { api, type ScanProfile, type ScopeAsset, type ToolCapability } from "../api/client";
+import { api, type Engagement, type ScanProfile, type ScopeAsset, type ToolCapability } from "../api/client";
 import DiscoverySwitches, { DEFAULT_DISCOVERY_FLAGS, discoveryFlagSummary, type DiscoveryFlags } from "../components/DiscoverySwitches";
 import ScanDepth, { scanDepthLabel } from "../components/ScanDepth";
 
@@ -49,6 +49,8 @@ export default function EngagementWizard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const draftParam = searchParams.get("draft");
   const [step, setStep] = useState(1);
+  // REQ-HANDOVER-004: set when this draft was started from a monitor ("Test deeper").
+  const [handoverFrom, setHandoverFrom] = useState<Engagement["handover_from"]>(null);
   // GitHub issue #46: one wizard session owns exactly one draft. Once this is
   // set, step 1 edits that draft (PATCH) and never creates another (POST); the
   // id also lives in the URL (?draft=) so a reload resumes the draft.
@@ -230,6 +232,7 @@ export default function EngagementWizard() {
           oob_enabled: eng.oob_enabled, screenshots_enabled: eng.screenshots_enabled,
         });
         setScanProfile(eng.scan_profile);
+        setHandoverFrom(eng.handover_from ?? null);
         if (scope.length > 0) {
           setAssets(scope);
           setSavedAssets(scope.map((asset) => ({ id: asset.id, key: assetKey(asset) })));
@@ -379,8 +382,9 @@ export default function EngagementWizard() {
     if (!engagementId) return;
     setError(null);
     try {
-      await api.activateEngagement(engagementId);
-      navigate(`/engagements/${engagementId}/live`);
+      const activated = await api.activateEngagement(engagementId);
+      // /live only redirected to the engagement page; going there directly keeps the notice (REQ-EGRESS-011).
+      navigate(`/engagements/${engagementId}`, { state: { scopeOverlapNotice: activated.scope_overlap_notice ?? null } });
     } catch (e) {
       setError((e as Error).message);
     }
@@ -397,6 +401,14 @@ export default function EngagementWizard() {
       </header>
 
       {error && <div className="error-block">{error}</div>}
+
+      {handoverFrom && (
+        <div className="warning-block handover-banner">
+          Prefilled from monitoring engagement <Link to={`/engagements/${handoverFrom.id}`}>{handoverFrom.title}</Link>.
+          Nothing is authorized until you attest your authorization and activate in step 5. The scope below is only the hosts you picked
+          and the monitor's deny rules; the tools are the assessment defaults, not the monitor's.
+        </div>
+      )}
 
       <div className="wizard-layout">
         <aside className="wizard-steps">

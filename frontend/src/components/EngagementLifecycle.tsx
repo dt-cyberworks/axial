@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { api, type Engagement } from "../api/client";
+import { canStartHandover } from "../lib/handover";
+import HandoverDialog from "./HandoverDialog";
 
 /**
  * REQ-MODE-003: the controls that stop work on an engagement and end it, as one compact
@@ -12,6 +14,7 @@ import { api, type Engagement } from "../api/client";
 export default function EngagementLifecycle({ engagement }: { engagement: Engagement }) {
   const queryClient = useQueryClient();
   const [confirming, setConfirming] = useState<"close" | "revoke" | null>(null);
+  const [handoverOpen, setHandoverOpen] = useState(false);
   const done = () => {
     setConfirming(null);
     queryClient.invalidateQueries({ queryKey: ["engagement", engagement.id] });
@@ -40,6 +43,12 @@ export default function EngagementLifecycle({ engagement }: { engagement: Engage
       {status === "paused" && (
         <button className="primary-action" disabled={busy} onClick={() => resume.mutate()}>
           Resume engagement
+        </button>
+      )}
+      {canStartHandover(engagement) && (
+        <button className="secondary-action" disabled={busy} onClick={() => setHandoverOpen(true)}
+          title="Creates a draft assessment from this monitor, with what it found as the starting point. Authorizes nothing and changes nothing on the monitor">
+          Test deeper
         </button>
       )}
       {(status === "active" || status === "paused") && (
@@ -71,6 +80,7 @@ export default function EngagementLifecycle({ engagement }: { engagement: Engage
         </div>
       )}
       {error && <div className="error-block lifecycle-confirm">{error.message}</div>}
+      {handoverOpen && <HandoverDialog engagement={engagement} onClose={() => setHandoverOpen(false)} />}
     </section>
   );
 }

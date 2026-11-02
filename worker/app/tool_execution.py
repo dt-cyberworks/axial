@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import logging
 import threading
 import uuid
 
 from app.control_plane_client import client
+
+logger = logging.getLogger(__name__)
 
 # REQ-PIPE-006: every check ends as complete, partial, failed or skipped:<why>.
 # `budget_reached` is the one error_reason that means "stopped by its own time
@@ -35,6 +38,10 @@ def outcome_of(result: dict) -> str:
     if reason == BUDGET_REACHED:
         return "partial"
     if reason in SKIP_REASONS:
+        return f"skipped:{reason}"
+    # REQ-EXPLAIN-004: a call the Scope Gateway refused did not run; it is a skip, like a check whose
+    # gateway denial check_outcome() already reports as skipped. Coverage is decided by `success`, not here.
+    if isinstance(reason, str) and reason.startswith("gateway_denied:"):
         return f"skipped:{reason}"
     return "failed"
 
@@ -227,6 +234,20 @@ def coverage_summary(scan_run_id: str | None) -> dict[str, dict]:
     with _COVERAGE_LOCK:
         return {tool: dict(entry, reasons=list(entry["reasons"]))
                 for tool, entry in _COVERAGE.get(str(scan_run_id), {}).items()}
+
+
+def note_partial(scan_run_id: str | None, tool: str, reason: str) -> None:
+    """REQ-SCAN-016: a tool did not give full coverage of one target although no single call ended `partial` (for
+    example every address of a host failed its port scan while other hosts succeeded). Counted like a partial check, so
+    the run reads `coverage_partial:<tool>=<n>` and is never a clean result."""
+    if not scan_run_id:
+        return
+    with _COVERAGE_LOCK:
+        entry = _COVERAGE.setdefault(str(scan_run_id), {}).setdefault(
+            tool, {"attempted": 0, "succeeded": 0, "partial": 0, "reasons": []},
+        )
+        entry["partial"] += 1
+    logger.info("run %s: %s coverage is partial (%s)", scan_run_id, tool, reason)
 
 
 def partial_tools(scan_run_id: str | None) -> dict[str, int]:

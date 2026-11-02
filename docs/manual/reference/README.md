@@ -20,6 +20,7 @@ The console has one navigation list: **Overview**, **Findings**, **Inbox**, **Ne
 | Inbox | Everything that needs a person, in one list | [Inbox](inbox.md) |
 | Engagement detail | The hub of one engagement: readiness, findings, assets, runs and reports | [Engagement](engagement.md) |
 | Edit engagement | Metadata, discovery extras, scan depth, tool grants and overrides, scope | [Engagement](engagement.md) |
+| Not done yet | The checks a run left open and the requests a monitor held back, with the step that runs only what you choose | [Engagement](engagement.md#not-done-yet-engagementsidopen-items) |
 | Run detail | Everything about one run | [Run detail](run-detail.md) |
 | Audit | The full, searchable record of one engagement | [Audit](audit.md) |
 | Account | Your password, two-factor authentication and sessions | [Account, sign-in and administration](account-and-admin.md) |
@@ -41,6 +42,7 @@ Every address the console answers, in one table. The parts written `:id` and `:r
 | `/admin` | Admin, with the tabs Operational settings, Users and Account audit | [Settings](settings.md) |
 | `/engagements/:id` | Engagement detail | [Engagement](engagement.md) |
 | `/engagements/:id/edit` | Edit engagement. `#tool-grants` jumps to the tool grants | [Engagement](engagement.md) |
+| `/engagements/:id/open-items` | Not done yet: what the latest runs left open and what a monitor held back, and the step that runs only what you choose | [Engagement](engagement.md#not-done-yet-engagementsidopen-items) |
 | `/engagements/:id/runs/:runId` | Run detail | [Run detail](run-detail.md) |
 | `/engagements/:id/audit` | Audit | [Audit](audit.md) |
 | `/engagements/:id/live` and `/engagements/:id/results` | Old addresses; they open the engagement detail | [Engagement](engagement.md) |

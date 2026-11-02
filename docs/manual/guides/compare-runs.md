@@ -3,7 +3,7 @@
 **Who this is for:** operators who scan the same engagement more than once, for example to confirm that fixes worked.
 **After this page you can:** read the difference between two runs, and judge when "no longer seen" really means "fixed".
 
-<!-- ui-labels: Diff | Changes vs previous run | Nothing new. | Nothing resolved. | No longer observed | Runs & reports | partial coverage | reduced coverage | Plan | Resolved -->
+<!-- ui-labels: Diff | Changes vs previous run | Nothing new. | Nothing resolved. | No longer observed | Runs & reports | partial coverage | reduced coverage | Plan | Resolved | Hosts and ports | New hosts | Newly open ports | Changed services | Hosts no longer seen | Ports no longer open -->
 
 ## How findings are matched
 
@@ -22,6 +22,25 @@ Open a run and choose **Diff**. Under **Changes vs previous run** it shows:
 | persisting | how many findings were seen in both; only the count is shown |
 
 A summary line gives the counts, for example *3 new, 1 no longer observed, 12 persisting*. The first run of an engagement has no previous run: the tab then says *No previous run to compare — this run is the baseline.* An empty list reads *Nothing new.* or *Nothing resolved.* The same comparison is the **risk overview** of the PDF report; see [Reports](reports.md).
+
+## Hosts and ports
+
+Below the findings, **Hosts and ports** shows what changed in the attack surface itself since the previous full run. It is the same previous run the findings comparison uses, and the panel links to it.
+
+| Part | Meaning |
+|---|---|
+| **New hosts** | in-scope hosts this run saw that the previous run did not. A host the hold policy has not released says so |
+| **Newly open ports** | ports with a service this run found and the previous run did not, with the product it identified |
+| **Changed services** | the same port, now another product or version |
+| **Hosts no longer seen** | hosts the previous run saw and this one did not |
+| **Ports no longer open** | ports the previous run found and this one did not |
+
+It works the same for a test and for a monitor, because every run that did not fail stores what it saw. Two cases are never read as "gone":
+
+- A run with **reduced coverage**, or one limited to some hosts, does not say that a host or port is gone, because that may only mean it was not looked at. The two "no longer" groups are then not shown, and the panel says why. What is new or changed is real.
+- A run, or the run it would be compared with, that has no stored hosts and ports (it finished before they were stored for every engagement) reads *not recorded*, not "everything is gone". The next run can be compared.
+
+A monitor also lists these differences as **Changes** on its engagement page; see [Monitor an attack surface](monitor-an-attack-surface.md).
 
 ## When "no longer observed" means fixed
 

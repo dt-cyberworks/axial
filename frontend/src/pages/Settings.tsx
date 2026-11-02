@@ -39,6 +39,7 @@ export default function Settings() {
   const { data: agentPromptData } = useQuery({ queryKey: ["agent-prompt"], queryFn: api.getAgentPrompt });
   const { data: agentMaxIterationsData } = useQuery({ queryKey: ["agent-max-iterations"], queryFn: api.getAgentMaxIterations });
   const { data: agentMaxTokensData } = useQuery({ queryKey: ["agent-max-tokens"], queryFn: api.getAgentMaxTokens });
+  const { data: lensMaxTokensData } = useQuery({ queryKey: ["lens-max-tokens"], queryFn: api.getLensMaxTokens });
   const { data: approvalTimeoutData } = useQuery({ queryKey: ["approval-timeout-seconds"], queryFn: api.getApprovalTimeoutSeconds });
 
   const [baseUrl, setBaseUrl] = useState("");
@@ -50,6 +51,7 @@ export default function Settings() {
   const [agentPrompt, setAgentPrompt] = useState("");
   const [agentMaxIterations, setAgentMaxIterations] = useState(50);
   const [agentMaxTokens, setAgentMaxTokens] = useState(8192);
+  const [lensMaxTokens, setLensMaxTokens] = useState(4096);
   const [approvalTimeoutSeconds, setApprovalTimeoutSeconds] = useState(900);
   const [nvdApiKey, setNvdApiKey] = useState("");
 
@@ -57,6 +59,7 @@ export default function Settings() {
   useEffect(() => { if (agentPromptData) setAgentPrompt(agentPromptData.prompt); }, [agentPromptData]);
   useEffect(() => { if (agentMaxIterationsData) setAgentMaxIterations(agentMaxIterationsData.value); }, [agentMaxIterationsData]);
   useEffect(() => { if (agentMaxTokensData) setAgentMaxTokens(agentMaxTokensData.value); }, [agentMaxTokensData]);
+  useEffect(() => { if (lensMaxTokensData) setLensMaxTokens(lensMaxTokensData.value); }, [lensMaxTokensData]);
   useEffect(() => { if (approvalTimeoutData) setApprovalTimeoutSeconds(approvalTimeoutData.value); }, [approvalTimeoutData]);
 
   const toolMutation = useMutation({
@@ -70,6 +73,10 @@ export default function Settings() {
   const maxIterationsMutation = useMutation({
     mutationFn: () => api.updateAgentMaxIterations(agentMaxIterations),
     onSuccess: (u) => qc.setQueryData(["agent-max-iterations"], u),
+  });
+  const lensMaxTokensMutation = useMutation({
+    mutationFn: () => api.updateLensMaxTokens(lensMaxTokens),
+    onSuccess: (u) => qc.setQueryData(["lens-max-tokens"], u),
   });
   const maxTokensMutation = useMutation({
     mutationFn: () => api.updateAgentMaxTokens(agentMaxTokens),
@@ -346,6 +353,33 @@ export default function Settings() {
         {maxTokensMutation.isSuccess && <div className="success-block">Saved.</div>}
       </section>
 
+      {/* REQ-LENS-007 */}
+      <section className="form-panel settings-panel">
+        <h2>Lens Agent max tokens (global default)</h2>
+        <div className="warning-block">
+          The completion token cap for one Lens Agent explanation. Some models count their hidden reasoning against it, so a
+          cap that is too low cuts the visible text off. If an answer is cut off the platform retries once with a larger
+          budget, so one explanation makes at most two provider calls. Default 4,096; the retry never goes above 16,384.
+        </div>
+        <label>
+          Max tokens
+          <input
+            type="number"
+            min={1024}
+            max={16384}
+            value={lensMaxTokens}
+            onChange={(e) => setLensMaxTokens(Number(e.target.value))}
+          />
+        </label>
+        <div className="form-actions">
+          <button onClick={() => lensMaxTokensMutation.mutate()} disabled={lensMaxTokensMutation.isPending}>
+            {lensMaxTokensMutation.isPending ? "Saving..." : "Save Lens max tokens"}
+          </button>
+        </div>
+        {lensMaxTokensMutation.isError && <div className="error-block">Save failed: {(lensMaxTokensMutation.error as Error).message}</div>}
+        {lensMaxTokensMutation.isSuccess && <div className="success-block">Saved.</div>}
+      </section>
+
       <ToolCallBudgetPanel />
 
       <section className="form-panel settings-panel">
@@ -379,6 +413,7 @@ export default function Settings() {
       <section className="form-panel settings-panel">
         <h2>Vector Agent instructions (global default)</h2>
         <div className="warning-block">
+          <strong>Never put a password or token in these instructions:</strong> they are stored in plain text. A test account has its own, encrypted place (Test accounts tab of an engagement).{" "}
           This is the agent's system prompt. Editing it is safe: the Scope Gateway decides every action deterministically, so no prompt — however aggressive — can cause an out-of-scope or destructive action. Leave empty to use the built-in default. Campaigns can override this per engagement.
         </div>
         <textarea

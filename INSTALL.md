@@ -352,6 +352,22 @@ database and evidence snapshots; older code alone may not be sufficient.
   [section 4](#create-the-first-administrator) and start again. A fresh install
   is not affected.
 
+#### Settings added after v0.3.2
+
+- **Production installs need a new secret**, `EGRESS_RUN_TOKEN_SECRET`: the key that signs the short-lived identity of a
+  scan run, which the egress proxy verifies to learn which engagement a request belongs to. Add a line to your
+  production `.env` (`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'` makes one); the compose file and
+  the control plane refuse to start without it. `scripts/gen_production_env.py` writes it for new installs.
+- **The scan identity is on by default.** `EGRESS_RUN_TOKENS` (worker) and `EGRESS_REQUIRE_TOKEN` (proxy and control
+  plane) now default to `true`: every request of a scan carries the signed identity of its run, and a request without one
+  is refused. Two engagements may therefore cover the same host and both be active (activating the second shows a
+  notice that names the first instead of refusing). Upgrade the whole stack together (`docker compose up -d --build`
+  recreates the proxy, control plane and worker in one step); a worker from before this setting against a proxy that
+  requires it is refused on every request. To keep the old behavior set both to `false` in `.env`.
+- **The proxy's database role gets one more read privilege.** Migration `0044` runs automatically and grants the
+  `asm_proxy_ro` role `SELECT` on four columns of `scan_run`. If you created the proxy's role yourself under another
+  name, grant the same: `GRANT SELECT (id, engagement_id, state, cancel_requested) ON scan_run TO <your proxy role>;`.
+
 ### Stop or restart safely
 
 Restart production without deleting data:

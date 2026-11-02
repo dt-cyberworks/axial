@@ -60,12 +60,19 @@ const REASON_COPY: Record<string, string> = {
   explicit_out_of_scope: "A deny rule matched this target. Nothing was sent to it.",
   target_out_of_scope: "No active allow-scope matched this target. Nothing was sent to it.",
   active_not_allowed: "The target is in scope, but active testing is not authorized.",
-  no_tool_grant: "This engagement does not grant the tool category this call needs. Grant it under Edit engagement → Tool grants.",
+  no_tool_grant: "This engagement does not grant the tool category and mode this call needs. Add the grant under Edit engagement → Tool grants.",
   tool_not_whitelisted: "The requested tool is not enabled by the safety registry.",
   unsafe_arguments: "The proposed arguments did not pass the deterministic safety policy.",
   outside_time_window: "The authorized testing window is not currently open.",
   engagement_not_active: "The engagement is not active.",
+  asset_held_for_review: "This host is held: the monitor found it and keeps it out of the tests until the owner releases it. Nothing was sent to it, by the scan or by the Vector Agent. Release it from its inbox item or choose it on Review targets.",
   ai_testing_not_enabled: "Vector Agent proposals are not enabled for this engagement.",
+  credential_tool_not_allowed: "A test account's credential may only be used in an HTTP request, never in another tool. Nothing was sent.",
+  credential_host_not_usable: "A test account may only be used on the hosts it is assigned to, and only while they are usable (not held, denied, flagged as a possible takeover or suspended). Nothing was sent.",
+  credential_wrong_use: "A test account's password is only for its own login request. Nothing was sent.",
+  login_attempt_limit: "The login of this test account was already tried the allowed number of times on this host in this run, so it is not tried again. Nothing was sent.",
+  testaccount_login: "The monitor's declared login, covered by the owner's login consent, was allowed without a per-call approval.",
+  credential_unresolvable: "The test account was no longer available when the request was about to go out, so it was not sent.",
   rate_limited: "The configured request rate is exhausted. The action was not sent.",
   rate_limited_wait: "The worker paused for the configured rate limit and will retry.",
   budget_exhausted: "The run used its configured tool-call budget.",
@@ -107,6 +114,9 @@ const REASON_COPY: Record<string, string> = {
   raw_egress_unavailable: "The raw network path (the lease gateway) was unavailable.",
   lease_issued: "A short-lived scope-bound network rule was issued for Nmap.",
   raw_egress_lease_denied: "The scope-bound raw network rule was not issued, so Nmap was not started.",
+  // REQ-SCAN-016/017 (GitHub #77)
+  resolved_target_blocked_address: "The name resolves to an address that can never be a scan target (this machine itself, a link-local or cloud-metadata address, a multicast or reserved address), so no network rule was issued and nothing was sent. Check the name's DNS records.",
+  ipv6_scanning_off: "IPv6 port scanning is switched off on this installation, so this IPv6 address of the host was not scanned. Its IPv4 address was. An administrator can switch it on again.",
   raw_egress_queue_timeout: "The shared Nmap gateway queue did not become available within its bounded wait time.",
   raw_egress_queue_cancelled: "The queued Nmap request was removed because this run was stopped.",
   raw_egress_queue_or_dispatch_failed: "The shared Nmap gateway could not safely schedule or start this scan.",
@@ -118,16 +128,71 @@ const REASON_COPY: Record<string, string> = {
   udp_no_port_states: "UDP returned no port states. This is incomplete, not a clean target.",
   udp_discovery_not_enabled: "Bounded UDP discovery is not enabled for this engagement.",
   scan_run_missing: "No valid scan-run context was available, so the tool was not started.",
-  materialized_ip_missing: "No current audited target IP was available, so raw scanning stayed blocked.",
+  // REQ-EXPLAIN-003: the cause is the NAME (it has no DNS address), for raw and HTTP tools alike.
+  materialized_ip_missing: "This name has no DNS address, so nothing was sent to it. Usually nothing needs doing (an old, internal or retired name). If it should resolve, fix its DNS record; if it should not be scanned, add a deny rule or remove it from the scope.",
   dns_resolution_failed: "The target name could not be resolved to an audited IP.",
   zero_targets_scanned: "Nmap did not scan a target. This is a failed result, not a clean target.",
   runner_dispatch_failed: "The isolated tool runner could not execute the request.",
   nonzero_exit: "The tool exited with an error.",
   runner_reported_failure: "The isolated runner reported an unsuccessful execution.",
   egress_proxy_blocked: "The network egress policy blocked the request.",
+  egress_proxy_unreachable: "The scanner could not reach its own egress proxy, so nothing was sent. This is a failed check, not a clean result: run it again once an administrator has confirmed that the scanner is healthy.",
   cancelled: "The waiting approval or action was cancelled.",
   rejected: "The operator rejected the requested action.",
   expired: "The approval expired before execution.",
+  // REQ-EXPLAIN-001: refusals by the Scope Gateway. Nothing was sent in any of these.
+  ai_testing_forbidden: "This bug-bounty program does not allow AI-driven testing, so the Vector Agent's proposal was refused. Only the program's own policy can change that: check Edit engagement → Bug bounty program policy.",
+  approval_call_mismatch: "The approved action no longer matches the stored request, so it was not run. Request it again.",
+  approval_expired: "The approval ran out before the action started. Request the action again.",
+  approval_not_found: "No approval exists for this action on this engagement, so it was not run.",
+  automation_forbidden: "This bug-bounty program does not allow automated tools, so the call was refused. Check the program policy under Edit engagement.",
+  bounty_program_missing: "A bug-bounty engagement needs its program policy before anything is sent. Fill in Bug bounty program policy under Edit engagement.",
+  crawling_not_enabled: "Crawling and URL history are switched off for this engagement. Switch them on under Edit engagement → Discovery extras if you want them.",
+  endpoint_out_of_scope: "The URL, or the address it points to, is not covered by an allow rule, or a deny rule matches it. Change the scope only if you are authorized to test it.",
+  engagement_not_found: "The engagement for this call does not exist, so the call was refused.",
+  oob_not_enabled: "Out-of-band testing is switched off for this engagement. Switch it on under Edit engagement → Discovery extras if you want it.",
+  passive_not_supported: "This tool cannot run in passive mode, so the call was refused.",
+  risk_statement_required: "A request that changes state needs a stated reason before an operator can approve it. This proposal had none, so it was not made.",
+  scan_run_cancelled: "The run was stopped, so it accepts no further calls.",
+  scan_run_not_active: "The run was not doing work at that moment (it had finished or stopped, was parked for a decision, or was paused for a review of discovered hosts), so this call was refused.",
+  scan_run_not_found: "There is no such run on this engagement, so the call was refused.",
+  scan_run_required: "This kind of call must belong to a running scan. It had no run attached, so it was refused.",
+  screenshots_not_enabled: "Web screenshots are switched off for this engagement. Switch them on under Edit engagement → Discovery extras if you want them.",
+  screenshots_not_permitted_for_bounty: "Screenshots are not taken where a bug-bounty program requires an identification header, because the browser cannot attach it to every request.",
+  subfinder_not_enabled: "Passive subdomain sources (subfinder) are switched off for this engagement. Switch them on under Edit engagement → Discovery extras.",
+  target_is_range_not_permitted_for_tool: "Only Nmap may be pointed at an address range. This tool was refused for a range.",
+  tool_disabled: "This tool is switched off, in this engagement's tool list or in the admin settings. Switch it on under Edit engagement → Campaign tool overrides, or ask an administrator.",
+  tool_not_agent_callable: "This tool belongs to the fixed scan pipeline; the Vector Agent cannot call it, so nothing was executed.",
+  // Why a tool did not finish.
+  content_discovery_catch_all: "The site answers every path with the same page, so content discovery cannot tell hits from misses. Read \"no hits\" as not checked, not as clean.",
+  dns_rematerialization_failed: "The names could not be looked up again just before the tool started, so it did not run. Check that DNS answers, then run again.",
+  not_a_tls_service: "The port speaks plain HTTP or another protocol, so there is no TLS to test. Nothing to do.",
+  raw_egress_revoke_failed: "The short-lived network rule for Nmap could not be confirmed as closed. An administrator should check the raw egress gateway.",
+  budget_reached: "The check stopped at its own time budget. Everything it printed before that is real, but it did not finish, so it is not a clean result. Run it again or raise the budget if the target is slow.",
+  raw_egress_activation_or_dispatch_failed: "The short-lived network rule for the port scan could not be opened or the scan could not be started, so nothing was sent. Run the scan again; if it repeats, an administrator should check the raw egress gateway.",
+  raw_egress_reservation_failed: "The scan could not reserve its slot at the raw egress gateway, so nothing was sent. Run it again; if it repeats, an administrator should check the gateway.",
+  udp_port_profile_invalid: "The UDP port list of this engagement is not valid, so the UDP discovery did not run. Correct the UDP settings under Edit engagement.",
+  raw_scan_incomplete: "The port scan did not run to the end, so its port list is incomplete. Run the scan again.",
+  runner_error: "The isolated tool runner reported an error while executing the tool. Open the technical details; if it repeats, an administrator should check that the runner is up.",
+  screenshot_empty: "The browser produced no screenshot of this page. The page may need a login or may block automated browsers.",
+  selection_unavailable: "The template selection for this check could not be read from the scanner image, so the check did not run. An administrator should check that the tool runner image is current.",
+  subfinder_not_installed: "Subfinder is not installed in the tool runner. An administrator needs to rebuild the runner image.",
+  subfinder_timeout: "Subfinder did not finish within its time limit. Public sources can be slow; run again later.",
+  unsafe_domain: "The domain name did not pass the safety check for tool arguments, so the tool was not started.",
+  approval_claim_denied: "The action was approved, but the Scope Gateway checked it again before running and no longer allowed it (for example the window ended, the scope changed or the engagement was paused). It was not run.",
+  approval_not_claimable: "The approval could not be used (it was already used, rejected or has run out), so the action was not run. Request it again.",
+  handler_error: "The scan's own handler for this check stopped with an error. Results found before that are kept. Run the scan again; if it repeats, report it with the technical details.",
+  oob_unavailable: "The platform's interaction server is not set up, so the templates that confirm through a callback (blind injection, SSRF, XXE and the CVE templates that call back) could not run. The Plan tab names them. Templates that do not need a callback ran as usual. Nothing to do unless you need it; ask an administrator.",
+  // Why a run stopped.
+  asset_review_expired: "Nobody confirmed the discovered hosts in time, so the run stopped. Start it again and decide before the timeout.",
+  asset_review_pending: "The run waits for you to confirm which discovered hosts may be scanned. Open the run and confirm them.",
+  // REQ-APPROVAL-008: the run shows this while one action waits for a decision; its other actions go on.
+  approval_wait: "One action of this run is waiting for your decision. The rest of the scan carries on. The waiting action runs only if you approve it.",
+  reaped_stale_heartbeat: "The run stopped reporting progress (the worker probably restarted), so it was closed. Start the scan again.",
+  // Retest and open items (REQ-RETEST-002/003/007).
+  not_in_this_run: "This run only ran the checks that were chosen, so it did not look at this one. That says nothing about the check: it is not a failure and nothing is missing.",
+  run_ended_early: "The run ended before this check ran, so nothing is known about it. Run it again from the Not done yet page.",
+  not_sent: "The request you confirmed was not sent. The Scope Gateway checked it again and refused it, or the confirmation ran out. It is open again, nothing was lost",
 };
 
 const TOOL_LABELS: Record<string, string> = {
@@ -163,6 +228,10 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function capitalize(value: string): string {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
 function toolLabel(value: unknown): string {
   const raw = text(value);
   if (!raw) return "Tool";
@@ -187,8 +256,10 @@ function compoundReasonExplanation(reason: string): string | null {
     // REQ-BUDGET-002: the run used up its tool-call budget; this is not a tool failing.
     const budgetItem = items.find((part) => /^tool_call_budget=exhausted_\d+_denied/.test(part));
     const denied = budgetItem ? Number(/exhausted_(\d+)_denied/.exec(budgetItem)?.[1] ?? 0) : 0;
+    // REQ-TESTACCT-008: a login that was rejected, or an account that never got a session.
+    const authLost = items.includes("authenticated_coverage_lost");
     const tools = items
-      .filter((part) => part !== budgetItem)
+      .filter((part) => part !== budgetItem && part !== "authenticated_coverage_lost")
       .map((part) => part.split("=")[0])
       .filter(Boolean)
       .join(", ");
@@ -201,7 +272,11 @@ function compoundReasonExplanation(reason: string): string | null {
       ? `Reduced detection coverage: ${tools} was attempted but never once succeeded during this run, ` +
         `so this result is NOT a clean bill of health — parts of the attack surface were never actually examined. `
       : "";
-    return `${budgetText}${toolText}Technical detail: ${detail}.`;
+    const authText = authLost
+      ? "Authenticated coverage was lost: a test account's login was rejected, or never produced a session, so what sits behind the login was " +
+        "NOT tested. This is not a clean result. Check the account under Test accounts. "
+      : "";
+    return `${budgetText}${toolText}${authText}Technical detail: ${detail}.`;
   }
   if (reason.startsWith("coverage_partial:")) {
     const detail = reason.slice("coverage_partial:".length);
@@ -210,9 +285,11 @@ function compoundReasonExplanation(reason: string): string | null {
       .map((part) => part.split("=")[0])
       .filter(Boolean)
       .join(", ");
+    const portScan = detail.split(",").some((part) => part.startsWith("nmap="));
     return (
-      `Partial coverage: at least one ${tools || "check"} check stopped at its time budget before it finished. ` +
-      `Everything it reported before that is real, but a short findings list does NOT mean the ` +
+      `Partial coverage: at least one ${tools || "check"} check stopped at its time budget before it finished` +
+      (portScan ? ", or a port scan has gaps (lost probes, an address of a host that could not be scanned, or ports no longer found)" : "") +
+      `. Everything it reported before that is real, but a short findings list does NOT mean the ` +
       `examined surface is clean. Technical detail: ${detail}.`
     );
   }
@@ -232,18 +309,38 @@ function compoundReasonExplanation(reason: string): string | null {
   return null;
 }
 
+// REQ-EXPLAIN-002: a reason the console has no text for is shown as unexplained, with its code, and logged. It
+// is never dressed up as an explanation ("Gateway Denied:No Tool Grant" reads like one and is not).
+export const UNEXPLAINED = "Unexplained reason";
+const reportedUnexplained = new Set<string>();
+
+function explainPart(part: string): string {
+  const exact = REASON_COPY[part];
+  if (exact) return exact;
+  const compound = compoundReasonExplanation(part);
+  if (compound) return compound;
+  // A code with a detail after a colon: the Scope Gateway's refusal of a call, or a family such as
+  // approval_claim_denied:<why>, handler_error:<type>.
+  const colon = part.indexOf(":");
+  if (colon > 0) {
+    const head = part.slice(0, colon);
+    const detail = part.slice(colon + 1);
+    if (head === "gateway_denied") return `The Scope Gateway refused this call. ${explainPart(detail)}`;
+    if (REASON_COPY[head]) return `${REASON_COPY[head]} (${detail}).`;
+  }
+  if (!reportedUnexplained.has(part)) {
+    reportedUnexplained.add(part);
+    console.warn(`The console has no description for the reason code "${part}".`);
+  }
+  return `${UNEXPLAINED}: ${part}. The console has no description for this code yet.`;
+}
+
 export function reasonExplanation(reason: string | null | undefined): string {
   if (!reason) return "No additional explanation was recorded.";
-  const exact = REASON_COPY[reason];
-  if (exact) return exact;
   // Independent warnings are joined with "; " and each is explained on its own.
   const parts = reason.split(";").map((p) => p.trim()).filter(Boolean);
-  if (parts.length > 1 || compoundReasonExplanation(parts[0] ?? "")) {
-    return parts
-      .map((part) => REASON_COPY[part] ?? compoundReasonExplanation(part) ?? `Technical reason: ${humanize(part)}.`)
-      .join(" ");
-  }
-  return `Technical reason: ${humanize(reason)}.`;
+  if (parts.length === 0) return "No additional explanation was recorded.";
+  return parts.map(explainPart).join(" ");
 }
 
 export function activityKey(entry: RunLogEntry): string {
@@ -368,10 +465,18 @@ function translateToolCall(entry: RunLogEntry, phase: PhaseId): HumanActivity {
   };
 
   if (entry.decision === "DENY") {
+    // REQ-GRANT-001 (#58): a missing grant names the category and mode the call needed, so the reader
+    // knows which box to tick under Tool grants.
+    const category = text(payload.category);
+    const mode = text(payload.mode);
+    const needsGrant = entry.reason === "no_tool_grant" && !!category && !!mode;
     return {
       ...common,
       title: `${label} request blocked`,
-      summary: explanation,
+      summary: needsGrant
+        ? `This engagement has no ${category} / ${mode} grant, which ${label} needs. Tick ${capitalize(mode)} for ${capitalize(category)} under Edit engagement → Tool grants. Nothing was sent.`
+        : explanation,
+      facts: needsGrant ? [...common.facts, { label: "Needs grant", value: `${category} / ${mode}` }] : common.facts,
       outcome: "Not executed",
       tone: "danger",
       routine: false,
@@ -409,6 +514,16 @@ function translateToolCall(entry: RunLogEntry, phase: PhaseId): HumanActivity {
     tone: "success",
     routine: true,
   };
+}
+
+// The worker's own list of failures that really mean "this did not apply / was not possible" (SKIP_REASONS in
+// tool_execution.py). Older records carry no outcome, so the codes are repeated here; a test keeps both lists equal.
+export const SKIPPED_CODES = ["not_a_tls_service", "materialized_ip_missing", "oob_unavailable", "no_tool_grant", "raw_egress_unavailable", "scan_run_missing"];
+
+function isSkippedExecution(payload: Record<string, unknown>, errorCode: string): boolean {
+  const outcome = text(record(payload.outcome_summary).outcome);
+  if (outcome) return outcome.startsWith("skipped");
+  return SKIPPED_CODES.includes(errorCode) || errorCode.startsWith("gateway_denied:");
 }
 
 function translateToolExecution(entry: RunLogEntry, phase: PhaseId): HumanActivity {
@@ -459,6 +574,27 @@ function translateToolExecution(entry: RunLogEntry, phase: PhaseId): HumanActivi
     ports ? `across ${ports}` : "",
   ].filter(Boolean);
 
+  const errorCode = text(payload.error_reason);
+  if (!successful && isSkippedExecution(payload, errorCode)) {
+    const denied = errorCode.startsWith("gateway_denied:") || errorCode === "no_tool_grant";
+    return {
+      id: activityKey(entry),
+      phase,
+      title: `${label} was skipped`,
+      summary: reasonExplanation(errorCode || entry.reason),
+      outcome: "Skipped",
+      tone: denied ? "attention" : "neutral",
+      routine: false,
+      tool: label,
+      target,
+      facts,
+      reasonCode: errorCode || entry.reason || undefined,
+      source: entry.actor,
+      decision: entry.decision,
+      ts: entry.ts,
+      countsAsAttention: denied,
+    };
+  }
   if (!successful) {
     return {
       id: activityKey(entry),
@@ -487,7 +623,7 @@ function translateToolExecution(entry: RunLogEntry, phase: PhaseId): HumanActivi
       title: `${title}, but the result is incomplete`,
       summary: [
         `${resultParts.join(" ")}.`,
-        ...partialReasons.map((reason) => REASON_COPY[reason] ?? `Technical reason: ${humanize(reason)}.`),
+        ...partialReasons.map((reason) => explainPart(reason)),
       ].join(" "),
       outcome: "Partial",
       tone: "attention",
@@ -612,6 +748,31 @@ function translateAgentEvent(entry: RunLogEntry): HumanActivity {
       countsAsBlocked: true,
     };
   }
+  if (event === "test_account_login") {
+    // REQ-TESTACCT-008: what a test account's login came to on one host. Never the value.
+    const account = text((payload.proposal as Record<string, unknown> | undefined)?.account);
+    const ok = entry.reason === "session_established";
+    return {
+      ...base,
+      title: `Test account ${account || "login"} ${ok ? "logged in" : "was rejected"}`,
+      summary: ok ? "The target accepted the login and a session was established for this host."
+        : "The target did not accept the login (or sent no session). The account is not tried again on this host in this run.",
+      outcome: ok ? "Logged in" : "Rejected",
+      tone: ok ? "success" : "attention",
+      routine: ok,
+    };
+  }
+  if (event === "agent_phase_skipped") {
+    // REQ-AGENT-028: a deliberate setting, not a failure: no request was made to the language model.
+    return {
+      ...base,
+      title: "Vector Agent: off for this engagement",
+      summary: `${reasonExplanation(entry.reason)} The Vector Agent was not started and no request was made to the language model.`,
+      outcome: "Skipped",
+      tone: "neutral",
+      routine: false,
+    };
+  }
   if (event === "proposal_skipped") {
     return {
       ...base,
@@ -640,6 +801,40 @@ function translateAgentEvent(entry: RunLogEntry): HumanActivity {
       title: `${proposal.description} needs operator approval`,
       summary: "The action remains stopped until the exact stored request is approved.",
       outcome: "Waiting",
+      tone: "attention",
+      routine: false,
+      countsAsAttention: true,
+    };
+  }
+  // REQ-RETEST-007: a request a person confirmed one by one on the review step, sent in a restricted run.
+  if (event === "open_request_sending") {
+    return {
+      ...base,
+      title: `Sending the request you confirmed: ${proposal.description}`,
+      summary: "You chose to send this exact request. The Scope Gateway checked it again before it goes out.",
+      outcome: "Sending",
+      tone: "info",
+      routine: false,
+    };
+  }
+  if (event === "open_request_sent") {
+    const response = text(payload.observation);
+    return {
+      ...base,
+      title: `The request you confirmed was sent: ${proposal.description}`,
+      summary: response.slice(0, 260) || "The request was sent. The full response is under Technical details.",
+      outcome: "Sent",
+      tone: "success",
+      routine: false,
+      rawDetail: response || undefined,
+    };
+  }
+  if (event === "open_request_not_sent") {
+    return {
+      ...base,
+      title: `Not sent, still open: ${proposal.description}`,
+      summary: reasonExplanation(entry.reason),
+      outcome: "Not sent",
       tone: "attention",
       routine: false,
       countsAsAttention: true,
@@ -964,6 +1159,59 @@ export function translateActivity(entry: RunLogEntry, fallbackPhase: PhaseId): H
   };
 }
 
+const SECONDS_TO_PAIR = 15;
+
+/**
+ * REQ-EXPLAIN-004: one cause is one row.
+ *  - Every tool that skipped the same name because it has no DNS address becomes ONE row for that name,
+ *    listing the tools, instead of one row per tool.
+ *  - A refusal by the Scope Gateway is recorded twice (the gateway's own entry and the tool's result
+ *    "gateway_denied:<why>"); the second is dropped when the first is in the list.
+ * Nothing is hidden: the underlying entries stay in the audit log, and a run in which a load-bearing tool
+ * never succeeded still carries its coverage warning (REQ-SCAN-014).
+ */
+export function consolidateActivities(activities: HumanActivity[]): HumanActivity[] {
+  const denials = activities.filter((a) => a.decision === "DENY" && a.title.endsWith("request blocked"));
+  const pairedWithDenial = (a: HumanActivity) =>
+    !!a.reasonCode?.startsWith("gateway_denied:") && denials.some((d) =>
+      d.tool === a.tool && d.target === a.target
+      && Math.abs(new Date(d.ts).getTime() - new Date(a.ts).getTime()) <= SECONDS_TO_PAIR * 1000);
+
+  const noAddress = new Map<string, HumanActivity[]>();
+  const kept: HumanActivity[] = [];
+  const firstIndex = new Map<string, number>();
+  for (const activity of activities) {
+    if (pairedWithDenial(activity)) continue;
+    if (activity.reasonCode === "materialized_ip_missing" && activity.outcome === "Skipped" && activity.target) {
+      const group = noAddress.get(activity.target) ?? [];
+      group.push(activity);
+      noAddress.set(activity.target, group);
+      if (!firstIndex.has(activity.target)) {
+        firstIndex.set(activity.target, kept.length);
+        kept.push(activity); // placeholder, replaced below
+      }
+      continue;
+    }
+    kept.push(activity);
+  }
+  for (const [target, group] of noAddress) {
+    const tools = [...new Set(group.map((a) => a.tool).filter(Boolean))] as string[];
+    const first = group[0];
+    kept[firstIndex.get(target)!] = {
+      ...first,
+      id: `${first.id}|no-address`,
+      title: `${target} has no DNS address`,
+      summary: `${reasonExplanation("materialized_ip_missing")}`,
+      tool: tools.join(", ") || undefined,
+      facts: [
+        { label: "Name", value: target },
+        { label: group.length === 1 ? "Skipped" : "Skipped checks", value: tools.join(", ") || "none named" },
+      ],
+    };
+  }
+  return kept;
+}
+
 export function summarizeRun(run: ScanRun | undefined, activities: HumanActivity[]): RunActivitySummary {
   const completedTools = activities.filter((activity) => activity.countsAsCompletedTool).length;
   const discoveredServices = activities
@@ -1016,9 +1264,13 @@ export function summarizeRun(run: ScanRun | undefined, activities: HumanActivity
     };
   }
   if (run.state === "waiting_approval") {
+    // REQ-APPROVAL-008: with this reason only ONE action waits; a parked run or a review pause has stopped altogether.
+    const oneAction = run.state_reason === "approval_wait";
     return {
-      headline: "The scan is waiting for an operator decision",
-      detail: `The current action remains stopped in ${phase} until it is approved, rejected, cancelled, or expires.`,
+      headline: oneAction ? "One action is waiting for your decision, the scan carries on" : "The scan is waiting for an operator decision",
+      detail: oneAction
+        ? `The rest of ${phase} keeps running. The waiting action runs only if you approve it; it is skipped if you reject it, cancel the run, or it expires.`
+        : `The current action remains stopped in ${phase} until it is approved, rejected, cancelled, or expires.`,
       completedTools,
       discoveredServices,
       blockedActions,

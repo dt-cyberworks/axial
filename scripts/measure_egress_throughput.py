@@ -34,7 +34,6 @@ import os
 import subprocess
 import sys
 import time
-import urllib.request
 
 TARGET_HOST = "throughput-target.test"
 TARGET_NAME = "asm-throughput-target"
@@ -178,19 +177,30 @@ def compose(*args: str, stdin: str | None = None, timeout: int = 600) -> str:
     return sh("docker", "compose", "--profile", "runner", *args, stdin=stdin, timeout=timeout)
 
 
-def internal_post(base: str, token: str, path: str, body: dict) -> dict:
-    request = urllib.request.Request(
-        base + path, data=json.dumps(body).encode(), method="POST",
-        headers={"Content-Type": "application/json", "X-ASM-Internal-Token": token},
+def create_engagement() -> str:
+    """A synthetic `lab` engagement scoped to the throwaway container only, made with the control plane's own code inside its
+    container (like `delete_engagement` below) and owned by the oldest active administrator. This is operator tooling on the
+    operator's own dev database for a target that exists for this run alone; the product has no endpoint for it (REQ-BENCHSEP-001)."""
+    code = (
+        "import datetime as dt, sys\n"
+        "from sqlalchemy import select\n"
+        "from app.db.base import SessionLocal\n"
+        "from app.models.engagement import Engagement, ScopeAsset, ToolGrant\n"
+        "from app.models.user import User\n"
+        "db = SessionLocal()\n"
+        "owner = db.scalars(select(User).where(User.role == 'admin', User.status == 'active').order_by(User.created_at).limit(1)).first()\n"
+        "if owner is None: raise SystemExit('no active administrator exists to own the synthetic engagement')\n"
+        "now = dt.datetime.now(dt.timezone.utc)\n"
+        "eng = Engagement(title='Throughput measurement (synthetic, safe to delete)', source='lab', status='active',\n"
+        "                 owner_user_id=owner.id, authorized_from=now - dt.timedelta(minutes=5),\n"
+        "                 authorized_until=now + dt.timedelta(hours=2), tcp_port_from=80, tcp_port_to=80)\n"
+        "db.add(eng); db.flush()\n"
+        "db.add(ScopeAsset(engagement_id=eng.id, rule='allow', asset_type='domain', value=sys.argv[1], active_allowed=True,\n"
+        "                  authorization_verified=True, authorization_method='operator_authorization_attestation'))\n"
+        "db.add(ToolGrant(engagement_id=eng.id, tool_category='fingerprint', mode='active', requires_manual_approval=False))\n"
+        "db.commit(); print(eng.id)\n"
     )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - operator-supplied local URL
-        return json.loads(response.read().decode())
-
-
-def create_engagement(base: str, token: str) -> str:
-    body = {"title": "Throughput measurement (synthetic, safe to delete)", "target_host": TARGET_HOST,
-            "tcp_port_from": 80, "tcp_port_to": 80, "tool_categories": ["fingerprint"]}
-    return internal_post(base, token, "/internal/benchmark/engagements", body)["id"]
+    return compose("exec", "-T", "control-plane", "python", "-c", code, TARGET_HOST).strip().splitlines()[-1]
 
 
 def delete_engagement(engagement_id: str) -> None:
@@ -235,18 +245,16 @@ def main() -> int:
     parser.add_argument("--requests", type=int, default=100, help="requests per configuration")
     parser.add_argument("--concurrency", default="1,2,8", help="comma-separated client concurrencies")
     parser.add_argument("--dns-host", default="cloud.example.com", help="name whose resolution is timed (DNS only, no connection)")
-    parser.add_argument("--control-plane", default="http://127.0.0.1:8000")
     parser.add_argument("--proxy", default="egress-proxy:3128", help="proxy address as seen from the tool-runner")
     parser.add_argument("--out", help="also write the result as JSON to this file")
     args = parser.parse_args()
-    token = os.environ.get("INTERNAL_API_TOKEN", "change-me-in-dev")
     levels = [int(c) for c in args.concurrency.split(",") if c.strip()]
     if not 1 <= args.requests <= 2000 or not levels or max(levels) > 32:
         raise SystemExit("--requests must be 1..2000 and concurrency at most 32")
 
     result: dict = {"measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "requests_per_config": args.requests}
     start_target()
-    engagement = create_engagement(args.control_plane, token)
+    engagement = create_engagement()
     try:
         result["engagement_id"] = engagement
         stages = compose("exec", "-T", "egress-proxy", "python", "-c", STAGES, args.dns_host, engagement, TARGET_HOST,

@@ -163,26 +163,73 @@ class NftPolicyManager:
     """
     def __init__(
         self, runner: Callable[[str, bool], None] = _subprocess_nft, *, proxy_addresses=None, proxy_port=3128,
-        num_slots: int = 1, oob_addresses=None, oob_port: int = 8080,
+        num_slots: int = 1, oob_addresses=None, oob_port: int = 8080, oob_enabled: bool = False,
     ):
         self._run = runner
-        self._proxy_addresses = [str(ipaddress.ip_address(value)) for value in (proxy_addresses or [])]
+        self._proxy_addresses = self._normalize(proxy_addresses)
         self._proxy_port = int(proxy_port)
         if not 1 <= self._proxy_port <= 65535:
             raise ValueError("proxy_port_invalid")
         # REQ-COVER-004: the self-hosted interaction server's own address(es),
         # reachable on ONE tcp port only, and only when configured. Never a
-        # target address; the address set is fixed at start-up like the proxy.
-        self._oob_addresses = [
-            str(ipaddress.ip_address(value)) for value in (oob_addresses or [])
-            if ipaddress.ip_address(value).version == 4
-        ]
+        # target address. `oob_enabled` keeps the (then possibly empty) set and
+        # its one rule in the policy although the server's name did not resolve
+        # at start-up, so refresh_endpoints() can add it once it does.
+        self._oob_addresses = self._normalize(oob_addresses, version=4)
         self._oob_port = int(oob_port)
-        if self._oob_addresses and not 1 <= self._oob_port <= 65535:
+        self._oob_enabled = bool(oob_enabled) or bool(self._oob_addresses)
+        if self._oob_enabled and not 1 <= self._oob_port <= 65535:
             raise ValueError("oob_port_invalid")
         self.num_slots = int(num_slots)
         if self.num_slots < 1:
             raise ValueError("num_slots_invalid")
+
+    @staticmethod
+    def _normalize(values, version: int | None = None) -> list[str]:
+        """Sorted, de-duplicated address strings; `version` keeps only that IP version."""
+        found = {str(ipaddress.ip_address(value)) for value in (values or [])}
+        if version is not None:
+            found = {value for value in found if ipaddress.ip_address(value).version == version}
+        return sorted(found)
+
+    def proxy_addresses(self) -> list[str]:
+        """The proxy addresses the policy lets through right now."""
+        return list(self._proxy_addresses)
+
+    def refresh_endpoints(self, proxy_addresses=None, oob_addresses=None) -> bool:
+        """Replace the addresses the policy lets the runner's namespace reach (REQ-RAWLEASE-005).
+
+        The egress proxy (and the optional interaction server) are Compose services whose address changes when they
+        are recreated; the policy must follow, or the runner silently loses the proxy. Only the proxy / interaction
+        server sets are touched, only for the address families whose membership changed, in one nft transaction: the
+        slot sets, the chains and the deny-all baseline stay exactly as they are, and a failed run leaves both the
+        kernel and the recorded addresses as they were. `None` leaves that endpoint alone. An empty proxy list is
+        refused: the policy never loses the proxy because a lookup came back empty. An empty interaction-server
+        list is valid (the server is gone). Returns whether anything changed."""
+        new_proxy = self._proxy_addresses if proxy_addresses is None else self._normalize(proxy_addresses)
+        if proxy_addresses is not None and not new_proxy:
+            raise PolicyError("proxy_addresses_empty")
+        new_oob = self._oob_addresses
+        if oob_addresses is not None and self._oob_enabled:
+            new_oob = self._normalize(oob_addresses, version=4)
+        lines: list[str] = []
+        for name, old, new, version in (
+            ("proxy_v4", self._proxy_addresses, new_proxy, 4),
+            ("proxy_v6", self._proxy_addresses, new_proxy, 6),
+            ("oob_v4", self._oob_addresses, new_oob, 4),
+        ):
+            before = [v for v in old if ipaddress.ip_address(v).version == version]
+            after = [v for v in new if ipaddress.ip_address(v).version == version]
+            if before == after:
+                continue
+            lines.append(f"flush set inet {TABLE} {name}")
+            if after:
+                lines.append(f"add element inet {TABLE} {name} {{ {', '.join(after)} }}")
+        if not lines:
+            return False
+        self._run("\n".join(lines) + "\n", True)
+        self._proxy_addresses, self._oob_addresses = new_proxy, new_oob
+        return True
 
     def _validate_slot(self, slot: int) -> None:
         if not 0 <= slot < self.num_slots:
@@ -204,9 +251,9 @@ class NftPolicyManager:
         # interval) - unchanged behavior for every pre-existing caller.
         if self._oob_addresses:
             elements.append(f"add element inet {TABLE} oob_v4 {{ {', '.join(self._oob_addresses)} }}")
-        oob_set = f"    set oob_v4 {{ type ipv4_addr; }}\n" if self._oob_addresses else ""
+        oob_set = f"    set oob_v4 {{ type ipv4_addr; }}\n" if self._oob_enabled else ""
         oob_rule = (
-            f"        ip daddr @oob_v4 tcp dport {self._oob_port} accept\n" if self._oob_addresses else ""
+            f"        ip daddr @oob_v4 tcp dport {self._oob_port} accept\n" if self._oob_enabled else ""
         )
         slot_sets = "\n".join(
             f"    set allowed_v4_{i} {{ type ipv4_addr; flags interval, timeout; timeout 30m; }}\n"
@@ -339,6 +386,14 @@ class RawEgressGateway:
 
     def initialize(self) -> None:
         self._policy.initialize()
+
+    def proxy_addresses(self) -> list[str]:
+        return self._policy.proxy_addresses()
+
+    def refresh_endpoints(self, proxy_addresses=None, oob_addresses=None) -> bool:
+        """See NftPolicyManager.refresh_endpoints; serialized with the lease operations that also run nft."""
+        with self._lock:
+            return self._policy.refresh_endpoints(proxy_addresses, oob_addresses)
 
     def _promote_locked(self) -> None:
         while len(self._reservations) < self._max_concurrent and self._queue:

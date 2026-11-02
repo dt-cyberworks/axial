@@ -63,7 +63,7 @@ An admin sets the defaults for everyone under **Settings → Tool policy (global
 
 ## Make a tool wait for your approval
 
-Tick **Approval** for the tool in the overrides table, or tick it in the grants table under **Require approval for these active tools**. It is the same setting in two places. From then on every call of that tool pauses the run until you decide; see [Approve or deny a tool call](approve-or-deny-a-tool-call.md). Approval only applies to active tools: a category has to be granted for active before a tool in it can ask.
+Tick **Approval** for the tool in the overrides table, or tick it in the grants table under **Require approval for these active tools**. It is the same setting in two places. From then on every call of that tool waits until you decide, and the rest of the run carries on meanwhile; see [Approve or deny a tool call](approve-or-deny-a-tool-call.md). Approval only applies to active tools: a category has to be granted for active before a tool in it can ask.
 
 ## Why can't this tool run?
 

@@ -28,10 +28,13 @@ def _is_egress_denial(rec: dict) -> bool:
     """
     headers = rec.get("header") or rec.get("headers")
     if isinstance(headers, dict):
-        if any(str(name).strip().lower() == EGRESS_DENIAL_HEADER for name in headers):
+        # GitHub #81 ("not in this issue"): httpx reports header names snake_cased (`x_asm_egress_denied`), which the
+        # dashed comparison never matched - the proxy's own 409 page became a live service and two "validated"
+        # security-header findings. Compare the way _normalized_headers does.
+        if any(str(name).strip().lower().replace("_", "-") == EGRESS_DENIAL_HEADER for name in headers):
             return True
-    raw = rec.get("response") or rec.get("raw_response") or ""
-    return EGRESS_DENIAL_HEADER in str(raw).lower()
+    raw = str(rec.get("response") or rec.get("raw_response") or "").lower().replace("_", "-")
+    return EGRESS_DENIAL_HEADER in raw
 
 
 def _normalized_headers(rec: dict) -> dict[str, str]:

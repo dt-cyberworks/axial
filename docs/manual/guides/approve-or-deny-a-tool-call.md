@@ -3,7 +3,7 @@
 **Who this is for:** operators who may be asked to decide on a request during a scan.
 **After this page you can:** read an approval popup, decide with confidence, and know exactly what your click authorises.
 
-<!-- ui-labels: Approval required — state-changing request | What it will do | Why (agent rationale) | Risk assessment (by the agent) | Approve & open run | Reject | Manual approval timeout (global default) | Manual approval timeout (campaign override) | Require approval for these active tools -->
+<!-- ui-labels: Approval required — state-changing request | Approval required — request | Approval required — check | What it will do | Why (agent rationale) | Why (automatic scan) | Risk assessment (by the agent) | Approve & open run | Reject | Manual approval timeout (global default) | Manual approval timeout (campaign override) | Require approval for these active tools -->
 
 ## When you are asked
 
@@ -19,17 +19,23 @@ The run then shows `waiting_approval` and a popup appears **on whichever page yo
 
 A test run can be started *semi-attended*: choose **Notify me when you need me** next to **Start run**. When the agent needs a decision the run is parked instead of waiting: it holds no worker slot, the request shows in the [inbox](../reference/inbox.md) and a "run needs you" alert goes to the engagement's webhook. You decide whenever you come back, within the approval timeout; the run then continues from where it stopped. A request that is decided *no*, or that nobody answers in time, is reported to the agent as not executed and the run carries on.
 
-A **monitoring** engagement has nobody to decide at all. It never asks: a call that would need approval is not made, and is kept in the inbox as a suggestion for you to test yourself.
+A **monitoring** engagement has nobody to decide at all. It never asks: a call that would need approval is not made, and is kept whole in the inbox as **Held back for you**. You can send it later, one request at a time, in a run you start and watch: see [Retest and run only what is open](retest-and-open-items.md).
 
 ## Read the popup
 
 ![The approval popup: what the request will do, why the agent wants it, and its risk](../img/approval-popup.png)
 
-The popup, **Approval required — state-changing request**, has three parts:
+The popup has three parts, and its wording follows what the request is and who raised it:
 
 - **What it will do**: the exact request, so you see the method, the target and the body, not a summary.
-- **Why (agent rationale)**: why the agent wants to send it.
+- **Why**: **Why (agent rationale)** is the reason the Vector Agent gave for the request, for every request it asks you about, a plain GET included. **Why (automatic scan)** is a sentence about what an automatic check is for ("Content discovery (quickhits), part of the automatic scan"). If no reason was recorded the popup says so ("The agent gave no reason for this request."); that is not a display fault. A reason is cut at 2,000 characters and a token or cookie in it is masked.
 - **Risk assessment (by the agent)**: the agent's own risk level and description. A state-changing request must come with one; a proposal without a risk statement is denied.
+
+| Heading | Means |
+|---|---|
+| **Approval required — state-changing request** | A write method (POST, PUT, PATCH, DELETE) or any request with a body. The badge shows the agent's risk level. A body makes a request a write whatever its method and whatever the agent says about its risk |
+| **Approval required — request** | A GET, HEAD or OPTIONS without a body, asked for because a grant or an override marks the tool for approval. The badge reads *read-only request* |
+| **Approval required — check** | A scan tool such as content discovery rather than a single HTTP request. The popup names who asked: **The Vector Agent** or **The automatic scan** |
 
 Ask yourself three questions: *Is this target and path in scope and meant to be changed by a test? Could it delete, overwrite or charge for something? Do I accept the risk the agent describes?* If you are not sure, reject. Rejecting costs one check; approving a destructive request cannot be undone.
 

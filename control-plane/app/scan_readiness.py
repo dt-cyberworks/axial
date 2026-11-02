@@ -30,9 +30,45 @@ class Blocker:
 
 
 @dataclasses.dataclass
+class Warning_:
+    """REQ-GRANT-002: something that will not work as the operator expects, but does not stop a run."""
+    code: str
+    message: str
+    action: str | None = None
+
+
+@dataclasses.dataclass
 class Readiness:
     ready: bool
     blockers: list[Blocker]
+    warnings: list[Warning_] = dataclasses.field(default_factory=list)
+
+
+# REQ-GRANT-002: a discovery switch and a tool grant are separate layers. Each row is a switch, the tool(s)
+# behind it, and the grant the Scope Gateway requires for that call. The switch never creates the grant.
+SWITCH_GRANTS = (
+    ("subfinder_enabled", "subfinder_without_passive_grant", "Passive subdomain sources", "subfinder", "recon", "passive"),
+    ("crawling_enabled", "crawling_without_grant", "Crawling and URL history", "the crawler", "fingerprint", "active"),
+    ("screenshots_enabled", "screenshots_without_grant", "Web screenshots", "the screenshot tool", "fingerprint", "active"),
+    ("oob_enabled", "oob_without_grant", "Out-of-band interaction testing", "the out-of-band templates", "vuln", "active"),
+)
+
+
+def _switch_warnings(db: Session, eng: Engagement) -> list[Warning_]:
+    granted = {
+        (g.tool_category, g.mode)
+        for g in db.scalars(select(ToolGrant).where(ToolGrant.engagement_id == eng.id))
+    }
+    out: list[Warning_] = []
+    for switch, code, label, tool, category, mode in SWITCH_GRANTS:
+        if getattr(eng, switch, False) and (category, mode) not in granted:
+            out.append(Warning_(
+                code,
+                f"{label} is switched on, but {category} / {mode} is not granted, so {tool} will be skipped. "
+                f"Tick {mode.capitalize()} for {category.capitalize()} under Tool grants to let it run.",
+                action="tool_grants",
+            ))
+    return out
 
 
 def evaluate(db: Session, engagement_id) -> Readiness:
@@ -91,6 +127,21 @@ def evaluate(db: Session, engagement_id) -> Readiness:
             action="tool_grants",
         ))
 
+    # REQ-BASE-001: a monitor is activated into a discovery; nothing scans until the owner has
+    # chosen which discovered hosts are monitored. A discovery run itself skips this blocker.
+    if eng.operating_mode == "monitoring" and eng.target_review_state in (
+        "discovering", "awaiting_selection", "discovery_failed",
+    ):
+        blockers.append(Blocker(
+            "targets_not_confirmed",
+            {
+                "discovering": "Discovery is still running. When it has finished you choose the targets to monitor.",
+                "awaiting_selection": "Choose the targets to monitor first: the discovery has finished.",
+                "discovery_failed": "The discovery did not finish. Run it again, then choose the targets to monitor.",
+            }[eng.target_review_state],
+            action="select_targets",
+        ))
+
     if eng.source == "bug_bounty":
         prog = db.scalar(select(BountyProgram).where(BountyProgram.engagement_id == eng.id))
         # GitHub issue #32: REQ-AUTH-006's 2026-08-12 amendment made the
@@ -104,4 +155,4 @@ def evaluate(db: Session, engagement_id) -> Readiness:
                 "Bug-bounty engagement without a configured program policy. Program policy is required.",
             ))
 
-    return Readiness(ready=len(blockers) == 0, blockers=blockers)
+    return Readiness(ready=len(blockers) == 0, blockers=blockers, warnings=_switch_warnings(db, eng))

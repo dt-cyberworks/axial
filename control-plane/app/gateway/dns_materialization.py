@@ -28,6 +28,7 @@ import uuid
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.gateway import address_vetting
 from app.gateway.audit import append_audit_log
 from app.models.asset import DiscoveredAsset
 from app.models.engagement import Engagement, ScopeAsset
@@ -127,6 +128,10 @@ def materialize(db: Session, engagement_id: uuid.UUID, scan_run_id: uuid.UUID | 
         )
     ).all()
     for d in discovered:
+        if d.hold_state == "held":
+            # REQ-MODE-008 (GitHub #79): a held host is not resolved for the run, so no address of it is audited,
+            # no IP-based tool can be pointed at it, and the raw-egress allowlist does not carry it.
+            continue
         allowed, scope_asset_id = _name_allowed_by_current_scope(d.value, assets)
         if allowed:
             targets.setdefault(d.value.lower(), scope_asset_id)
@@ -143,6 +148,12 @@ def materialize(db: Session, engagement_id: uuid.UUID, scan_run_id: uuid.UUID | 
         ips = _resolve(hostname)
         if not ips:
             unresolved.append(hostname)
+            continue
+        # REQ-SCAN-016: one never-legitimate answer (loopback, link-local, the metadata address, ...) poisons the
+        # whole name, as in the egress proxy: none of its addresses is materialized or ever reaches raw egress.
+        poison = next((r for r in map(address_vetting.never_legitimate_reason, sorted(ips)) if r), None)
+        if poison is not None:
+            denied_ips.extend({"hostname": hostname, "ip_address": ip, "reason": poison} for ip in sorted(ips))
             continue
         for ip in sorted(ips):
             if _ip_denied(ip, deny_nets):
@@ -164,7 +175,7 @@ def materialize(db: Session, engagement_id: uuid.UUID, scan_run_id: uuid.UUID | 
     if unresolved:
         warnings.append(f"{len(unresolved)} name(s) without an A/AAAA record - not materialized")
     if denied_ips:
-        warnings.append(f"{len(denied_ips)} resolved IP(s) dropped by deny precedence")
+        warnings.append(f"{len(denied_ips)} resolved IP(s) dropped (deny precedence, or an address that can never be a scan target)")
     if not resolved:
         warnings.append("no IPs materialized - raw egress stays fail-closed for these names")
 

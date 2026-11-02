@@ -1,4 +1,5 @@
 import { type ApprovalRequest } from "../api/client";
+import { approvalWording, type ApprovalCall } from "../lib/approvalWording";
 
 /**
  * Live approval popup for a state-changing agent request (REQ-APPROVAL-002/003):
@@ -22,17 +23,13 @@ export default function ApprovalModal({
   moreCount?: number;
   overlayClassName?: string;
 }) {
-  const tc = approval.tool_call as {
-    tool?: string;
-    target?: string;
-    args?: { method?: string; path?: string; headers?: Record<string, string>; body?: string };
-    rationale?: string;
-    risk?: { level?: string; description?: string };
-  };
+  const tc = approval.tool_call as ApprovalCall;
   const args = tc.args ?? {};
   const risk = tc.risk ?? {};
   const headers = args.headers ?? {};
-  const riskClass = risk.level === "high" ? "bad" : risk.level === "medium" ? "warn" : "neutral";
+  // REQ-APPROVALUI-003: the wording follows what the request is (method, body) and who raised it.
+  const wording = approvalWording(tc);
+  const riskClass = !wording.isWrite ? "neutral" : risk.level === "high" ? "bad" : risk.level === "medium" ? "warn" : "neutral";
   // REQ-APPROVAL-006: not every gated tool is a crafted HTTP request - a
   // scanner (testssl/nikto/nuclei/...) has no method/path/risk concept at
   // all. Rendering "? →" and "(no risk description)" for those read as a
@@ -45,14 +42,14 @@ export default function ApprovalModal({
       <div className="modal-card">
         <div className="panel-heading">
           <div>
-            <h2>Approval required — state-changing request</h2>
+            <h2>{wording.heading}</h2>
             <p>
-              The Vector Agent wants to send a write request
+              {wording.action}
               {engagementTitle ? <> on <strong>{engagementTitle}</strong></> : null}. It will not run
               until you approve it.
             </p>
           </div>
-          <span className={`pill ${riskClass}`}>{hasRiskAssessment ? `risk: ${risk.level ?? "?"}` : "read-only check"}</span>
+          <span className={`pill ${riskClass}`}>{wording.badge}</span>
         </div>
 
         <div className="modal-body">
@@ -66,8 +63,8 @@ export default function ApprovalModal({
             <pre className="agent-response">{`${tc.tool ?? "?"}  →  ${tc.target ?? ""}`}</pre>
           )}
 
-          <h4>Why (agent rationale)</h4>
-          <p>{tc.rationale || "(no rationale provided)"}</p>
+          <h4>{wording.whyLabel}</h4>
+          <p>{wording.whyText}</p>
 
           {hasRiskAssessment && (
             <>

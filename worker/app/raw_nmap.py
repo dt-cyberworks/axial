@@ -46,13 +46,23 @@ class HostDiscoveryOutcome:
 
 _T = TypeVar("_T")
 
+_DROPPED_PROBE_ERRORS = ("Operation not permitted", "Network is unreachable", "No route to host")
+
+
 def count_dropped_probes(stderr: str | None) -> int:
     """GitHub issue #60: probes the local firewall refused to send. nmap logs each as
     `sendto in send_ip_packet_sd: sendto(...) => Operation not permitted` and carries on as if it
     had been sent; the host then looks silent. nmap stops printing after a few messages, so this
     is a lower bound: zero means none were reported, any number above zero means the scan has
-    holes."""
-    return sum(1 for line in str(stderr or "").splitlines() if "Operation not permitted" in line)
+    holes.
+
+    GitHub #77: the same holds when the scanner cannot reach the target's network at all - `Network is unreachable` and
+    `No route to host` (an IPv6 target on a network that carries no IPv6): every probe is lost, nmap reports all ports
+    filtered, and that must not read as a clean scan."""
+    return sum(
+        1 for line in str(stderr or "").splitlines()
+        if any(text in line for text in _DROPPED_PROBE_ERRORS)
+    )
 
 def _ports_in_range(ports: Iterable[int], port_range: str) -> list[int]:
     """The given ports that lie inside an nmap `-p` style range ("1-65535" or "22,80-90")."""

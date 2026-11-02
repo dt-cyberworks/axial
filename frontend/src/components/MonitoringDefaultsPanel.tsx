@@ -25,8 +25,7 @@ export default function MonitoringDefaultsPanel() {
   const { data } = useQuery({ queryKey: ["monitoring-defaults"], queryFn: api.getMonitoringDefaults });
   const [caps, setCaps] = useState<Record<string, boolean>>({});
   const [depth, setDepth] = useState<RunDepth>("standard");
-  const [holdCustomer, setHoldCustomer] = useState("hold");
-  const [holdOther, setHoldOther] = useState("auto");
+  const [policy, setPolicy] = useState<"auto" | "hold">("hold");
   const [breaker, setBreaker] = useState(true);
   const [concurrent, setConcurrent] = useState(1);
 
@@ -34,8 +33,7 @@ export default function MonitoringDefaultsPanel() {
     if (!data) return;
     setCaps(data.capabilities);
     setDepth(data.scan_profile);
-    setHoldCustomer(data.new_asset_policy_customer);
-    setHoldOther(data.new_asset_policy_other);
+    setPolicy(data.new_asset_policy);
     setBreaker(data.fragility_breaker);
     setConcurrent(data.max_concurrent_monitoring_runs);
   }, [data]);
@@ -43,7 +41,7 @@ export default function MonitoringDefaultsPanel() {
   const save = useMutation({
     mutationFn: () => api.updateMonitoringDefaults({
       capabilities: caps, scan_profile: depth,
-      new_asset_policy_customer: holdCustomer as "auto" | "hold", new_asset_policy_other: holdOther as "auto" | "hold",
+      new_asset_policy: policy,
       fragility_breaker: breaker, max_concurrent_monitoring_runs: concurrent,
     }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["monitoring-defaults"] }),
@@ -71,14 +69,9 @@ export default function MonitoringDefaultsPanel() {
             <option value="standard">Standard</option><option value="thorough">Thorough</option>
           </select>
         </label>
-        <label>New hosts of a customer's systems
-          <select value={holdCustomer} onChange={(e) => setHoldCustomer(e.target.value)}>
+        <label>New hosts found after the baseline
+          <select value={policy} onChange={(e) => setPolicy(e.target.value as "auto" | "hold")}>
             <option value="hold">Hold until released</option><option value="auto">Test when in scope</option>
-          </select>
-        </label>
-        <label>New hosts of your own systems
-          <select value={holdOther} onChange={(e) => setHoldOther(e.target.value)}>
-            <option value="auto">Test when in scope</option><option value="hold">Hold until released</option>
           </select>
         </label>
         <label>Monitoring runs at the same time

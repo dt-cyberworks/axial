@@ -83,3 +83,37 @@ def test_unresolvable_name_fails_closed():
 def test_name_resolving_to_private_ip_is_allowed():
     out = vet_target_host("internal.corp.test", 443, resolver=_resolver("10.0.0.5"))
     assert out == "10.0.0.5"
+
+
+# --- GitHub #77: the IPv6 literal forms and the IPv4 addresses they carry ------------------------
+
+@pytest.mark.parametrize("literal, reason", [
+    ("::1", "blocked_loopback_address"),
+    ("fe80::1", "blocked_link_local_address"),
+    ("fe80::1%eth0", "blocked_link_local_address"),             # a zone id does not hide a link-local address
+    ("::", "blocked_unspecified_address"),
+    ("ff02::1", "blocked_multicast_address"),
+    ("::ffff:127.0.0.1", "blocked_loopback_address"),          # IPv4-mapped loopback
+    ("::ffff:169.254.169.254", "blocked_link_local_address"),  # IPv4-mapped cloud metadata
+    ("64:ff9b::7f00:1", "blocked_loopback_address"),           # NAT64 form of 127.0.0.1
+    ("64:ff9b::a9fe:a9fe", "blocked_link_local_address"),      # NAT64 form of the metadata address
+    ("2002:7f00:1::", "blocked_loopback_address"),             # 6to4 form of 127.0.0.1
+    ("2002:a9fe:a9fe::1", "blocked_link_local_address"),       # 6to4 form of the metadata address
+])
+def test_negative_ipv6_literal_forms_that_reach_a_never_legitimate_address_are_refused(literal, reason):
+    with pytest.raises(BlockedAddressError) as caught:
+        vet_target_host(literal, 443)
+    assert caught.value.reason == reason
+
+
+@pytest.mark.parametrize("literal", ["2606:4700::1111", "fc00::5", "fd12:3456::7", "::ffff:203.0.113.9", "64:ff9b::cb00:7109"])
+def test_ipv6_public_unique_local_and_embedded_public_addresses_stay_allowed(literal):
+    import ipaddress
+
+    assert vet_target_host(literal, 443) == str(ipaddress.ip_address(literal))
+
+
+@pytest.mark.parametrize("bad", ["::1", "fe80::5", "::ffff:127.0.0.1", "64:ff9b::7f00:1", "2002:7f00:1::"])
+def test_negative_a_name_with_one_bad_aaaa_answer_is_refused_whole_even_next_to_a_public_one(bad):
+    with pytest.raises(BlockedAddressError):
+        vet_target_host("scoped.example", 443, resolver=_resolver("2606:4700::1111", "203.0.113.10", bad))

@@ -51,6 +51,7 @@ def start_scan_run(
     scan_profile: str | None = None, trigger: str = "manual", initiated_by: str | None = None,
     supervision: str | None = None, scope_hosts: list[str] | None = None,
     retest_finding_id: uuid.UUID | None = None, schedule_id: uuid.UUID | None = None,
+    retest_items: list[dict] | None = None,
 ) -> ScanRun:
     """Create THE one allowed active scan_run for this engagement, race-safe.
 
@@ -96,12 +97,18 @@ def start_scan_run(
         # REQ-MODE-002: how the run started and how supervised it is.
         trigger=trigger, initiated_by=initiated_by, supervision=supervision,
         schedule_id=schedule_id, scope_hosts=scope_hosts, retest_finding_id=retest_finding_id,
+        retest_items=retest_items,
     )
     try:
         with db.begin_nested():
             db.add(run)
             db.flush()
     except IntegrityError as exc:
+        # Only the one-active-run index means "already active". Any other constraint is a real
+        # error and must say so, not be reported as a race that did not happen.
+        constraint = getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None)
+        if constraint not in (None, "uq_scan_run_one_active_per_engagement"):
+            raise
         raise ScanRunAlreadyActive() from exc
     db.commit()
     db.refresh(run)

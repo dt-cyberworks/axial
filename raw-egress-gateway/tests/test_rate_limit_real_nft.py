@@ -12,6 +12,7 @@ scripts/tests/test_production_exposure.py's own docker-availability skip."""
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 
@@ -130,3 +131,32 @@ def test_two_slots_get_independent_rate_limits_simultaneously(real_policy):
     listing = _nft_list(container)
     assert "limit rate 5/second" in listing
     assert "limit rate 900/second" in listing
+
+
+# --- REQ-RAWLEASE-005: following the proxy to a new address, against the real kernel ---
+
+def _set_members(container: str, name: str) -> str:
+    result = subprocess.run(
+        ["docker", "exec", container, "nft", "list", "set", "inet", TEST_TABLE, name],
+        capture_output=True, text=True, timeout=10,
+    )
+    return result.stdout
+
+
+def test_a_moved_proxy_is_swapped_in_the_real_kernel_set_and_nothing_else_changes(real_policy):
+    policy, container = real_policy
+    policy.initialize()
+    policy.apply(0, "192.0.2.10", [(443, 443)], 60, "tcp", 300)
+    before = _nft_list(container)
+    assert "172.30.0.8" in _set_members(container, "proxy_v4")
+
+    assert policy.refresh_endpoints(proxy_addresses=["172.30.0.9"]) is True
+
+    members = _set_members(container, "proxy_v4")
+    assert "172.30.0.9" in members and "172.30.0.8" not in members
+    after = _nft_list(container)
+    # the lease rule, its rate limit and the deny-all baseline are exactly as they were
+    assert "limit rate 300/second" in after and "policy drop" in after
+    # (an element's expiry timer counts down between the two listings; everything else is identical)
+    mask = lambda text: re.sub(r"expires \S+", "expires T", text)  # noqa: E731
+    assert mask(before).replace("172.30.0.8", "172.30.0.9") == mask(after)

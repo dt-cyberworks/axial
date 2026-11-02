@@ -3,7 +3,7 @@
 **Who this is for:** operators creating an engagement.
 **After this page you can:** say what every step and field of the wizard does, go back and change an earlier step without creating a second engagement, and pick up an unfinished draft.
 
-<!-- ui-labels: Monitor an attack surface | Test a target | What to monitor | Activate monitoring | New engagement | Parties and test window | Title | Emergency contact | Authorized from | Authorized until | Maximum authorized port range (from) | Maximum authorized port range (to) | Advanced options (discovery extras, UDP discovery, Vector Agent, asset review) | Save draft and continue | Save changes and continue | Scope assets | Add scope row | Continue | active | authorization attested | Tool grants | Allow passive | Allow active | Require approval for these active tools | Back | Save scope and tools | Agent and guardrail review | Review authorization | Authorization checklist | Download authorization PDF | Activate engagement | This engagement follows a bug bounty program's rules of engagement -->
+<!-- ui-labels: Monitor an attack surface | Test a target | What to monitor | Activate and discover | New engagement | Parties and test window | Title | Emergency contact | Authorized from | Authorized until | Maximum authorized port range (from) | Maximum authorized port range (to) | Advanced options (discovery extras, UDP discovery, Vector Agent, asset review) | Save draft and continue | Save changes and continue | Scope assets | Add scope row | Continue | active | authorization attested | Tool grants | Allow passive | Allow active | Require approval for these active tools | Back | Save scope and tools | Agent and guardrail review | Review authorization | Authorization checklist | Download authorization PDF | Activate engagement | This engagement follows a bug bounty program's rules of engagement -->
 
 ## The choice (`/new`)
 
@@ -14,6 +14,10 @@ The first screen asks what you want to do. **Monitor an attack surface** opens t
 ## The five steps (test engagement)
 
 The sidebar of the wizard shows the steps: **Window**, **Scope**, **Tools**, **Review**, **Authorize**. You can click back to any earlier step. Nothing is scanned until you authorise and activate the engagement in the last step.
+
+### A draft that came from a monitor
+
+A draft created by **Test deeper** opens in this wizard with a banner on every step: it was prefilled from the monitoring engagement it names, and nothing is authorized until you attest and activate in step 5. The scope is only the hosts you picked and the monitor's deny rules, and the tools are the assessment defaults. See [Test a monitored target in depth](../guides/test-a-monitored-target-in-depth.md).
 
 ### One draft, however often you save
 
@@ -75,10 +79,10 @@ For an engagement that watches a scope on its own. Four steps: **Scope**, **Capa
 
 | Step | What you do |
 |---|---|
-| **Scope** (*What to monitor*) | a name, an emergency contact, the dates of the standing authorization (a year by default), and the allow and deny rows. Tick **I am authorized to test this** on each allow row. Tick *These are a customer's systems* to hold new hosts until you release them |
+| **Scope** (*What to monitor*) | a name, an emergency contact, the dates of the standing authorization (a year by default), and the allow and deny rows. Tick **I am authorized to test this** on each allow row |
 | **Capabilities** | choose how often it runs by itself (every 7 days to begin with, 1 to 90 or off), what it does on every run, the scan depth and the new-host policy; see [Monitor an attack surface](../guides/monitor-an-attack-surface.md#capabilities) |
 | **Alerts** | add a signed webhook |
-| **Authorize** | read *What will run without anyone watching* and *What can never happen*, download the authorization document, then **Activate monitoring** |
+| **Authorize** | read *What will run without anyone watching* and *What can never happen*, download the authorization document, then **Activate and discover**. Activation starts a passive discovery and scans nothing; you then [choose the targets](../guides/monitor-an-attack-surface.md#choose-the-targets) at `/engagements/:id/targets`, and the first scan runs on those |
 
 The monitoring wizard saves a draft after the first step, like the test wizard, and resumes it from `/new?mode=monitoring&draft=<id>`.
 

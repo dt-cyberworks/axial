@@ -34,7 +34,7 @@ Three rules to remember:
 
 1. **Deny always wins.** A `deny` row beats any `allow` row that also matches. Use it for exclusions: allow `example.com`, deny `legacy.example.com`.
 2. **Nothing is allowed by default.** A name or address that no allow row matches is out of scope and receives nothing, including names that discovery finds.
-3. **Values are cleaned.** Domains are lower-cased, a trailing dot is dropped, and addresses are rewritten to their canonical form. Do not enter a URL, a path or an email address; they are rejected. IPv6 is not supported and is rejected with a message.
+3. **Values are cleaned.** Domains are lower-cased, a trailing dot is dropped, and addresses are rewritten to their canonical form. Do not enter a URL, a path or an email address; they are rejected. An IPv6 address or range is not supported as scope and is rejected with a message; the IPv6 addresses of a name you allow are still port-scanned.
 
 Two ticks control what may be done to an allow row:
 
@@ -64,7 +64,7 @@ You are authorised to test `example.com`, but `legacy.example.com` is run by ano
 
 On **Edit engagement → Scope assets** you can add and remove rows at any time. The Scope Gateway reads the scope on every call, so a change applies to the very next request: a new deny row stops the next call to that target, even in a run that is already going. Hosts you excluded in an asset review appear here as deny rows; remove one to include the host again in future scans.
 
-An allow row that overlaps another **active** engagement's allow row is refused, so two engagements cannot both be responsible for the same host. The message tells you to resolve the conflict.
+An allow row that overlaps another **active** engagement's allow row is allowed: both engagements can be active and each request is judged by the authorization of its own engagement. Activation shows a note that names the other engagement and its owner, because the target sees traffic from both. (An installation whose administrator has switched the signed run identity off refuses the overlap instead and asks you to resolve the conflict.)
 
 ## Bug-bounty engagements
 

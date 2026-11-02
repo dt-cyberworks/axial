@@ -190,6 +190,14 @@ services:
       # interpolation here makes it work regardless of which env file was used.
       SCOPE_SIGNING_SECRET: ${SCOPE_SIGNING_SECRET:-change-me-in-dev}
       RAW_EGRESS_SIGNING_SECRET: ${RAW_EGRESS_SIGNING_SECRET:-raw-egress-change-me-in-dev}
+      # REQ-EGRESS-006 (GitHub #81): signs the run identity the egress proxy verifies (held by the control plane and
+      # the proxy only).
+      EGRESS_RUN_TOKEN_SECRET: ${EGRESS_RUN_TOKEN_SECRET:-egress-run-token-change-me-in-dev}
+      EGRESS_RUN_TOKEN_TTL_SECONDS: ${EGRESS_RUN_TOKEN_TTL_SECONDS:-600}
+      # REQ-EGRESS-011: the same switch as the proxy's. When the proxy requires the run token, overlapping engagements
+      # are a notice at activation instead of a refusal. On by default (REQ-EGRESS-014, johannes 2026-10-31); `false`
+      # restores the refusal and the proxy's guessing from the destination.
+      EGRESS_REQUIRE_TOKEN: ${EGRESS_REQUIRE_TOKEN:-true}
       RAW_EGRESS_LEASE_TTL_SECONDS: ${RAW_EGRESS_LEASE_TTL_SECONDS:-900}
       RAW_EGRESS_MATERIALIZATION_MAX_AGE_SECONDS: ${RAW_EGRESS_MATERIALIZATION_MAX_AGE_SECONDS:-900}
       # REQ-IAM-004: encrypts TOTP secrets at rest. No key ships in source -
@@ -201,6 +209,9 @@ services:
       # `make env` generates it too. Empty is rejected in production.
       SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       SETTINGS_ENCRYPTION_KEY_PREVIOUS: ${SETTINGS_ENCRYPTION_KEY_PREVIOUS:-}
+      # REQ-TESTACCT-002 (GitHub #89): encrypts test-account secrets at rest; a third, distinct key. `make env` generates it.
+      TESTACCOUNT_ENCRYPTION_KEY: ${TESTACCOUNT_ENCRYPTION_KEY:-}
+      TESTACCOUNT_ENCRYPTION_KEY_PREVIOUS: ${TESTACCOUNT_ENCRYPTION_KEY_PREVIOUS:-}
       # 300 war zu niedrig: ein Full-Range-Scan (1-65535) eines ueberwiegend
       # gefilterten Hosts erreicht bei 300 pps das --host-timeout (280s), nmap
       # bricht den Host ab und meldet 0 offene Ports. Bei 1000 pps laeuft der
@@ -218,8 +229,6 @@ services:
       DB_POOL_TIMEOUT_SECONDS: ${DB_POOL_TIMEOUT_SECONDS:-10}
       INTERNAL_BULK_DB_SLOTS: ${INTERNAL_BULK_DB_SLOTS:-4}
       INTERNAL_BULK_WAIT_SECONDS: ${INTERNAL_BULK_WAIT_SECONDS:-3}
-      # REQ-MON-003: how many scheduled monitoring runs may execute at once on this installation.
-      MONITORING_MAX_CONCURRENT_RUNS: ${MONITORING_MAX_CONCURRENT_RUNS:-1}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs:8333}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-asm-dev-access}
@@ -292,6 +301,13 @@ services:
       # Verfuegbar nur wenn das Lease-Gateway erreichbar ist und seine
       # deny-all nftables-Policy bestaetigt. Ohne runner-Profil bleibt es aus.
       ASM_RAW_NETWORK_MODE: lease-gateway
+      # REQ-SCAN-017 (GitHub #77): port-scan the IPv6 addresses of a host too (nmap -6). `false` records them as
+      # skipped (`ipv6_scanning_off`) instead - for a scanner network that carries no IPv6.
+      NMAP_SCAN_IPV6: ${NMAP_SCAN_IPV6:-true}
+      # REQ-EGRESS-008 (GitHub #81): present a signed run token to the egress proxy as proxy credentials. On by default
+      # (REQ-EGRESS-014); it must be on whenever the proxy requires the token. An OLDER proxy would forward the credentials
+      # to a plain-HTTP target, so never run this worker against a proxy image from before #81.
+      EGRESS_RUN_TOKENS: ${EGRESS_RUN_TOKENS:-true}
       # REQ-AGENT-026 already moved the code-level default to 8192; this
       # compose default had drifted and stayed at the pre-026 value of 4096
       # (found live 2026-08-11 while debugging REQ-AGENT-026's retry-ceiling
@@ -335,6 +351,18 @@ services:
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-in-dev}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       EGRESS_MAX_CONCURRENT_CLIENTS: ${EGRESS_MAX_CONCURRENT_CLIENTS:-64}
+      # REQ-EGRESS-012/013 (GitHub #81 step 4): fair use of the slots above between engagements, and an optional cap on
+      # parallel requests to one destination (0 = off).
+      EGRESS_RESERVED_SLOTS: ${EGRESS_RESERVED_SLOTS:-8}
+      EGRESS_MIN_SHARE_SLOTS: ${EGRESS_MIN_SHARE_SLOTS:-4}
+      EGRESS_SHARE_WINDOW_SECONDS: ${EGRESS_SHARE_WINDOW_SECONDS:-30}
+      EGRESS_MAX_CONCURRENT_PER_DESTINATION: ${EGRESS_MAX_CONCURRENT_PER_DESTINATION:-0}
+      EGRESS_DESTINATION_WAIT_SECONDS: ${EGRESS_DESTINATION_WAIT_SECONDS:-20}
+      # REQ-EGRESS-006/007/009 (GitHub #81): verifies the signed run identity; with EGRESS_REQUIRE_TOKEN=true (the default,
+      # REQ-EGRESS-014) a request without one is refused and the X-ASM-Engagement-Id header is ignored; `false` is the
+      # migration mode that keeps both.
+      EGRESS_RUN_TOKEN_SECRET: ${EGRESS_RUN_TOKEN_SECRET:-egress-run-token-change-me-in-dev}
+      EGRESS_REQUIRE_TOKEN: ${EGRESS_REQUIRE_TOKEN:-true}
     # ctrl: liest scope_asset/engagement direkt (Kap. 6). egress: Bruecke
     # nach draussen. runner: muss vom tool-runner erreichbar sein - im
     # Original-Listing 2 der Deployment-Architektur fehlt diese Bruecke,
@@ -363,6 +391,9 @@ services:
       RAW_EGRESS_MAX_CONCURRENT_LEASES: ${RAW_EGRESS_MAX_CONCURRENT_LEASES:-2}
       EGRESS_PROXY_HOST: egress-proxy
       EGRESS_PROXY_PORT: 3128
+      # REQ-RAWLEASE-005: how often the proxy's / interaction server's address is looked up again (seconds), so the
+      # policy follows them when their containers are recreated.
+      RAW_EGRESS_ENDPOINT_REFRESH_SECONDS: ${RAW_EGRESS_ENDPOINT_REFRESH_SECONDS:-2}
       # REQ-COVER-004: the self-hosted interaction server (profile `oob`).
       # The gateway lets the runner's namespace reach ONLY this address on ONE
       # port; if the server is not running the gateway simply runs without it.
